@@ -16,8 +16,9 @@ import pandas as pd
 
 from typing import List
 
-import logging
-import lmdb
+import json
+# import logging
+# import lmdb
 import pickle
 from functools import lru_cache
 # log = utils.get_pylogger(__name__)
@@ -40,19 +41,19 @@ CHARGE_TO_SYMBOL = {
     }
 
 
-URL_USPTO = "https://zenodo.org/records/17766755/files/uspto.tar.gz?download=1"
+# URL_USPTO = "https://zenodo.org/records/17766755/files/uspto.tar.gz?download=1"
 
-target_dir = "../data/uspto/"
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    handlers=[
-        logging.StreamHandler(),  # 输出到 terminal
-        logging.FileHandler(osp.join(target_dir, "preprocess.log"), mode="a"),  # 保存到文件
-    ],
-)
+# target_dir = "../data/uspto/"
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+#     handlers=[
+#         logging.StreamHandler(),  # 输出到 terminal
+#         logging.FileHandler(osp.join(target_dir, "preprocess.log"), mode="a"),  # 保存到文件
+#     ],
+# )
 
-log = logging.getLogger(__name__)
+# log = logging.getLogger(__name__)
 
 def process_atoms(
     atom_idx: np.ndarray, 
@@ -164,8 +165,6 @@ def is_neural_molecule(mol: Chem.Mol | str):
         return False
     return True
 
-
-
 def _format_uspto_mol_idx(mol_idx) -> str:
     if isinstance(mol_idx, bytes):
         mol_idx = mol_idx.decode("utf-8")
@@ -276,25 +275,6 @@ def read_uspto_h5(
     indices["exported_test_count"] = np.asarray(split_counts.get("test", 0), dtype=np.int64)
     np.savez(osp.join(save_dir, "indices.npz"), **indices)
 
-def read_parquet_to_nmr_peaks(df: pd.DataFrame):
-    data_list =[]
-    for _, row in df.iterrows():
-        h_nmr_peaks, c_nmr_peaks = [], []
-        
-        for peak in row['h_nmr_peaks']:
-            h_nmr_peaks.append(peak['delta'])
-        for peak in row['c_nmr_peaks']:
-            c_nmr_peaks.append(peak['delta (ppm)'])
-        
-
-        data = Data(
-            smiles=row['smiles'],
-            h_nmr = torch.tensor(sorted(h_nmr_peaks)),
-            c_nmr = torch.tensor(sorted(c_nmr_peaks)),
-        )
-
-        data_list.append(data)
-    return data_list
 
 def read_parquets(
     parquet_dir='../data/uspto/download/data/multimodal_spectroscopic_dataset',
@@ -406,7 +386,7 @@ def preprocess_uspto():
         num_mol = 0
         num_entries = 0
 
-        split_metrics = USPTOPreprocessMetrics(summarize_hidden=True, hidden_prefix="")
+        # split_metrics = USPTOPreprocessMetrics(summarize_hidden=True, hidden_prefix="")
      
         with h5py.File(h5_file_path, 'r', swmr=True) as f:
             for mol_idx in tqdm(f, total=len(f), desc=f"Processing {split} molecules", unit="mol"):
@@ -529,7 +509,7 @@ def preprocess_uspto():
         del split_metrics
         agg_infos['num_mol'] = num_mol
         agg_infos['num_entries'] = num_entries
-        save_json(agg_infos, infos_path)
+        # save_json(agg_infos, infos_path)
 
         pt_path = osp.join(save_dir, f"{split}.pt")
         torch.save(split_list, pt_path)
@@ -539,12 +519,131 @@ def preprocess_uspto():
             "heavy_atom_count": heavy_atom_count,
             "total_heavy_atoms_count": total_heavy_atoms_count
         }
-    save_json(heavy_atom_info, osp.join(save_dir, "heavy_atom_info.json"))
-    save_json(invalid_mol, osp.join(save_dir, "invalid_mol.json"))
 
+BOND_TYPE_TO_idx = {
+    Chem.BondType.SINGLE: 1,
+    Chem.BondType.DOUBLE: 2,
+    Chem.BondType.TRIPLE: 3,
+    Chem.BondType.AROMATIC: 4,
+    }
+
+def get_local_label(atom: Chem.Atom, mol: Chem.Mol=None):
+    """
+    return: [is_aromatic, num_neighbor_H, heavy_atom_neighbor1, bond1, ...]
+        is_aromatic: bool
+        neighbor1: int
+        bond1: int
+        ...
+    """
+    is_aromatic = int(atom.GetIsAromatic())
+    num_neighbor_H = 0
+
+    neighbors = []
+    for neighbor in atom.GetNeighbors():
+        neighbor_charge = neighbor.GetAtomicNum()
+        if neighbor_charge == 1:
+            num_neighbor_H += 1
+            continue
+        bond = mol.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
+        bond_type_idx = BOND_TYPE_TO_idx[bond.GetBondType()]
+        neighbors.append([neighbor_charge, bond_type_idx])
+    
+    neighbors = sorted(neighbors, key=lambda x: (x[0], x[1]))
+    label = f"{is_aromatic}{num_neighbor_H}"
+    for neighbor in neighbors:
+        label += f"{neighbor[0]}{neighbor[1]}"
+    # print(label)
+    return label
+
+def smiles_to_local_label(smiles: str):
+    
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"Invalid SMILES: {smiles}")
+    
+    mol=Chem.AddHs(mol)
+    charge_labels = {}
+    for atom in mol.GetAtoms():
+        charge = atom.GetAtomicNum()
+        if charge == 1:
+            continue
+        if charge not in charge_labels:
+            charge_labels[charge] = {}
+        
+        label = get_local_label(atom, mol)
+        if label not in charge_labels[charge]:
+            charge_labels[charge][label] = 0
+
+        charge_labels[charge][label] += 1
+    
+    # print(smiles)
+    # print(charge_labels)
+    # raise ValueError("Stop here")
+    
+    return charge_labels
+
+def build_label_vocab(parquet_dir: str, save_dir: str='./'):
+    parquet_files = sorted(os.listdir(parquet_dir), key=lambda x: int(x.split('.')[0].split('_')[-1]))
+    charge_labels = {}
+    for file in tqdm(parquet_files, total=len(parquet_files), desc="Reading parquet files", unit="file"):
+        df = pd.read_parquet(osp.join(parquet_dir, file))
+        smiles = df['smiles'].tolist()
+        for smile in smiles:
+            charge_labels_i = smiles_to_local_label(smile)
+            for charge, label in charge_labels_i.items():
+                if charge not in charge_labels:
+                    charge_labels[charge] = {}
+                for label, count in label.items():
+                    if label not in charge_labels[charge]:
+                        charge_labels[charge][label] = 0
+                    charge_labels[charge][label] += count
+    sorted_charge_labels = {
+        str(charge): dict(sorted(labels.items(), key=lambda x: (-x[1], x[0])))
+        for charge, labels in sorted(charge_labels.items())
+    }
+    with open(osp.join(save_dir, 'label_vocab.json'), 'w') as f:
+        json.dump(sorted_charge_labels, f, indent=4)
+    
+    
+
+def preprocess_parquet(df: pd.DataFrame):
+    """
+    columns:
+      ['smiles', 'hsqc_nmr_peaks', 'hsqc_nmr_spectrum', 'h_nmr_peaks',
+       'h_nmr_spectra', 'molecular_formula', 'c_nmr_peaks', 'ir_spectra',
+       'msms_cfmid_positive_10ev', 'msms_cfmid_positive_20ev',
+       'msms_cfmid_positive_40ev', 'msms_cfmid_fragments_positive',
+       'msms_cfmid_negative_10ev', 'msms_cfmid_negative_20ev',
+       'msms_cfmid_negative_40ev', 'msms_cfmid_fragments_negative',
+       'c_nmr_spectra', 'msms_iceberg_positive',
+       'msms_iceberg_fragments_positive', 'msms_scarf_positive',
+       'msms_scarf_fragments_positive']
+    """
+    data_list =[]
+    charge_labels = {}
+    for _, row in df.iterrows():
+        h_nmr_peaks, c_nmr_peaks = [], []
+        
+        for peak in row['h_nmr_peaks']:
+            h_nmr_peaks.append(peak['delta'])
+        for peak in row['c_nmr_peaks']:
+            c_nmr_peaks.append(peak['delta (ppm)'])
+        
+
+        data = Data(
+            smiles=row['smiles'],
+            h_nmr = torch.tensor(sorted(h_nmr_peaks)),
+            c_nmr = torch.tensor(sorted(c_nmr_peaks)),
+        )
+
+        data_list.append(data)
+    return data_list
 
 if __name__ == '__main__':
-    parquet_dir = ""
+    # parquet_dir = "./exp_data/example_data_1.parquet"
+    # df = pd.read_parquet(parquet_dir)
+    # print(df.columns)
+    build_label_vocab('./exp_data/')
     # read_parquets()
     # preprocess_uspto()
 
