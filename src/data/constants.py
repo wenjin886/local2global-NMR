@@ -21,10 +21,11 @@ NUM_BOND_TYPES = 5  # none, single, double, triple, aromatic
 # genuinely missing metadata, and out-of-vocabulary values distinct.
 MULTIPLICITY_VOCAB = [
     "<pad>", "<missing>", "<unk>",
-    "s", "d", "t", "q", "p", "hept", "m",
+    "s", "d", "t", "q", "p", "hept", "m", "h",
     "dd", "dt", "td", "ddd", "dq", "qd", "tt", "qt", "tq",
     "dddd", "ddt", "dtd", "dtt", "dqt", "dp", "pd", "pt",
     "ddtd", "ddq", "dddt", "ddddt", "dttt", "heptd", "dh",
+    "dqd"
 ]
 MULTIPLICITY_TO_INDEX = {
     value: index for index, value in enumerate(MULTIPLICITY_VOCAB)

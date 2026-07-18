@@ -739,7 +739,7 @@ def preprocess_uspto(parquet_dir: str, save_dir: str=None):
     
 
 if __name__ == '__main__':
-    parquet_dir = "../data/uspto/exp_data/"
+    parquet_dir = "./data/uspto/exp_data/"
     # df = pd.read_parquet(parquet_dir)
     # preprocess_parquet(df)
     preprocess_uspto(parquet_dir)
