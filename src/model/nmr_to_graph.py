@@ -5,7 +5,7 @@ from torch import nn
 
 from src.data.constants import BOND_TYPE_CANDIDATES, HEAVY_ATOM_TYPES
 from src.nn.attention import MaskedCrossAttentionBlock, MaskedSelfAttentionEncoder
-from src.nn.embedding import AtomSlotEmbedding, NMRPeakEmbedding
+from src.nn.embedding import AtomSlotEmbedding, CNMRPeakEmbedding, HNMRPeakEmbedding
 from src.nn.graph import (
     AtomInteractionBlock,
     FactorizedFragmentReadout,
@@ -40,6 +40,9 @@ class NMRToGraph(nn.Module):
             max_fragment_count: int = 4,
             attachment_dim: int = 128,
             attachment_temperature: float = 0.1,
+            use_h_integration: bool = True,
+            use_h_multiplicity: bool = True,
+            use_h_j: bool = True,
             dropout: float = 0.0,
     ):
         super().__init__()
@@ -49,7 +52,15 @@ class NMRToGraph(nn.Module):
             max_num_atoms=max_num_atoms,
             dropout=dropout,
         )
-        self.peak_embedding = NMRPeakEmbedding(
+        self.h_peak_embedding = HNMRPeakEmbedding(
+            hidden_dim=hidden_dim,
+            num_fourier_features=num_fourier_features,
+            use_integration=use_h_integration,
+            use_multiplicity=use_h_multiplicity,
+            use_j=use_h_j,
+            dropout=dropout,
+        )
+        self.c_peak_embedding = CNMRPeakEmbedding(
             hidden_dim=hidden_dim,
             num_fourier_features=num_fourier_features,
             dropout=dropout,
@@ -116,25 +127,14 @@ class NMRToGraph(nn.Module):
 
     @staticmethod
     def _combine_spectra(
-            h_nmr: torch.Tensor,
+            h_features: torch.Tensor,
             h_nmr_mask: torch.Tensor,
-            c_nmr: torch.Tensor,
+            c_features: torch.Tensor,
             c_nmr_mask: torch.Tensor,
-            h_nmr_integration: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if h_nmr_integration is None:
-            h_nmr_integration = torch.ones_like(h_nmr)
-        c_nmr_integration = torch.ones_like(c_nmr)
-
-        shifts = torch.cat([h_nmr, c_nmr], dim=1)
-        integrations = torch.cat([h_nmr_integration, c_nmr_integration], dim=1)
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        features = torch.cat([h_features, c_features], dim=1)
         peak_mask = torch.cat([h_nmr_mask, c_nmr_mask], dim=1)
-        nucleus_types = torch.cat([
-            torch.ones_like(h_nmr, dtype=torch.long),
-            torch.full_like(c_nmr, fill_value=2, dtype=torch.long),
-        ], dim=1)
-        nucleus_types = nucleus_types * peak_mask.long()
-        return shifts, nucleus_types, integrations, peak_mask
+        return features, peak_mask
 
     def forward(
             self,
@@ -145,6 +145,11 @@ class NMRToGraph(nn.Module):
             c_nmr: torch.Tensor,
             c_nmr_mask: torch.Tensor,
             h_nmr_integration: Optional[torch.Tensor] = None,
+            h_nmr_integration_mask: Optional[torch.Tensor] = None,
+            h_nmr_multiplicity: Optional[torch.Tensor] = None,
+            h_nmr_multiplicity_mask: Optional[torch.Tensor] = None,
+            h_nmr_j: Optional[torch.Tensor] = None,
+            h_nmr_j_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, object]:
         atom_mask = atom_mask.bool()
         h_nmr_mask = h_nmr_mask.bool()
@@ -152,17 +157,22 @@ class NMRToGraph(nn.Module):
         heavy_mask = atom_mask & atom_types.ne(1)
         hydrogen_mask = atom_mask & atom_types.eq(1)
 
-        shifts, nucleus_types, integrations, peak_mask = self._combine_spectra(
-            h_nmr=h_nmr,
-            h_nmr_mask=h_nmr_mask,
-            c_nmr=c_nmr,
-            c_nmr_mask=c_nmr_mask,
-            h_nmr_integration=h_nmr_integration,
+        h_peak_features = self.h_peak_embedding(
+            shifts=h_nmr,
+            peak_mask=h_nmr_mask,
+            integrations=h_nmr_integration,
+            integration_mask=h_nmr_integration_mask,
+            multiplicities=h_nmr_multiplicity,
+            multiplicity_mask=h_nmr_multiplicity_mask,
+            j_values=h_nmr_j,
+            j_mask=h_nmr_j_mask,
         )
-        peak_features = self.peak_embedding(
-            shifts=shifts,
-            nucleus_types=nucleus_types,
-            integrations=integrations,
+        c_peak_features = self.c_peak_embedding(c_nmr, c_nmr_mask)
+        peak_features, peak_mask = self._combine_spectra(
+            h_features=h_peak_features,
+            h_nmr_mask=h_nmr_mask,
+            c_features=c_peak_features,
+            c_nmr_mask=c_nmr_mask,
         )
         peak_features, spectrum_attention = self.spectrum_encoder(
             peak_features,
@@ -244,6 +254,8 @@ class NMRToGraph(nn.Module):
             "heavy_query_features": atom_features,
             "graph_atom_features": refined_atom_features,
             "peak_features": peak_features,
+            "h_peak_features": h_peak_features,
+            "c_peak_features": c_peak_features,
             "heavy_mask": heavy_mask,
             "hydrogen_mask": hydrogen_mask,
             "heavy_edge_logits": edge_logits,

@@ -1,114 +1,142 @@
+from collections import Counter
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
-import pandas as pd
-from torch_geometric.data import Data
-from .base import Metrics, discrete_histogram, ContextMetrics, read_json
+
+from src.data.constants import MULTIPLICITY_VOCAB
+from .base import Metrics, read_json
+
+
+def _values(tensor, mask=None):
+    array = tensor.detach().cpu().numpy()
+    if mask is not None:
+        array = array[mask.detach().cpu().numpy().astype(bool)]
+    return np.asarray(array).reshape(-1).tolist()
+
+
+def _continuous_summary(values, prefix):
+    array = np.asarray(values, dtype=np.float64)
+    if array.size == 0:
+        return {
+            f"{prefix}_count": 0,
+            f"{prefix}_min": 0.0,
+            f"{prefix}_max": 0.0,
+            f"{prefix}_mean": 0.0,
+            f"{prefix}_std": 1.0,
+            f"{prefix}_median": 0.0,
+        }
+    return {
+        f"{prefix}_count": int(array.size),
+        f"{prefix}_min": round(float(array.min()), 6),
+        f"{prefix}_max": round(float(array.max()), 6),
+        f"{prefix}_mean": round(float(array.mean()), 6),
+        f"{prefix}_std": round(float(array.std()), 6) or 1.0,
+        f"{prefix}_median": round(float(np.median(array)), 6),
+    }
+
 
 class USPTOPreprocessMetrics(Metrics):
-    def __init__(self,
-                 json_path: Optional[str | Path] = None,
-                 summarize_hidden: bool = False,
-                 hidden_prefix: str = "_"):
+    """Accumulate training-set statistics for NMR preprocessing.
 
-        self.encoder = {s: idx for idx, s in enumerate(atom_types_str)}
-        self.max_num_atoms = 0
-        self.max_num_heavy_atoms = 0
-        self.max_neighbor_type_cout = 0
+    Multiplicity is categorical, so its vocabulary and histogram are recorded;
+    z-score statistics are recorded only for continuous quantities.
+    """
 
-        if json_path:
-            dataset_infos = read_json(json_path=json_path)
-            ref_smiles = set(dataset_infos.get("smiles"))
-            ref_atom_hist = np.array(dataset_infos.get("atom_hist"))
-        else:
-            ref_smiles = set([])
-            ref_atom_hist = None
-
-        self.ref_smiles = ref_smiles
-        self.ref_atom_hist = ref_atom_hist
-
-        self.summarize_hidden = summarize_hidden
-        self.hidden_prefix = hidden_prefix
-
-
-        self.hnmr_shifts = ...
-        self.cnmr_shifts = ...
-        self.n_hnmr_shifts_per_mol = ...
-        self.n_cnmr_shifts_per_mol = ...
-
+    def __init__(
+            self,
+            json_path: Optional[Union[str, Path]] = None,
+            summarize_hidden: bool = False,
+            hidden_prefix: str = "_",
+    ):
+        dataset_infos = read_json(json_path) if json_path else {}
+        self.ref_smiles = set(dataset_infos.get("smiles", []))
+        self.ref_atom_hist = dataset_infos.get("atom_hist")
+        self.prefix = hidden_prefix if summarize_hidden else ""
         self.reset()
 
-    def update(self, data: list[Data] | Data):
-        if isinstance(data, Data):
+    def update(self, data):
+        if not isinstance(data, (list, tuple)):
             data = [data]
-
-        for d in data:
-            num_atoms = d.h.shape[0]
-            if num_atoms > self.max_num_atoms:
-                self.max_num_atoms = num_atoms
-            
-            heavy_mask =  (d.h > 1)
-            num_heavy_atoms = heavy_mask.sum()
-            if num_heavy_atoms > self.max_num_heavy_atoms:
-                self.max_num_heavy_atoms = num_heavy_atoms
-            
-            fragment_labels = (
-                d.heavy_fragment_labels
-                if hasattr(d, "heavy_fragment_labels")
-                else d.heavy_atom_local_labels
+        for item in data:
+            num_atoms = int(item.h.shape[0])
+            self.max_num_atoms = max(self.max_num_atoms, num_atoms)
+            self.max_num_heavy_atoms = max(
+                self.max_num_heavy_atoms, int(item.h.ne(1).sum().item())
             )
-            max_count = fragment_labels.max()
-            if max_count > self.max_neighbor_type_cout:
-                self.max_neighbor_type_cout = max_count
-            
 
-            h_nmr = d.h_nmr.tolist()
-            self.hnmr_shifts.extend(h_nmr)
-            self.n_hnmr_shifts_per_mol.append(len(h_nmr))
+            fragment_labels = getattr(
+                item, "heavy_fragment_labels",
+                getattr(item, "heavy_atom_local_labels", None),
+            )
+            if fragment_labels is not None and fragment_labels.numel():
+                valid = fragment_labels[fragment_labels.ge(0)]
+                if valid.numel():
+                    self.max_neighbor_type_count = max(
+                        self.max_neighbor_type_count, int(valid.max().item())
+                    )
 
-            c_nmr = d.c_nmr.tolist()
-            self.cnmr_shifts.extend(c_nmr)
-            self.n_cnmr_shifts_per_mol.append(len(c_nmr))
+            self.hnmr_shifts.extend(_values(item.h_nmr))
+            self.cnmr_shifts.extend(_values(item.c_nmr))
+            self.n_hnmr_shifts_per_mol.append(int(item.h_nmr.numel()))
+            self.n_cnmr_shifts_per_mol.append(int(item.c_nmr.numel()))
+
+            if hasattr(item, "h_nmr_integration"):
+                mask = getattr(item, "h_nmr_integration_mask", None)
+                self.hnmr_integrations.extend(_values(item.h_nmr_integration, mask))
+            if hasattr(item, "h_nmr_j"):
+                mask = getattr(item, "h_nmr_j_mask", None)
+                self.hnmr_j_values.extend(_values(item.h_nmr_j, mask))
+                if mask is not None:
+                    self.n_j_values_per_peak.extend(
+                        mask.sum(dim=-1).detach().cpu().tolist()
+                    )
+            if hasattr(item, "h_nmr_multiplicity"):
+                ids = item.h_nmr_multiplicity.detach().cpu().reshape(-1).tolist()
+                mask = getattr(item, "h_nmr_multiplicity_mask", None)
+                if mask is not None:
+                    keep = mask.detach().cpu().reshape(-1).tolist()
+                    ids = [value for value, valid in zip(ids, keep) if valid]
+                self.multiplicity_counts.update(int(value) for value in ids)
 
     def summarize(self) -> dict:
-  
-        summary = {}
-        summary["max_num_atoms"] = self.max_num_atoms
-
-
-        # print(self.hnmr_shifts)
-        self.hnmr_shifts = np.array(self.hnmr_shifts)
-        self.cnmr_shifts = np.array(self.cnmr_shifts)
-        self.n_hnmr_shifts_per_mol = np.array(self.n_hnmr_shifts_per_mol)
-        self.n_cnmr_shifts_per_mol = np.array(self.n_cnmr_shifts_per_mol)
-        
-        summary[f"{self.hidden_prefix}hnmr_shift_min"] = round(float(np.min(self.hnmr_shifts)), 4)
-        summary[f"{self.hidden_prefix}hnmr_shift_max"] = round(float(np.max(self.hnmr_shifts)), 4)    
-        summary[f"{self.hidden_prefix}hnmr_shift_mean"] = round(float(np.mean(self.hnmr_shifts)), 4)
-        summary[f"{self.hidden_prefix}hnmr_shift_std"] = round(float(np.std(self.hnmr_shifts)), 4)
-        summary[f"{self.hidden_prefix}hnmr_shift_median"] = round(float(np.median(self.hnmr_shifts)), 4)
-
-        summary[f"{self.hidden_prefix}cnmr_shift_min"] = round(float(np.min(self.cnmr_shifts)), 4)
-        summary[f"{self.hidden_prefix}cnmr_shift_max"] = round(float(np.max(self.cnmr_shifts)), 4)
-        summary[f"{self.hidden_prefix}cnmr_shift_mean"] = round(float(np.mean(self.cnmr_shifts)), 4)
-        summary[f"{self.hidden_prefix}cnmr_shift_std"] = round(float(np.std(self.cnmr_shifts)), 4)
-        summary[f"{self.hidden_prefix}cnmr_shift_median"] = round(float(np.median(self.cnmr_shifts)), 4)
-
-        summary[f"{self.hidden_prefix}n_hnmr_shifts_per_mol_min"] = int(np.min(self.n_hnmr_shifts_per_mol))
-        summary[f"{self.hidden_prefix}n_hnmr_shifts_per_mol_max"] = int(np.max(self.n_hnmr_shifts_per_mol))
-
-        summary[f"{self.hidden_prefix}n_cnmr_shifts_per_mol_min"] = int(np.min(self.n_cnmr_shifts_per_mol))
-        summary[f"{self.hidden_prefix}n_cnmr_shifts_per_mol_max"] = int(np.max(self.n_cnmr_shifts_per_mol))
-
-        # print(summary)
-        
-
+        p = self.prefix
+        summary = {
+            "max_num_atoms": self.max_num_atoms,
+            "max_num_heavy_atoms": self.max_num_heavy_atoms,
+            "max_neighbor_type_count": self.max_neighbor_type_count,
+            f"{p}hnmr_multiplicity_vocab": MULTIPLICITY_VOCAB,
+            f"{p}hnmr_multiplicity_hist": [
+                self.multiplicity_counts.get(index, 0)
+                for index in range(len(MULTIPLICITY_VOCAB))
+            ],
+        }
+        summary.update(_continuous_summary(self.hnmr_shifts, f"{p}hnmr_shift"))
+        summary.update(_continuous_summary(self.cnmr_shifts, f"{p}cnmr_shift"))
+        summary.update(_continuous_summary(
+            self.hnmr_integrations, f"{p}hnmr_integration"
+        ))
+        summary.update(_continuous_summary(self.hnmr_j_values, f"{p}hnmr_j"))
+        summary.update(_continuous_summary(
+            self.n_j_values_per_peak, f"{p}hnmr_j_count"
+        ))
+        summary.update(_continuous_summary(
+            self.n_hnmr_shifts_per_mol, f"{p}n_hnmr_shifts_per_mol"
+        ))
+        summary.update(_continuous_summary(
+            self.n_cnmr_shifts_per_mol, f"{p}n_cnmr_shifts_per_mol"
+        ))
         return summary
 
     def reset(self):
-
+        self.max_num_atoms = 0
+        self.max_num_heavy_atoms = 0
+        self.max_neighbor_type_count = 0
         self.hnmr_shifts = []
         self.cnmr_shifts = []
+        self.hnmr_integrations = []
+        self.hnmr_j_values = []
+        self.n_j_values_per_peak = []
         self.n_hnmr_shifts_per_mol = []
         self.n_cnmr_shifts_per_mol = []
+        self.multiplicity_counts = Counter()

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
@@ -16,15 +16,21 @@ class NMRGraphDataModule(pl.LightningDataModule):
             val_batch_size: int = 64,
             num_workers: int = 4,
             pin_memory: bool = True,
+            transform: Optional[Any] = None,
     ):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["transform"])
+        self.transform = transform
 
     def setup(self, stage: Optional[str] = None) -> None:
-        self.train_dataset = NMRGraphDataset(self.hparams.train_path)
-        self.val_dataset = NMRGraphDataset(self.hparams.val_path)
+        self.train_dataset = NMRGraphDataset(
+            self.hparams.train_path, transform=self.transform
+        )
+        self.val_dataset = NMRGraphDataset(
+            self.hparams.val_path, transform=self.transform
+        )
         self.test_dataset = (
-            NMRGraphDataset(self.hparams.test_path)
+            NMRGraphDataset(self.hparams.test_path, transform=self.transform)
             if self.hparams.test_path
             else None
         )

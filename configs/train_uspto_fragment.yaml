@@ -20,6 +20,13 @@ datamodule:
   val_batch_size: 64
   num_workers: 4
   pin_memory: true
+  transform:
+    _target_: src.data.transforms.NormalizeNMR
+    stats_path: ${data_path}/dataset_infos.json
+    normalize_h_shift: true
+    normalize_c_shift: true
+    normalize_h_integration: true
+    normalize_h_j: true
 
 lit_module:
   _target_: src.lit.module.LitNMRToGraph
@@ -36,6 +43,9 @@ lit_module:
     max_fragment_count: 4
     attachment_dim: 128
     attachment_temperature: 0.1
+    use_h_integration: true
+    use_h_multiplicity: true
+    use_h_j: true
     dropout: 0.1
   criterion:
     _target_: src.model.loss.NMRGraphLoss

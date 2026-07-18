@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 import torch
 
+from src.data.constants import MAX_J_VALUES, MULTIPLICITY_MISSING_INDEX
 from src.data.dataset import graph_targets_from_smiles
 
 
@@ -23,13 +24,45 @@ def build_graph_dataset(input_path: str, output_path: str) -> None:
         targets = graph_targets_from_smiles(smiles)
         h_nmr = torch.as_tensor(get_value(item, "h_nmr"), dtype=torch.float)
         integration = get_value(item, "h_nmr_integration")
+        integration_is_available = integration is not None
         if integration is None:
-            integration = torch.ones_like(h_nmr)
+            integration = torch.zeros_like(h_nmr)
+        integration_mask = get_value(item, "h_nmr_integration_mask")
+        if integration_mask is None:
+            integration_mask = torch.full_like(
+                h_nmr, integration_is_available, dtype=torch.bool
+            )
+        multiplicity = get_value(item, "h_nmr_multiplicity")
+        multiplicity_is_available = multiplicity is not None
+        if multiplicity is None:
+            multiplicity = torch.full_like(
+                h_nmr, MULTIPLICITY_MISSING_INDEX, dtype=torch.long
+            )
+        multiplicity_mask = get_value(item, "h_nmr_multiplicity_mask")
+        if multiplicity_mask is None:
+            multiplicity_mask = torch.full_like(
+                h_nmr, multiplicity_is_available, dtype=torch.bool
+            )
+        j_values = get_value(item, "h_nmr_j")
+        if j_values is None:
+            j_values = torch.zeros((h_nmr.numel(), MAX_J_VALUES))
+        j_mask = get_value(item, "h_nmr_j_mask")
+        if j_mask is None:
+            j_mask = torch.as_tensor(j_values).ne(0)
         processed.append({
             "smiles": smiles,
             "h": targets["h"],
             "h_nmr": h_nmr,
             "h_nmr_integration": torch.as_tensor(integration, dtype=torch.float),
+            "h_nmr_integration_mask": torch.as_tensor(
+                integration_mask, dtype=torch.bool
+            ),
+            "h_nmr_multiplicity": torch.as_tensor(multiplicity, dtype=torch.long),
+            "h_nmr_multiplicity_mask": torch.as_tensor(
+                multiplicity_mask, dtype=torch.bool
+            ),
+            "h_nmr_j": torch.as_tensor(j_values, dtype=torch.float),
+            "h_nmr_j_mask": torch.as_tensor(j_mask, dtype=torch.bool),
             "c_nmr": torch.as_tensor(get_value(item, "c_nmr"), dtype=torch.float),
             "bond_types": targets["bond_types"],
             "h_attachment": targets["h_attachment"],

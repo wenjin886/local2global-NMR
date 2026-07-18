@@ -5,7 +5,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 import torch
 from torch.utils.data import Dataset
 
-from .constants import BOND_TYPE_CANDIDATES
+from .constants import (
+    BOND_TYPE_CANDIDATES,
+    MAX_J_VALUES,
+    MULTIPLICITY_MISSING_INDEX,
+)
 
 
 BOND_TYPE_TO_INDEX = {
@@ -163,6 +167,11 @@ class GraphSample:
     h_nmr: torch.Tensor
     c_nmr: torch.Tensor
     h_nmr_integration: torch.Tensor
+    h_nmr_integration_mask: torch.Tensor
+    h_nmr_multiplicity: torch.Tensor
+    h_nmr_multiplicity_mask: torch.Tensor
+    h_nmr_j: torch.Tensor
+    h_nmr_j_mask: torch.Tensor
     bond_types: torch.Tensor
     h_attachment: torch.Tensor
     heavy_fragment_labels: torch.Tensor
@@ -178,6 +187,11 @@ class GraphBatch:
     h_nmr: torch.Tensor
     h_nmr_mask: torch.Tensor
     h_nmr_integration: torch.Tensor
+    h_nmr_integration_mask: torch.Tensor
+    h_nmr_multiplicity: torch.Tensor
+    h_nmr_multiplicity_mask: torch.Tensor
+    h_nmr_j: torch.Tensor
+    h_nmr_j_mask: torch.Tensor
     c_nmr: torch.Tensor
     c_nmr_mask: torch.Tensor
     bond_types: torch.Tensor
@@ -201,6 +215,11 @@ class GraphBatch:
             "h_nmr": self.h_nmr,
             "h_nmr_mask": self.h_nmr_mask,
             "h_nmr_integration": self.h_nmr_integration,
+            "h_nmr_integration_mask": self.h_nmr_integration_mask,
+            "h_nmr_multiplicity": self.h_nmr_multiplicity,
+            "h_nmr_multiplicity_mask": self.h_nmr_multiplicity_mask,
+            "h_nmr_j": self.h_nmr_j,
+            "h_nmr_j_mask": self.h_nmr_j_mask,
             "c_nmr": self.c_nmr,
             "c_nmr_mask": self.c_nmr_mask,
         }
@@ -253,13 +272,44 @@ class NMRGraphDataset(Dataset):
 
         h_nmr = _as_1d_tensor(_get_value(item, "h_nmr"), torch.float)
         integration = _get_value(item, "h_nmr_integration")
+        integration_is_available = integration is not None
         if integration is None:
-            integration = torch.ones_like(h_nmr)
+            integration = torch.zeros_like(h_nmr)
+        integration_mask = _get_value(item, "h_nmr_integration_mask")
+        if integration_mask is None:
+            integration_mask = torch.full_like(
+                h_nmr, integration_is_available, dtype=torch.bool
+            )
+        multiplicity = _get_value(item, "h_nmr_multiplicity")
+        multiplicity_is_available = multiplicity is not None
+        if multiplicity is None:
+            multiplicity = torch.full_like(
+                h_nmr, MULTIPLICITY_MISSING_INDEX, dtype=torch.long
+            )
+        multiplicity_mask = _get_value(item, "h_nmr_multiplicity_mask")
+        if multiplicity_mask is None:
+            multiplicity_mask = torch.full_like(
+                h_nmr, multiplicity_is_available, dtype=torch.bool
+            )
+        j_values = _get_value(item, "h_nmr_j")
+        if j_values is None:
+            j_values = torch.zeros((h_nmr.numel(), MAX_J_VALUES), dtype=torch.float)
+        j_values = torch.as_tensor(j_values, dtype=torch.float)
+        if j_values.ndim != 2 or j_values.shape[0] != h_nmr.numel():
+            raise ValueError("h_nmr_j must have shape [num_h_peaks, num_j_slots]")
+        j_mask = _get_value(item, "h_nmr_j_mask")
+        if j_mask is None:
+            j_mask = j_values.ne(0)
         sample = GraphSample(
             h=targets["h"],
             h_nmr=h_nmr,
             c_nmr=_as_1d_tensor(_get_value(item, "c_nmr"), torch.float),
             h_nmr_integration=_as_1d_tensor(integration, torch.float),
+            h_nmr_integration_mask=_as_1d_tensor(integration_mask, torch.bool),
+            h_nmr_multiplicity=_as_1d_tensor(multiplicity, torch.long),
+            h_nmr_multiplicity_mask=_as_1d_tensor(multiplicity_mask, torch.bool),
+            h_nmr_j=j_values,
+            h_nmr_j_mask=torch.as_tensor(j_mask, dtype=torch.bool),
             bond_types=targets["bond_types"],
             h_attachment=targets["h_attachment"],
             heavy_fragment_labels=targets["heavy_fragment_labels"],
@@ -282,6 +332,17 @@ def _pad_1d(
     return output
 
 
+def _pad_2d(values: Sequence[torch.Tensor], padding_value, dtype) -> torch.Tensor:
+    max_rows = max((value.shape[0] for value in values), default=0)
+    max_columns = max((value.shape[1] for value in values), default=0)
+    output = torch.full(
+        (len(values), max_rows, max_columns), padding_value, dtype=dtype
+    )
+    for index, value in enumerate(values):
+        output[index, :value.shape[0], :value.shape[1]] = value.to(dtype=dtype)
+    return output
+
+
 def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
     if not samples:
         raise ValueError("Cannot collate an empty sample list")
@@ -291,6 +352,19 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
     c_nmr = _pad_1d([sample.c_nmr for sample in samples], 0.0, torch.float)
     h_nmr_integration = _pad_1d(
         [sample.h_nmr_integration for sample in samples], 0.0, torch.float
+    )
+    h_nmr_integration_mask = _pad_1d(
+        [sample.h_nmr_integration_mask for sample in samples], False, torch.bool
+    )
+    h_nmr_multiplicity = _pad_1d(
+        [sample.h_nmr_multiplicity for sample in samples], 0, torch.long
+    )
+    h_nmr_multiplicity_mask = _pad_1d(
+        [sample.h_nmr_multiplicity_mask for sample in samples], False, torch.bool
+    )
+    h_nmr_j = _pad_2d([sample.h_nmr_j for sample in samples], 0.0, torch.float)
+    h_nmr_j_mask = _pad_2d(
+        [sample.h_nmr_j_mask for sample in samples], False, torch.bool
     )
     h_nmr_mask = torch.zeros_like(h_nmr, dtype=torch.bool)
     c_nmr_mask = torch.zeros_like(c_nmr, dtype=torch.bool)
@@ -323,6 +397,11 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
         h_nmr=h_nmr,
         h_nmr_mask=h_nmr_mask,
         h_nmr_integration=h_nmr_integration,
+        h_nmr_integration_mask=h_nmr_integration_mask,
+        h_nmr_multiplicity=h_nmr_multiplicity,
+        h_nmr_multiplicity_mask=h_nmr_multiplicity_mask,
+        h_nmr_j=h_nmr_j,
+        h_nmr_j_mask=h_nmr_j_mask,
         c_nmr=c_nmr,
         c_nmr_mask=c_nmr_mask,
         bond_types=bond_types,

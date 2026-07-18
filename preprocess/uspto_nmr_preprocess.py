@@ -25,6 +25,8 @@ from functools import lru_cache
 
 # import h5py
 from src.metrics.uspto import USPTOPreprocessMetrics
+from src.metrics.base import save_json
+from src.data.constants import MAX_J_VALUES, multiplicity_to_index
 SEED = 0
 
 
@@ -604,6 +606,34 @@ def smiles_to_local_label(smiles: str):
 
     return canno_atoms, hydrogen_neighbors, is_aromatic, heavy_atom_local_labels
 
+def _parse_j_values(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = value.strip("_").split("_") if value.strip("_") else []
+    elif isinstance(value, (list, tuple, np.ndarray)):
+        values = value
+    else:
+        values = [value]
+    parsed = []
+    for item in values:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(number):
+            parsed.append(number)
+    return parsed[:MAX_J_VALUES]
+
+
+def _optional_float(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 0.0, False
+    return (value, True) if np.isfinite(value) else (0.0, False)
+
+
 def preprocess_parquet(df: pd.DataFrame):
     """
     columns:
@@ -621,20 +651,56 @@ def preprocess_parquet(df: pd.DataFrame):
     from src.data.dataset import graph_targets_from_smiles
 
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing parquet files", unit="file"):
-        h_nmr_peaks, c_nmr_peaks = [], []
-        
+        h_peaks = []
         for peak in row['h_nmr_peaks']:
-            h_nmr_peaks.append(peak['delta'])
+            shift = float(peak['delta'])
+            integration, integration_available = _optional_float(peak.get('nH'))
+            multiplicity = multiplicity_to_index(peak.get('category'))
+            j_values = _parse_j_values(peak.get('j_values'))
+            h_peaks.append((
+                shift,
+                integration,
+                integration_available,
+                multiplicity,
+                multiplicity not in (0, 1),
+                j_values,
+            ))
+        h_peaks.sort(key=lambda values: values[0])
+
+        c_nmr_peaks = []
         for peak in row['c_nmr_peaks']:
             c_nmr_peaks.append(peak['delta (ppm)'])
+
+        num_h_peaks = len(h_peaks)
+        h_nmr_j = torch.zeros((num_h_peaks, MAX_J_VALUES), dtype=torch.float)
+        h_nmr_j_mask = torch.zeros((num_h_peaks, MAX_J_VALUES), dtype=torch.bool)
+        for peak_index, values in enumerate(h_peaks):
+            j_values = values[-1]
+            if j_values:
+                h_nmr_j[peak_index, :len(j_values)] = torch.tensor(j_values)
+                h_nmr_j_mask[peak_index, :len(j_values)] = True
         
         smiles = row['smiles']
         canno_atoms, hydrogen_neighbors, is_aromatic_heavy_atoms, heavy_atom_local_labels = smiles_to_local_label(smiles)
         graph_targets = graph_targets_from_smiles(smiles)
         data = Data(
             smiles=smiles,
-            h_nmr = torch.tensor(sorted(h_nmr_peaks)),
-            c_nmr = torch.tensor(sorted(c_nmr_peaks)),
+            h_nmr=torch.tensor([values[0] for values in h_peaks], dtype=torch.float),
+            c_nmr=torch.tensor(sorted(c_nmr_peaks), dtype=torch.float),
+            h_nmr_integration=torch.tensor(
+                [values[1] for values in h_peaks], dtype=torch.float
+            ),
+            h_nmr_integration_mask=torch.tensor(
+                [values[2] for values in h_peaks], dtype=torch.bool
+            ),
+            h_nmr_multiplicity=torch.tensor(
+                [values[3] for values in h_peaks], dtype=torch.long
+            ),
+            h_nmr_multiplicity_mask=torch.tensor(
+                [values[4] for values in h_peaks], dtype=torch.bool
+            ),
+            h_nmr_j=h_nmr_j,
+            h_nmr_j_mask=h_nmr_j_mask,
             h = graph_targets["h"],
             canno_h = torch.tensor(canno_atoms),
             hydrogen_neighbors = torch.tensor(hydrogen_neighbors), # [N_H, ]
@@ -662,8 +728,14 @@ def preprocess_uspto(parquet_dir: str, save_dir: str=None):
 
     if save_dir is None:
         save_dir = osp.dirname(parquet_dir)
+    os.makedirs(save_dir, exist_ok=True)
     print(f"Saving to {osp.join(save_dir, 'processed_uspto.pt')}")
     torch.save(total_data_list, osp.join(save_dir, 'processed_uspto.pt'))
+    metrics = USPTOPreprocessMetrics()
+    metrics.update(total_data_list)
+    infos_path = osp.join(save_dir, 'dataset_infos.json')
+    save_json(metrics.summarize(), infos_path)
+    print(f"Saved normalization statistics to {infos_path}")
     
 
 if __name__ == '__main__':

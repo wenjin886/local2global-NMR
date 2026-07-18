@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .layers import MLP
+from src.data.constants import MULTIPLICITY_PAD_INDEX, MULTIPLICITY_VOCAB
 
 
 class FourierEmbedding(nn.Module):
@@ -170,6 +171,121 @@ class NMRPeakEmbedding(nn.Module):
                 torch.log1p(integrations.clamp_min(0.0)).unsqueeze(-1)
             )
         return self.dropout(self.norm(features))
+
+
+class CNMRPeakEmbedding(nn.Module):
+    """Embed normalized 13C shifts with parameters separate from 1H."""
+
+    def __init__(self, hidden_dim, num_fourier_features=64, dropout=0.0):
+        super().__init__()
+        self.fourier = FourierEmbedding(1, num_fourier_features)
+        self.shift_projection = nn.Linear(num_fourier_features, hidden_dim)
+        self.nucleus_embedding = nn.Parameter(torch.zeros(hidden_dim))
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, shifts, peak_mask):
+        features = self.shift_projection(self.fourier(shifts.unsqueeze(-1)))
+        features = features + self.nucleus_embedding
+        features = self.dropout(self.norm(features))
+        return features * peak_mask.unsqueeze(-1)
+
+
+class HNMRPeakEmbedding(nn.Module):
+    """Embed normalized 1H shifts and optional per-peak metadata.
+
+    J values are an unordered, variable-length set.  A shared value MLP plus
+    masked mean pooling therefore keeps the representation permutation
+    invariant and avoids assigning semantic meaning to J-list positions.
+    """
+
+    def __init__(
+            self,
+            hidden_dim,
+            num_fourier_features=64,
+            num_multiplicity_classes=len(MULTIPLICITY_VOCAB),
+            use_integration=True,
+            use_multiplicity=True,
+            use_j=True,
+            dropout=0.0,
+    ):
+        super().__init__()
+        self.use_integration = use_integration
+        self.use_multiplicity = use_multiplicity
+        self.use_j = use_j
+        self.fourier = FourierEmbedding(1, num_fourier_features)
+        self.shift_projection = nn.Linear(num_fourier_features, hidden_dim)
+        self.nucleus_embedding = nn.Parameter(torch.zeros(hidden_dim))
+        if use_integration:
+            self.integration_projection = nn.Sequential(
+                nn.Linear(1, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim)
+            )
+            self.integration_missing = nn.Parameter(torch.zeros(hidden_dim))
+        if use_multiplicity:
+            self.multiplicity_embedding = nn.Embedding(
+                num_multiplicity_classes, hidden_dim,
+                padding_idx=MULTIPLICITY_PAD_INDEX,
+            )
+            self.multiplicity_missing = nn.Parameter(torch.zeros(hidden_dim))
+        if use_j:
+            self.j_projection = nn.Sequential(
+                nn.Linear(1, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim)
+            )
+            self.j_missing = nn.Parameter(torch.zeros(hidden_dim))
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    @staticmethod
+    def _mask_or_default(value, reference, default=False):
+        if value is None:
+            return torch.full_like(reference, default, dtype=torch.bool)
+        return value.bool()
+
+    def forward(
+            self,
+            shifts,
+            peak_mask,
+            integrations=None,
+            integration_mask=None,
+            multiplicities=None,
+            multiplicity_mask=None,
+            j_values=None,
+            j_mask=None,
+    ):
+        features = self.shift_projection(self.fourier(shifts.unsqueeze(-1)))
+        features = features + self.nucleus_embedding
+
+        if self.use_integration:
+            if integrations is None:
+                integrations = torch.zeros_like(shifts)
+            available = self._mask_or_default(integration_mask, shifts)
+            encoded = self.integration_projection(integrations.unsqueeze(-1))
+            missing = self.integration_missing.view(1, 1, -1)
+            features = features + torch.where(available.unsqueeze(-1), encoded, missing)
+
+        if self.use_multiplicity:
+            if multiplicities is None:
+                multiplicities = torch.zeros_like(shifts, dtype=torch.long)
+            available = self._mask_or_default(multiplicity_mask, shifts)
+            encoded = self.multiplicity_embedding(multiplicities.long())
+            missing = self.multiplicity_missing.view(1, 1, -1)
+            features = features + torch.where(available.unsqueeze(-1), encoded, missing)
+
+        if self.use_j:
+            if j_values is None:
+                j_values = shifts.new_zeros((*shifts.shape, 1))
+            if j_mask is None:
+                j_mask = torch.zeros_like(j_values, dtype=torch.bool)
+            encoded = self.j_projection(j_values.unsqueeze(-1))
+            encoded = encoded * j_mask.unsqueeze(-1)
+            count = j_mask.sum(dim=-1, keepdim=True)
+            encoded = encoded.sum(dim=-2) / count.clamp_min(1)
+            available = count.squeeze(-1).gt(0)
+            missing = self.j_missing.view(1, 1, -1)
+            features = features + torch.where(available.unsqueeze(-1), encoded, missing)
+
+        features = self.dropout(self.norm(features))
+        return features * peak_mask.unsqueeze(-1)
 
 def cosine_cutoff(edge_distances: torch.Tensor, cutoff: float):
     return torch.where(

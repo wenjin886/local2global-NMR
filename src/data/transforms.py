@@ -1,10 +1,90 @@
-import torch
-from torch_geometric.data import Data
-from torch_geometric.data.datapipes import functional_transform
-from torch_geometric.transforms import BaseTransform
-from torch_geometric.utils import one_hot, dense_to_sparse
+import json
 
-from src_end.ops import center
+import torch
+try:
+    from torch_geometric.data import Data
+    from torch_geometric.data.datapipes import functional_transform
+    from torch_geometric.transforms import BaseTransform
+    from torch_geometric.utils import one_hot, dense_to_sparse
+except ImportError:  # NMR-only tests and lightweight inference do not need PyG.
+    Data = object
+
+    def functional_transform(_name):
+        return lambda cls: cls
+
+    class BaseTransform:
+        def __call__(self, data):
+            return self.forward(data)
+
+    def one_hot(value, num_classes):
+        return torch.nn.functional.one_hot(value, num_classes=num_classes)
+
+    def dense_to_sparse(matrix):
+        indices = matrix.nonzero(as_tuple=False).t().contiguous()
+        return indices, matrix[indices[0], indices[1]]
+
+
+
+def center(positions: torch.Tensor) -> torch.Tensor:
+    return positions - positions.mean(dim=0, keepdim=True)
+
+
+class NormalizeNMR:
+    """Apply train-set z-score statistics while preserving missing values.
+
+    Continuous values are normalized in place. Availability masks ensure that
+    a missing integration or padded J value remains exactly zero.
+    """
+
+    def __init__(
+            self,
+            stats_path: str,
+            normalize_h_shift: bool = True,
+            normalize_c_shift: bool = True,
+            normalize_h_integration: bool = True,
+            normalize_h_j: bool = True,
+            eps: float = 1e-6,
+    ):
+        with open(stats_path, encoding="utf-8") as handle:
+            self.stats = json.load(handle)
+        self.enabled = {
+            "h_nmr": normalize_h_shift,
+            "c_nmr": normalize_c_shift,
+            "h_nmr_integration": normalize_h_integration,
+            "h_nmr_j": normalize_h_j,
+        }
+        self.stat_names = {
+            "h_nmr": "hnmr_shift",
+            "c_nmr": "cnmr_shift",
+            "h_nmr_integration": "hnmr_integration",
+            "h_nmr_j": "hnmr_j",
+        }
+        self.masks = {
+            "h_nmr_integration": "h_nmr_integration_mask",
+            "h_nmr_j": "h_nmr_j_mask",
+        }
+        self.eps = eps
+
+    def _stat(self, name: str, suffix: str) -> float:
+        for key in (f"{name}_{suffix}", f"_{name}_{suffix}"):
+            if key in self.stats:
+                return float(self.stats[key])
+        raise KeyError(f"Missing normalization statistic: {name}_{suffix}")
+
+    def __call__(self, data):
+        for key, enabled in self.enabled.items():
+            if not enabled or not hasattr(data, key):
+                continue
+            value = getattr(data, key)
+            mean = self._stat(self.stat_names[key], "mean")
+            std = max(self._stat(self.stat_names[key], "std"), self.eps)
+            normalized = (value - mean) / std
+            mask_name = self.masks.get(key)
+            if mask_name is not None and hasattr(data, mask_name):
+                mask = getattr(data, mask_name).bool()
+                normalized = torch.where(mask, normalized, torch.zeros_like(normalized))
+            setattr(data, key, normalized)
+        return data
 
 
 @functional_transform('one_hot')

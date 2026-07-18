@@ -35,6 +35,11 @@ def make_sample():
         h_nmr=torch.tensor([3.2, 4.7]),
         c_nmr=torch.tensor([50.0]),
         h_nmr_integration=torch.tensor([3.0, 1.0]),
+        h_nmr_integration_mask=torch.tensor([True, True]),
+        h_nmr_multiplicity=torch.tensor([3, 10]),
+        h_nmr_multiplicity_mask=torch.tensor([True, True]),
+        h_nmr_j=torch.tensor([[0.0, 0.0], [7.0, 2.0]]),
+        h_nmr_j_mask=torch.tensor([[False, False], [True, True]]),
         bond_types=bond_types,
         h_attachment=torch.tensor([4, 4, 4, 5, -100, -100]),
         heavy_fragment_labels=heavy_fragments,
@@ -69,6 +74,8 @@ def test_forward_masks_fragments_and_probabilities():
         2, 6, len(BOND_TYPE_CANDIDATES), 5
     )
     assert outputs["heavy_edge_logits"].shape == (2, 6, 6, 5)
+    assert outputs["h_peak_features"].shape == (2, 2, 32)
+    assert outputs["c_peak_features"].shape == (2, 1, 32)
     assert torch.allclose(
         outputs["heavy_edge_logits"],
         outputs["heavy_edge_logits"].transpose(1, 2),

@@ -5,7 +5,8 @@ stage of the planned `NMR -> 3D -> NMR` pipeline. The graph model follows a
 local-to-global curriculum:
 
 ```text
-element-sorted explicit atom slots + unassigned 1H/13C peak sets
+element-sorted explicit atom slots + separately embedded 1H/13C peak sets
+    (1H shift + optional integration/multiplicity/J metadata)
     -> shared atom-spectrum cross-attention
     -> element-grouped ordered heavy-atom queries
     -> factorized local-fragment prediction
@@ -95,6 +96,11 @@ Each materialized sample contains:
 h                           element-sorted explicit atom slots
 h_nmr, c_nmr                unassigned peak lists
 h_nmr_integration           optional proton integrations
+h_nmr_integration_mask      which integrations are observed
+h_nmr_multiplicity          categorical multiplicity IDs
+h_nmr_multiplicity_mask     which multiplicities are observed
+h_nmr_j                     padded per-peak J-value sets
+h_nmr_j_mask                valid entries in each J-value set
 heavy_fragment_labels       [N, num_fragment_types]
 h_parent_fragment_labels    [N, num_fragment_types]
 h_parent_types              [N]
@@ -112,6 +118,35 @@ python preprocess/build_graph_dataset.py \
 
 `NMRGraphDataset` can also construct missing targets lazily from `smiles`, but
 materialization avoids running RDKit in every training epoch.
+
+## Spectrum metadata and normalization
+
+USPTO preprocessing keeps every proton peak as one aligned record: sorting by
+shift also reorders its `nH`, `category`, and `j_values`. `dataset_infos.json`
+records training-corpus mean/std for continuous H shift, C shift, integration,
+and individual J values. Multiplicity is categorical, so the file records its
+fixed vocabulary and histogram rather than an arbitrary mean/std over category
+IDs.
+
+`NormalizeNMR` reads these statistics and z-score normalizes continuous values
+in the dataset transform. Missing integration and J entries remain zero under
+their availability masks. The model then uses independent H and C shift
+embeddings. The H branch adds optional integration, multiplicity, and
+permutation-invariant J-set embeddings before the two nuclei are concatenated.
+
+The metadata interfaces can be disabled independently for datasets that do not
+provide them:
+
+```yaml
+lit_module.model.use_h_integration: false
+lit_module.model.use_h_multiplicity: false
+lit_module.model.use_h_j: false
+datamodule.transform.normalize_h_integration: false
+datamodule.transform.normalize_h_j: false
+```
+
+Compute normalization statistics from the training split only and reuse that
+same `dataset_infos.json` for validation and test data.
 
 ## Training curriculum
 
