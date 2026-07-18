@@ -199,7 +199,7 @@ def process_atoms(
 #     else:
 #         print(f"Molecule {mol_idx} has no atom_features; saved attrs only.")
 
-    return True
+    # return True
 
 
 # def read_uspto_h5(
@@ -550,8 +550,6 @@ def get_heavy_atom_local_label(atom: Chem.Atom, mol: Chem.Mol=None, num_max_coun
     return: 
         [neighbor_type, count]
     """
-
-    neighbors = atom.GetNeighbors()
     assert atom.GetAtomicNum() != 1, f"Atom {atom.GetSymbol()} is H"
         
     heavy_atom_neighbors = torch.zeros(len(BOND_TYPE_CANDIDATES), dtype=torch.int32) 
@@ -573,10 +571,6 @@ def get_heavy_atom_local_label(atom: Chem.Atom, mol: Chem.Mol=None, num_max_coun
     return heavy_atom_neighbors
     
 
-
-    
-    
-    
 
 def smiles_to_local_label(smiles: str):
     
@@ -624,6 +618,8 @@ def preprocess_parquet(df: pd.DataFrame):
        'msms_scarf_fragments_positive']
     """
     data_list =[]
+    from src.data.dataset import graph_targets_from_smiles
+
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing parquet files", unit="file"):
         h_nmr_peaks, c_nmr_peaks = [], []
         
@@ -634,16 +630,21 @@ def preprocess_parquet(df: pd.DataFrame):
         
         smiles = row['smiles']
         canno_atoms, hydrogen_neighbors, is_aromatic_heavy_atoms, heavy_atom_local_labels = smiles_to_local_label(smiles)
-        input_h = sorted(canno_atoms)
+        graph_targets = graph_targets_from_smiles(smiles)
         data = Data(
             smiles=smiles,
             h_nmr = torch.tensor(sorted(h_nmr_peaks)),
             c_nmr = torch.tensor(sorted(c_nmr_peaks)),
-            h = torch.tensor(input_h),
+            h = graph_targets["h"],
             canno_h = torch.tensor(canno_atoms),
             hydrogen_neighbors = torch.tensor(hydrogen_neighbors), # [N_H, ]
             is_aromatic_heavy_atoms = torch.tensor(is_aromatic_heavy_atoms), # [N_heavy_atoms, ]
             heavy_atom_local_labels = torch.stack(heavy_atom_local_labels), # [N_heavy_atoms, NUM_NEIGHBOR_TYPES]
+            bond_types=graph_targets["bond_types"],
+            h_attachment=graph_targets["h_attachment"],
+            h_parent_types=graph_targets["h_parent_types"],
+            h_parent_fragment_labels=graph_targets["h_parent_fragment_labels"],
+            heavy_fragment_labels=graph_targets["heavy_fragment_labels"],
         )
 
         data_list.append(data)

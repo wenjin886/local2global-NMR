@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 import torch
 
-from src.data.dataset import graph_targets_from_smiles, load_local_vocab
+from src.data.dataset import graph_targets_from_smiles
 
 
 def get_value(item: Any, key: str, default: Any = None) -> Any:
@@ -15,13 +15,12 @@ def get_value(item: Any, key: str, default: Any = None) -> Any:
     return getattr(item, key, default)
 
 
-def build_graph_dataset(input_path: str, output_path: str, local_vocab_path: str) -> None:
+def build_graph_dataset(input_path: str, output_path: str) -> None:
     items = torch.load(input_path)
-    local_vocab = load_local_vocab(local_vocab_path)
     processed = []
     for item in items:
         smiles = get_value(item, "smiles")
-        targets = graph_targets_from_smiles(smiles, local_vocab)
+        targets = graph_targets_from_smiles(smiles)
         h_nmr = torch.as_tensor(get_value(item, "h_nmr"), dtype=torch.float)
         integration = get_value(item, "h_nmr_integration")
         if integration is None:
@@ -34,7 +33,9 @@ def build_graph_dataset(input_path: str, output_path: str, local_vocab_path: str
             "c_nmr": torch.as_tensor(get_value(item, "c_nmr"), dtype=torch.float),
             "bond_types": targets["bond_types"],
             "h_attachment": targets["h_attachment"],
-            "local_labels": targets["local_labels"],
+            "heavy_fragment_labels": targets["heavy_fragment_labels"],
+            "h_parent_fragment_labels": targets["h_parent_fragment_labels"],
+            "h_parent_types": targets["h_parent_types"],
         })
 
     output = Path(output_path)
@@ -46,15 +47,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_path", required=True)
     parser.add_argument("--output_path", required=True)
-    parser.add_argument(
-        "--local_vocab_path",
-        default="data/uspto/label_vocab.json",
-    )
     args = parser.parse_args()
     build_graph_dataset(
         input_path=args.input_path,
         output_path=args.output_path,
-        local_vocab_path=args.local_vocab_path,
     )
 
 

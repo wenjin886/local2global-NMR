@@ -1,0 +1,26 @@
+[project]
+name = "local2global-nmr"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+  "hydra-core>=1.3",
+  "numpy<2",
+  "pandas",
+  "pyarrow",
+  "pytorch-lightning>=1.8,<3",
+  "rdkit>=2023.9",
+  "scipy",
+  "torch>=1.13",
+  "tqdm",
+  "wandb",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

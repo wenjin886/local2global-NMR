@@ -1,11 +1,11 @@
 import copy
-import json
 from dataclasses import dataclass, fields
-from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import torch
 from torch.utils.data import Dataset
+
+from .constants import BOND_TYPE_CANDIDATES
 
 
 BOND_TYPE_TO_INDEX = {
@@ -13,6 +13,9 @@ BOND_TYPE_TO_INDEX = {
     "DOUBLE": 2,
     "TRIPLE": 3,
     "AROMATIC": 4,
+}
+CANDIDATE_TO_INDEX = {
+    candidate: index for index, candidate in enumerate(BOND_TYPE_CANDIDATES)
 }
 
 
@@ -29,94 +32,128 @@ def _as_1d_tensor(value: Any, dtype: torch.dtype) -> torch.Tensor:
     return tensor.to(dtype=dtype).reshape(-1)
 
 
-def load_local_vocab(path: Optional[str]) -> Dict[int, Dict[str, int]]:
-    if path is None:
-        return {}
-    with open(path, "r") as handle:
-        raw_vocab = json.load(handle)
-    return {
-        int(atomic_number): {
-            label: index for index, label in enumerate(labels.keys())
-        }
-        for atomic_number, labels in raw_vocab.items()
-    }
-
-
-def local_environment_label(atom: Any, molecule: Any) -> str:
-    is_aromatic = int(atom.GetIsAromatic())
-    num_neighbor_h = 0
-    neighbors = []
+def _fragment_count(atom: Any, molecule: Any) -> torch.Tensor:
+    counts = torch.zeros(len(BOND_TYPE_CANDIDATES), dtype=torch.long)
     for neighbor in atom.GetNeighbors():
-        atomic_number = neighbor.GetAtomicNum()
-        if atomic_number == 1:
-            num_neighbor_h += 1
-            continue
         bond = molecule.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
-        bond_type = BOND_TYPE_TO_INDEX[str(bond.GetBondType())]
-        neighbors.append((atomic_number, bond_type))
-    neighbors.sort()
-    label = "%d%d" % (is_aromatic, num_neighbor_h)
-    return label + "".join("%d%d" % pair for pair in neighbors)
+        candidate = "%d-%d" % (
+            neighbor.GetAtomicNum(),
+            BOND_TYPE_TO_INDEX[str(bond.GetBondType())],
+        )
+        if candidate not in CANDIDATE_TO_INDEX:
+            raise ValueError(
+                "Unsupported fragment candidate %s. Add it to "
+                "BOND_TYPE_CANDIDATES after checking its dataset frequency."
+                % candidate
+            )
+        counts[CANDIDATE_TO_INDEX[candidate]] += 1
+    return counts
 
 
-def graph_targets_from_smiles(
-        smiles: str,
-        local_vocab: Optional[Mapping[int, Mapping[str, int]]] = None,
-) -> Dict[str, torch.Tensor]:
-    """Build atom slots and graph targets in one explicit-H RDKit ordering."""
+def graph_targets_from_smiles(smiles: str) -> Dict[str, torch.Tensor]:
+    """Build element-grouped canonical heavy queries and explicit-H targets.
+
+    Input slots are sorted by element. Heavy targets use the same element groups,
+    with RDKit canonical ranks breaking ties inside each element. Hydrogen rows
+    are exchangeable and are handled by permutation-invariant losses.
+    """
     try:
         from rdkit import Chem
     except ImportError as error:
         raise ImportError(
             "RDKit is required to create graph targets from SMILES. "
-            "Install project dependencies or preprocess targets separately."
+            "Install project dependencies or materialize targets elsewhere."
         ) from error
 
-    molecule = Chem.MolFromSmiles(smiles)
-    if molecule is None:
+    molecule_without_h = Chem.MolFromSmiles(smiles)
+    if molecule_without_h is None:
         raise ValueError("Invalid SMILES: %s" % smiles)
-    molecule = Chem.AddHs(molecule)
+    canonical_smiles = Chem.MolToSmiles(
+        molecule_without_h,
+        canonical=True,
+        isomericSmiles=False,
+    )
+    molecule = Chem.AddHs(Chem.MolFromSmiles(canonical_smiles))
+    canonical_ranks = list(Chem.CanonicalRankAtoms(molecule, breakTies=True))
+
+    heavy_indices = [
+        atom.GetIdx() for atom in molecule.GetAtoms() if atom.GetAtomicNum() != 1
+    ]
+    hydrogen_indices = [
+        atom.GetIdx() for atom in molecule.GetAtoms() if atom.GetAtomicNum() == 1
+    ]
+    heavy_indices.sort(key=lambda index: (
+        molecule.GetAtomWithIdx(index).GetAtomicNum(),
+        canonical_ranks[index],
+    ))
+    hydrogen_indices.sort(key=lambda index: canonical_ranks[index])
+
+    num_hydrogens = len(hydrogen_indices)
+    num_atoms = molecule.GetNumAtoms()
+    old_to_slot = {}
+    for slot, old_index in enumerate(hydrogen_indices):
+        old_to_slot[old_index] = slot
+    for heavy_rank, old_index in enumerate(heavy_indices):
+        old_to_slot[old_index] = num_hydrogens + heavy_rank
 
     atom_types = torch.tensor(
-        [atom.GetAtomicNum() for atom in molecule.GetAtoms()],
+        [1] * num_hydrogens
+        + [molecule.GetAtomWithIdx(index).GetAtomicNum() for index in heavy_indices],
         dtype=torch.long,
     )
-    num_atoms = atom_types.numel()
     bond_types = torch.zeros((num_atoms, num_atoms), dtype=torch.long)
     h_attachment = torch.full((num_atoms,), -100, dtype=torch.long)
-    local_labels = torch.full((num_atoms,), -100, dtype=torch.long)
+    heavy_fragment_labels = torch.full(
+        (num_atoms, len(BOND_TYPE_CANDIDATES)),
+        fill_value=-100,
+        dtype=torch.long,
+    )
+    h_parent_fragment_labels = torch.full_like(
+        heavy_fragment_labels,
+        fill_value=-100,
+    )
+    h_parent_types = torch.full((num_atoms,), -100, dtype=torch.long)
+
+    fragment_by_old_index = {
+        old_index: _fragment_count(molecule.GetAtomWithIdx(old_index), molecule)
+        for old_index in heavy_indices
+    }
+    for old_index in heavy_indices:
+        slot = old_to_slot[old_index]
+        heavy_fragment_labels[slot] = fragment_by_old_index[old_index]
+
+    for old_index in hydrogen_indices:
+        slot = old_to_slot[old_index]
+        neighbors = list(molecule.GetAtomWithIdx(old_index).GetNeighbors())
+        if len(neighbors) != 1 or neighbors[0].GetAtomicNum() == 1:
+            raise ValueError("Every explicit H must have exactly one heavy parent")
+        parent_old_index = neighbors[0].GetIdx()
+        parent_slot = old_to_slot[parent_old_index]
+        h_attachment[slot] = parent_slot
+        h_parent_types[slot] = neighbors[0].GetAtomicNum()
+        h_parent_fragment_labels[slot] = fragment_by_old_index[parent_old_index]
 
     for bond in molecule.GetBonds():
-        source = bond.GetBeginAtomIdx()
-        destination = bond.GetEndAtomIdx()
+        source_old = bond.GetBeginAtomIdx()
+        destination_old = bond.GetEndAtomIdx()
+        if (
+            molecule.GetAtomWithIdx(source_old).GetAtomicNum() == 1
+            or molecule.GetAtomWithIdx(destination_old).GetAtomicNum() == 1
+        ):
+            continue
+        source = old_to_slot[source_old]
+        destination = old_to_slot[destination_old]
         bond_index = BOND_TYPE_TO_INDEX[str(bond.GetBondType())]
         bond_types[source, destination] = bond_index
         bond_types[destination, source] = bond_index
-
-    for atom in molecule.GetAtoms():
-        atom_index = atom.GetIdx()
-        atomic_number = atom.GetAtomicNum()
-        if atomic_number == 1:
-            heavy_neighbors = [
-                neighbor.GetIdx()
-                for neighbor in atom.GetNeighbors()
-                if neighbor.GetAtomicNum() != 1
-            ]
-            if len(heavy_neighbors) != 1:
-                raise ValueError(
-                    "Expected H atom %d to have one heavy neighbor, got %d"
-                    % (atom_index, len(heavy_neighbors))
-                )
-            h_attachment[atom_index] = heavy_neighbors[0]
-        elif local_vocab and atomic_number in local_vocab:
-            label = local_environment_label(atom, molecule)
-            local_labels[atom_index] = local_vocab[atomic_number].get(label, -100)
 
     return {
         "h": atom_types,
         "bond_types": bond_types,
         "h_attachment": h_attachment,
-        "local_labels": local_labels,
+        "heavy_fragment_labels": heavy_fragment_labels,
+        "h_parent_fragment_labels": h_parent_fragment_labels,
+        "h_parent_types": h_parent_types,
     }
 
 
@@ -128,7 +165,9 @@ class GraphSample:
     h_nmr_integration: torch.Tensor
     bond_types: torch.Tensor
     h_attachment: torch.Tensor
-    local_labels: torch.Tensor
+    heavy_fragment_labels: torch.Tensor
+    h_parent_fragment_labels: torch.Tensor
+    h_parent_types: torch.Tensor
     smiles: str = ""
 
 
@@ -143,7 +182,9 @@ class GraphBatch:
     c_nmr_mask: torch.Tensor
     bond_types: torch.Tensor
     h_attachment: torch.Tensor
-    local_labels: torch.Tensor
+    heavy_fragment_labels: torch.Tensor
+    h_parent_fragment_labels: torch.Tensor
+    h_parent_types: torch.Tensor
     smiles: List[str]
 
     def to(self, device: torch.device) -> "GraphBatch":
@@ -166,18 +207,20 @@ class GraphBatch:
 
 
 class NMRGraphDataset(Dataset):
-    """Load NMR samples and construct aligned explicit-H graph targets."""
+    """Load NMR samples and align all targets to ordered output queries."""
 
-    def __init__(
-            self,
-            path: str,
-            local_vocab_path: Optional[str] = None,
-            transform: Optional[Any] = None,
-    ):
+    REQUIRED_TARGETS = (
+        "bond_types",
+        "h_attachment",
+        "heavy_fragment_labels",
+        "h_parent_fragment_labels",
+        "h_parent_types",
+    )
+
+    def __init__(self, path: str, transform: Optional[Any] = None):
         super().__init__()
         self.path = str(path)
         self.items = torch.load(self.path)
-        self.local_vocab = load_local_vocab(local_vocab_path)
         self.transform = transform
 
     def __len__(self) -> int:
@@ -186,28 +229,32 @@ class NMRGraphDataset(Dataset):
     def __getitem__(self, index: int) -> GraphSample:
         item = copy.copy(self.items[index])
         smiles = _get_value(item, "smiles", "")
-
-        existing_bonds = _get_value(item, "bond_types")
-        existing_attachment = _get_value(item, "h_attachment")
-        if existing_bonds is None or existing_attachment is None:
-            targets = graph_targets_from_smiles(smiles, self.local_vocab)
-        else:
-            atom_types = _as_1d_tensor(_get_value(item, "h"), torch.long)
-            local_labels = _get_value(item, "local_labels")
-            if local_labels is None:
-                local_labels = torch.full_like(atom_types, fill_value=-100)
+        if all(_get_value(item, key) is not None for key in self.REQUIRED_TARGETS):
             targets = {
-                "h": atom_types,
-                "bond_types": torch.as_tensor(existing_bonds, dtype=torch.long),
-                "h_attachment": _as_1d_tensor(existing_attachment, torch.long),
-                "local_labels": _as_1d_tensor(local_labels, torch.long),
+                "h": _as_1d_tensor(_get_value(item, "h"), torch.long),
+                "bond_types": torch.as_tensor(
+                    _get_value(item, "bond_types"), dtype=torch.long
+                ),
+                "h_attachment": _as_1d_tensor(
+                    _get_value(item, "h_attachment"), torch.long
+                ),
+                "heavy_fragment_labels": torch.as_tensor(
+                    _get_value(item, "heavy_fragment_labels"), dtype=torch.long
+                ),
+                "h_parent_fragment_labels": torch.as_tensor(
+                    _get_value(item, "h_parent_fragment_labels"), dtype=torch.long
+                ),
+                "h_parent_types": _as_1d_tensor(
+                    _get_value(item, "h_parent_types"), torch.long
+                ),
             }
+        else:
+            targets = graph_targets_from_smiles(smiles)
 
         h_nmr = _as_1d_tensor(_get_value(item, "h_nmr"), torch.float)
         integration = _get_value(item, "h_nmr_integration")
         if integration is None:
             integration = torch.ones_like(h_nmr)
-
         sample = GraphSample(
             h=targets["h"],
             h_nmr=h_nmr,
@@ -215,7 +262,9 @@ class NMRGraphDataset(Dataset):
             h_nmr_integration=_as_1d_tensor(integration, torch.float),
             bond_types=targets["bond_types"],
             h_attachment=targets["h_attachment"],
-            local_labels=targets["local_labels"],
+            heavy_fragment_labels=targets["heavy_fragment_labels"],
+            h_parent_fragment_labels=targets["h_parent_fragment_labels"],
+            h_parent_types=targets["h_parent_types"],
             smiles=smiles,
         )
         return self.transform(sample) if self.transform is not None else sample
@@ -227,11 +276,7 @@ def _pad_1d(
         dtype: torch.dtype,
 ) -> torch.Tensor:
     max_length = max((value.numel() for value in values), default=0)
-    output = torch.full(
-        (len(values), max_length),
-        fill_value=padding_value,
-        dtype=dtype,
-    )
+    output = torch.full((len(values), max_length), padding_value, dtype=dtype)
     for index, value in enumerate(values):
         output[index, :value.numel()] = value.to(dtype=dtype)
     return output
@@ -245,9 +290,7 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
     h_nmr = _pad_1d([sample.h_nmr for sample in samples], 0.0, torch.float)
     c_nmr = _pad_1d([sample.c_nmr for sample in samples], 0.0, torch.float)
     h_nmr_integration = _pad_1d(
-        [sample.h_nmr_integration for sample in samples],
-        0.0,
-        torch.float,
+        [sample.h_nmr_integration for sample in samples], 0.0, torch.float
     )
     h_nmr_mask = torch.zeros_like(h_nmr, dtype=torch.bool)
     c_nmr_mask = torch.zeros_like(c_nmr, dtype=torch.bool)
@@ -255,19 +298,24 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
         h_nmr_mask[index, :sample.h_nmr.numel()] = True
         c_nmr_mask[index, :sample.c_nmr.numel()] = True
 
-    num_atoms = atom_types.size(1)
+    batch_size, num_atoms = atom_types.shape
+    num_fragments = len(BOND_TYPE_CANDIDATES)
     bond_types = torch.full(
-        (len(samples), num_atoms, num_atoms),
-        fill_value=-100,
-        dtype=torch.long,
+        (batch_size, num_atoms, num_atoms), -100, dtype=torch.long
     )
-    h_attachment = torch.full_like(atom_types, fill_value=-100)
-    local_labels = torch.full_like(atom_types, fill_value=-100)
+    h_attachment = torch.full_like(atom_types, -100)
+    heavy_fragment_labels = torch.full(
+        (batch_size, num_atoms, num_fragments), -100, dtype=torch.long
+    )
+    h_parent_fragment_labels = torch.full_like(heavy_fragment_labels, -100)
+    h_parent_types = torch.full_like(atom_types, -100)
     for index, sample in enumerate(samples):
         size = sample.h.numel()
         bond_types[index, :size, :size] = sample.bond_types
         h_attachment[index, :size] = sample.h_attachment
-        local_labels[index, :size] = sample.local_labels
+        heavy_fragment_labels[index, :size] = sample.heavy_fragment_labels
+        h_parent_fragment_labels[index, :size] = sample.h_parent_fragment_labels
+        h_parent_types[index, :size] = sample.h_parent_types
 
     return GraphBatch(
         atom_types=atom_types,
@@ -279,6 +327,8 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
         c_nmr_mask=c_nmr_mask,
         bond_types=bond_types,
         h_attachment=h_attachment,
-        local_labels=local_labels,
+        heavy_fragment_labels=heavy_fragment_labels,
+        h_parent_fragment_labels=h_parent_fragment_labels,
+        h_parent_types=h_parent_types,
         smiles=[sample.smiles for sample in samples],
     )

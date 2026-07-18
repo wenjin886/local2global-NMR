@@ -44,11 +44,11 @@ lit_module:
     h_parent_fragment_weight: 1.0
     h_parent_presence_weight: 0.25
     h_parent_type_weight: 0.25
-    h_attachment_weight: 1.0
-    h_count_weight: 0.25
+    h_attachment_weight: 0.0
+    h_count_weight: 0.0
     h_entropy_weight: 0.0
-    edge_weight: 1.0
-    fragment_edge_consistency_weight: 0.25
+    edge_weight: 0.0
+    fragment_edge_consistency_weight: 0.0
     permutation_invariant_hydrogens: true
   lr: 2e-4
   weight_decay: 1e-12
@@ -86,4 +86,4 @@ ckpt_path: null
 
 hydra:
   run:
-    dir: ${log_path}/uspto_graph/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}
+    dir: ${log_path}/uspto_fragment/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}

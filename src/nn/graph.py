@@ -1,4 +1,4 @@
-from typing import Dict, Mapping, Tuple
+from typing import Dict, Tuple
 
 import torch
 from torch import nn
@@ -95,34 +95,92 @@ class HeavyEdgeReadout(nn.Module):
         return logits, pair_mask
 
 
-class HydrogenAttachmentReadout(nn.Module):
-    """Predict one heavy-atom attachment distribution for every H slot."""
+class FactorizedFragmentReadout(nn.Module):
+    """Predict a categorical count for each neighbor-type/bond-type port."""
 
-    def __init__(self, hidden_dim: int, num_layers: int = 3):
+    def __init__(
+            self,
+            hidden_dim: int,
+            num_fragment_types: int,
+            max_fragment_count: int,
+    ):
         super().__init__()
-        layers = []
-        in_dim = 4 * hidden_dim
-        for _ in range(num_layers - 1):
-            layers.extend([nn.Linear(in_dim, hidden_dim), nn.SiLU()])
-            in_dim = hidden_dim
-        layers.append(nn.Linear(in_dim, 1))
-        self.mlp = nn.Sequential(*layers)
+        self.num_fragment_types = num_fragment_types
+        self.num_count_classes = max_fragment_count + 1
+        self.readout = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, num_fragment_types * self.num_count_classes),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        logits = self.readout(features)
+        return logits.view(
+            *features.shape[:-1],
+            self.num_fragment_types,
+            self.num_count_classes,
+        )
+
+
+class HydrogenParentEnvironmentReadout(nn.Module):
+    """Predict the element and factorized fragment of every H parent."""
+
+    def __init__(
+            self,
+            hidden_dim: int,
+            num_parent_types: int,
+            num_fragment_types: int,
+            max_fragment_count: int,
+    ):
+        super().__init__()
+        self.parent_type_readout = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, num_parent_types),
+        )
+        self.parent_fragment_readout = FactorizedFragmentReadout(
+            hidden_dim=hidden_dim,
+            num_fragment_types=num_fragment_types,
+            max_fragment_count=max_fragment_count,
+        )
+
+    def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.parent_type_readout(features), self.parent_fragment_readout(features)
+
+
+class HydrogenAttachmentReadout(nn.Module):
+    """Molecule-local H-to-heavy retrieval with projected cosine similarity."""
+
+    def __init__(
+            self,
+            hidden_dim: int,
+            attachment_dim: int = 128,
+            temperature: float = 0.1,
+    ):
+        super().__init__()
+        self.hydrogen_projection = nn.Linear(hidden_dim, attachment_dim)
+        self.heavy_projection = nn.Linear(hidden_dim, attachment_dim)
+        self.log_temperature = nn.Parameter(torch.tensor(float(temperature)).log())
 
     def forward(
             self,
             atom_features: torch.Tensor,
             hydrogen_mask: torch.Tensor,
             heavy_mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        hydrogen = atom_features[:, :, None, :]
-        heavy = atom_features[:, None, :, :]
-        pair_features = torch.cat([
-            hydrogen.expand(-1, -1, atom_features.size(1), -1),
-            heavy.expand(-1, atom_features.size(1), -1, -1),
-            hydrogen * heavy,
-            torch.abs(hydrogen - heavy),
-        ], dim=-1)
-        logits = self.mlp(pair_features).squeeze(-1)
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        hydrogen_embedding = nn.functional.normalize(
+            self.hydrogen_projection(atom_features), dim=-1
+        )
+        heavy_embedding = nn.functional.normalize(
+            self.heavy_projection(atom_features), dim=-1
+        )
+        temperature = self.log_temperature.exp().clamp(0.01, 1.0)
+        logits = torch.matmul(
+            hydrogen_embedding,
+            heavy_embedding.transpose(1, 2),
+        ) / temperature
         attachment_mask = hydrogen_mask[:, :, None] & heavy_mask[:, None, :]
         logits = logits.masked_fill(~attachment_mask, torch.finfo(logits.dtype).min)
 
@@ -134,38 +192,71 @@ class HydrogenAttachmentReadout(nn.Module):
             probabilities / normalizer.clamp_min(torch.finfo(probabilities.dtype).eps),
             torch.zeros_like(probabilities),
         )
-        return logits, probabilities
+        return logits, probabilities, hydrogen_embedding, heavy_embedding
 
 
-class ElementWiseLocalReadout(nn.Module):
-    """Separate local-environment classifiers for each configured element."""
+class FragmentConditioner(nn.Module):
+    """Inject expected factorized fragment counts into heavy queries."""
 
-    def __init__(self, hidden_dim: int, vocab_sizes: Mapping[int, int]):
+    def __init__(self, num_fragment_types: int, hidden_dim: int):
         super().__init__()
-        self.readouts = nn.ModuleDict({
-            str(int(atomic_number)): nn.Sequential(
-                nn.LayerNorm(hidden_dim),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.SiLU(),
-                nn.Linear(hidden_dim, int(vocab_size)),
-            )
-            for atomic_number, vocab_size in vocab_sizes.items()
-            if int(vocab_size) > 0
-        })
+        self.projection = nn.Sequential(
+            nn.Linear(num_fragment_types, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(
             self,
             atom_features: torch.Tensor,
-            atom_types: torch.Tensor,
-            atom_mask: torch.Tensor,
-    ) -> Dict[str, Dict[str, torch.Tensor]]:
-        outputs = {}
-        for atomic_number, readout in self.readouts.items():
-            mask = atom_mask & atom_types.eq(int(atomic_number))
-            indices = mask.nonzero(as_tuple=False)
-            features = atom_features[mask]
-            outputs[atomic_number] = {
-                "indices": indices,
-                "logits": readout(features),
-            }
-        return outputs
+            fragment_logits: torch.Tensor,
+            heavy_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        count_values = torch.arange(
+            fragment_logits.size(-1),
+            dtype=fragment_logits.dtype,
+            device=fragment_logits.device,
+        )
+        expected_counts = (
+            torch.softmax(fragment_logits, dim=-1) * count_values
+        ).sum(dim=-1)
+        update = self.projection(expected_counts)
+        conditioned = self.norm(atom_features + update)
+        atom_features = torch.where(
+            heavy_mask.unsqueeze(-1), conditioned, atom_features
+        )
+        return atom_features, expected_counts
+
+
+class HydrogenContextAggregator(nn.Module):
+    """Aggregate soft-assigned proton representations into heavy queries."""
+
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.value_projection = nn.Linear(hidden_dim, hidden_dim)
+        self.update = nn.Sequential(
+            nn.Linear(2 * hidden_dim + 1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(
+            self,
+            atom_features: torch.Tensor,
+            attachment_probabilities: torch.Tensor,
+            heavy_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        values = self.value_projection(atom_features)
+        context = torch.matmul(attachment_probabilities.transpose(1, 2), values)
+        assigned_count = attachment_probabilities.sum(dim=1, keepdim=False).unsqueeze(-1)
+        normalized_context = context / assigned_count.clamp_min(1.0)
+        update = self.update(torch.cat([
+            atom_features,
+            normalized_context,
+            assigned_count,
+        ], dim=-1))
+        refined = self.norm(atom_features + update)
+        atom_features = torch.where(heavy_mask.unsqueeze(-1), refined, atom_features)
+        return atom_features, context, assigned_count.squeeze(-1)

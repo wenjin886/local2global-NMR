@@ -32,9 +32,12 @@ class LitNMRToGraph(pl.LightningModule):
         outputs = self(batch)
         loss, losses = self.criterion(
             outputs=outputs,
+            atom_types=batch.atom_types,
             bond_types=batch.bond_types,
             h_attachment=batch.h_attachment,
-            local_labels=batch.local_labels,
+            heavy_fragment_labels=batch.heavy_fragment_labels,
+            h_parent_fragment_labels=batch.h_parent_fragment_labels,
+            h_parent_types=batch.h_parent_types,
         )
         return loss, losses, outputs
 
@@ -101,7 +104,27 @@ class LitNMRToGraph(pl.LightningModule):
             if heavy_mask.any()
             else predicted_counts.sum() * 0.0
         )
-        return {"edge_accuracy": edge_accuracy, "h_count_mae": h_count_mae}
+        fragment_targets = batch.heavy_fragment_labels
+        fragment_valid = heavy_mask.unsqueeze(-1) & fragment_targets.ge(0)
+        if fragment_valid.any():
+            fragment_prediction = outputs["fragment_logits"].argmax(dim=-1)
+            fragment_count_accuracy = (
+                fragment_prediction[fragment_valid]
+                == fragment_targets[fragment_valid]
+            ).float().mean()
+            fragment_presence_accuracy = (
+                fragment_prediction[fragment_valid].gt(0)
+                == fragment_targets[fragment_valid].gt(0)
+            ).float().mean()
+        else:
+            fragment_count_accuracy = outputs["fragment_logits"].sum() * 0.0
+            fragment_presence_accuracy = fragment_count_accuracy
+        return {
+            "edge_accuracy": edge_accuracy,
+            "fragment_count_accuracy": fragment_count_accuracy,
+            "fragment_presence_accuracy": fragment_presence_accuracy,
+            "h_count_mae": h_count_mae,
+        }
 
     def transfer_batch_to_device(
             self,
@@ -129,4 +152,3 @@ class LitNMRToGraph(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
         }
-

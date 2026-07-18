@@ -12,7 +12,6 @@ class NMRGraphDataModule(pl.LightningDataModule):
             train_path: str,
             val_path: str,
             test_path: Optional[str] = None,
-            local_vocab_path: Optional[str] = None,
             train_batch_size: int = 32,
             val_batch_size: int = 64,
             num_workers: int = 4,
@@ -22,19 +21,10 @@ class NMRGraphDataModule(pl.LightningDataModule):
         self.save_hyperparameters()
 
     def setup(self, stage: Optional[str] = None) -> None:
-        self.train_dataset = NMRGraphDataset(
-            self.hparams.train_path,
-            self.hparams.local_vocab_path,
-        )
-        self.val_dataset = NMRGraphDataset(
-            self.hparams.val_path,
-            self.hparams.local_vocab_path,
-        )
+        self.train_dataset = NMRGraphDataset(self.hparams.train_path)
+        self.val_dataset = NMRGraphDataset(self.hparams.val_path)
         self.test_dataset = (
-            NMRGraphDataset(
-                self.hparams.test_path,
-                self.hparams.local_vocab_path,
-            )
+            NMRGraphDataset(self.hparams.test_path)
             if self.hparams.test_path
             else None
         )

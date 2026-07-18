@@ -53,7 +53,12 @@ class USPTOPreprocessMetrics(Metrics):
             if num_heavy_atoms > self.max_num_heavy_atoms:
                 self.max_num_heavy_atoms = num_heavy_atoms
             
-            max_count = d.heavy_atom_local_labels.max()
+            fragment_labels = (
+                d.heavy_fragment_labels
+                if hasattr(d, "heavy_fragment_labels")
+                else d.heavy_atom_local_labels
+            )
+            max_count = fragment_labels.max()
             if max_count > self.max_neighbor_type_cout:
                 self.max_neighbor_type_cout = max_count
             
@@ -107,5 +112,3 @@ class USPTOPreprocessMetrics(Metrics):
         self.cnmr_shifts = []
         self.n_hnmr_shifts_per_mol = []
         self.n_cnmr_shifts_per_mol = []
-
-
