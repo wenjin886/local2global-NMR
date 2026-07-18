@@ -1,5 +1,5 @@
 import math
-from typing import Tuple, Optional, Union, Callable
+from typing import Callable, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -34,7 +34,7 @@ class FourierEmbedding(nn.Module):
         x = F.linear(x, self.weight)
         cos_features = torch.cos(2 * math.pi * x)
         sin_features = torch.sin(2 * math.pi * x)
-        x = torch.cat((cos_features, sin_features), dim=1)
+        x = torch.cat((cos_features, sin_features), dim=-1)
 
         return x
 
@@ -42,7 +42,7 @@ class PeakFourierEmbedding(nn.Module):
     def __init__(self, 
                  num_nmr_fourier_features: int,
                  out_dim: int,
-                 h_dim: int | list[int],
+                 h_dim: Union[int, list],
                  n: int, # number of layers
                  activation: Union[Callable, nn.Module] = None,
                  last_linear: bool = True):
@@ -66,6 +66,110 @@ class PeakFourierEmbedding(nn.Module):
     
     def reset_parameters(self):
         self.mlp.reset_parameters()
+
+
+class AtomSlotEmbedding(nn.Module):
+    """Embed atomic numbers and add learned slot queries.
+
+    Slot embeddings deliberately break the symmetry between atoms of the same
+    element.  The loss is responsible for treating exchangeable atoms in a
+    permutation-invariant manner.
+    """
+
+    def __init__(
+            self,
+            hidden_dim: int,
+            max_atomic_number: int = 100,
+            max_num_atoms: int = 192,
+            dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.max_num_atoms = max_num_atoms
+        self.element_embedding = nn.Embedding(
+            max_atomic_number + 1,
+            hidden_dim,
+            padding_idx=0,
+        )
+        self.slot_embedding = nn.Embedding(max_num_atoms, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, atom_types: torch.Tensor) -> torch.Tensor:
+        if atom_types.ndim != 2:
+            raise ValueError("atom_types must have shape [batch, num_atoms]")
+        if atom_types.size(1) > self.max_num_atoms:
+            raise ValueError(
+                "Received %d atoms, but max_num_atoms=%d"
+                % (atom_types.size(1), self.max_num_atoms)
+            )
+
+        slots = torch.arange(atom_types.size(1), device=atom_types.device)
+        slots = self.slot_embedding(slots)[None, :, :]
+        features = self.element_embedding(atom_types) + slots
+        return self.dropout(self.norm(features))
+
+
+class NMRPeakEmbedding(nn.Module):
+    """Shared embedding for unassigned proton and carbon peak tokens.
+
+    ``nucleus_types`` uses 0 for padding, 1 for 1H, and 2 for 13C.  Shifts are
+    standardized with nucleus-specific statistics before Fourier expansion.
+    """
+
+    def __init__(
+            self,
+            hidden_dim: int,
+            num_fourier_features: int = 64,
+            fourier_std: float = 1.0,
+            shift_mean: Sequence[float] = (0.0, 5.0, 100.0),
+            shift_std: Sequence[float] = (1.0, 5.0, 60.0),
+            dropout: float = 0.0,
+    ):
+        super().__init__()
+        if num_fourier_features % 2 != 0:
+            raise ValueError("num_fourier_features must be even")
+        if len(shift_mean) != 3 or len(shift_std) != 3:
+            raise ValueError("shift statistics must contain padding, 1H, and 13C")
+
+        self.fourier = FourierEmbedding(
+            in_features=1,
+            out_features=num_fourier_features,
+            std=fourier_std,
+        )
+        self.nucleus_embedding = nn.Embedding(3, hidden_dim, padding_idx=0)
+        self.shift_projection = nn.Linear(num_fourier_features, hidden_dim)
+        self.integration_projection = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.register_buffer("shift_mean", torch.tensor(shift_mean, dtype=torch.float))
+        self.register_buffer("shift_std", torch.tensor(shift_std, dtype=torch.float))
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+            self,
+            shifts: torch.Tensor,
+            nucleus_types: torch.Tensor,
+            integrations: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if shifts.shape != nucleus_types.shape:
+            raise ValueError("shifts and nucleus_types must have identical shapes")
+        nucleus_types = nucleus_types.long()
+        mean = self.shift_mean[nucleus_types]
+        std = self.shift_std[nucleus_types].clamp_min(1e-6)
+        normalized = ((shifts - mean) / std).unsqueeze(-1)
+
+        features = self.shift_projection(self.fourier(normalized))
+        features = features + self.nucleus_embedding(nucleus_types)
+        if integrations is not None:
+            if integrations.shape != shifts.shape:
+                raise ValueError("integrations and shifts must have identical shapes")
+            features = features + self.integration_projection(
+                torch.log1p(integrations.clamp_min(0.0)).unsqueeze(-1)
+            )
+        return self.dropout(self.norm(features))
 
 def cosine_cutoff(edge_distances: torch.Tensor, cutoff: float):
     return torch.where(

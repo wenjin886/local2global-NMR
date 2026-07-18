@@ -1,0 +1,132 @@
+from typing import Dict, Optional, Tuple
+
+import pytorch_lightning as pl
+import torch
+
+from src.data.dataset import GraphBatch
+from src.model.loss import NMRGraphLoss
+from src.model.nmr_to_graph import NMRToGraph
+
+
+class LitNMRToGraph(pl.LightningModule):
+    def __init__(
+            self,
+            model: NMRToGraph,
+            criterion: NMRGraphLoss,
+            lr: float = 2e-4,
+            weight_decay: float = 1e-12,
+            warm_up_steps: int = 100,
+    ):
+        super().__init__()
+        self.model = model
+        self.criterion = criterion
+        self.save_hyperparameters(ignore=["model", "criterion"])
+
+    def forward(self, batch: GraphBatch) -> Dict[str, object]:
+        return self.model(**batch.model_inputs())
+
+    def basic_step(
+            self,
+            batch: GraphBatch,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, object]]:
+        outputs = self(batch)
+        loss, losses = self.criterion(
+            outputs=outputs,
+            bond_types=batch.bond_types,
+            h_attachment=batch.h_attachment,
+            local_labels=batch.local_labels,
+        )
+        return loss, losses, outputs
+
+    def _shared_step(self, batch: GraphBatch, stage: str) -> torch.Tensor:
+        loss, losses, outputs = self.basic_step(batch)
+        self.log_dict(
+            {"%s/loss_%s" % (stage, key): value for key, value in losses.items()},
+            on_step=stage == "train",
+            on_epoch=True,
+            batch_size=batch.atom_types.size(0),
+        )
+        metrics = self._batch_metrics(outputs, batch)
+        self.log_dict(
+            {"%s/%s" % (stage, key): value for key, value in metrics.items()},
+            on_step=False,
+            on_epoch=True,
+            batch_size=batch.atom_types.size(0),
+        )
+        return loss
+
+    def training_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
+        return self._shared_step(batch, "train")
+
+    def validation_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
+        return self._shared_step(batch, "val")
+
+    def test_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
+        return self._shared_step(batch, "test")
+
+    @staticmethod
+    def _batch_metrics(
+            outputs: Dict[str, object],
+            batch: GraphBatch,
+    ) -> Dict[str, torch.Tensor]:
+        edge_mask = outputs["heavy_edge_mask"] & torch.triu(
+            torch.ones_like(outputs["heavy_edge_mask"], dtype=torch.bool),
+            diagonal=1,
+        )
+        edge_mask = edge_mask & batch.bond_types.ge(0)
+        if edge_mask.any():
+            edge_prediction = outputs["heavy_edge_logits"].argmax(dim=-1)
+            edge_accuracy = (
+                edge_prediction[edge_mask] == batch.bond_types[edge_mask]
+            ).float().mean()
+        else:
+            edge_accuracy = outputs["heavy_edge_logits"].sum() * 0.0
+
+        predicted_counts = outputs["h_attachment_probabilities"].sum(dim=1)
+        target_counts = torch.zeros_like(predicted_counts)
+        for sample_index in range(batch.atom_types.size(0)):
+            valid = outputs["hydrogen_mask"][sample_index] & batch.h_attachment[
+                sample_index
+            ].ge(0)
+            targets = batch.h_attachment[sample_index, valid]
+            if targets.numel() > 0:
+                target_counts[sample_index].scatter_add_(
+                    0,
+                    targets,
+                    torch.ones_like(targets, dtype=target_counts.dtype),
+                )
+        heavy_mask = outputs["heavy_mask"]
+        h_count_mae = (
+            (predicted_counts[heavy_mask] - target_counts[heavy_mask]).abs().mean()
+            if heavy_mask.any()
+            else predicted_counts.sum() * 0.0
+        )
+        return {"edge_accuracy": edge_accuracy, "h_count_mae": h_count_mae}
+
+    def transfer_batch_to_device(
+            self,
+            batch: GraphBatch,
+            device: torch.device,
+            dataloader_idx: int,
+    ) -> GraphBatch:
+        return batch.to(device)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.hparams.lr,
+            amsgrad=True,
+            weight_decay=self.hparams.weight_decay,
+        )
+        if self.hparams.warm_up_steps <= 0:
+            return optimizer
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=1e-2,
+            total_iters=self.hparams.warm_up_steps,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }
+

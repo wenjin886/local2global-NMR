@@ -40,7 +40,7 @@ class MLP(nn.Module):
     def __init__(self,
                  in_dim: int,
                  out_dim: int,
-                 h_dim: int | list[int],
+                 h_dim: Union[int, list],
                  n: int, # number of layers
                  activation: Union[Callable, nn.Module] = None,
                  last_linear: bool = True):
