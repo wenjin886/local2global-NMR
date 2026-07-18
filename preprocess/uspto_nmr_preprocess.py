@@ -26,19 +26,7 @@ from functools import lru_cache
 import h5py
 SEED = 0
 
-SYMBOL_TO_CHARGE = {
-    'H': 1,
-    'C': 6, 'N': 7, 'O': 8, 'F': 9,
-    'Si': 14, 'P': 15, 'S': 16, 'Cl': 17,
-    'Br': 35, 'I': 53, 
-}
 
-CHARGE_TO_SYMBOL = {
-        1:  'H',
-        6:  'C',  7:  'N', 8:  'O', 9:  'F',
-        14: 'Si', 15: 'P', 16: 'S', 17: 'Cl', 
-        35: 'Br', 53: 'I',
-    }
 
 
 # URL_USPTO = "https://zenodo.org/records/17766755/files/uspto.tar.gz?download=1"
@@ -85,440 +73,440 @@ def process_atoms(
     
     return data_list
 
-def get_xyz_txt(atoms, pos, des):
-    xyz_i = f"{len(atoms)}\n"
-    xyz_i += f"{des}\n"
+# def get_xyz_txt(atoms, pos, des):
+#     xyz_i = f"{len(atoms)}\n"
+#     xyz_i += f"{des}\n"
 
-    # deal with atoms within the molecule
-    for atom,p in zip(atoms, pos):
-        xyz_i += f"{atom} {p[0]} {p[1]} {p[2]} \n"
-    return xyz_i
+#     # deal with atoms within the molecule
+#     for atom,p in zip(atoms, pos):
+#         xyz_i += f"{atom} {p[0]} {p[1]} {p[2]} \n"
+#     return xyz_i
 
-def get_clean_smiles(mol: Chem.Mol | str):
-    if type(mol) == str:
-        try:
-            mol = Chem.MolFromSmiles(mol)
-        except Exception as e:
-            print(f"Error parsing SMILES: {e}")
-            return None
+# def get_clean_smiles(mol: Chem.Mol | str):
+#     if type(mol) == str:
+#         try:
+#             mol = Chem.MolFromSmiles(mol)
+#         except Exception as e:
+#             print(f"Error parsing SMILES: {e}")
+#             return None
 
-    mol = Chem.RemoveAllHs(mol)
-    Chem.RemoveStereochemistry(mol)
-    return Chem.MolToSmiles(mol)
+#     mol = Chem.RemoveAllHs(mol)
+#     Chem.RemoveStereochemistry(mol)
+#     return Chem.MolToSmiles(mol)
 
-def check_I_valence(mol: Chem.Mol | str):
-    has_I, is_I_3_bonds, is_I_5_bonds = False,False, False
-    if type(mol) == str:
-        mol = Chem.MolFromSmiles(mol)
-    atoms = mol.GetAtoms()
-    for atom in atoms:
-        h = atom.GetAtomicNum()
+# def check_I_valence(mol: Chem.Mol | str):
+#     has_I, is_I_3_bonds, is_I_5_bonds = False,False, False
+#     if type(mol) == str:
+#         mol = Chem.MolFromSmiles(mol)
+#     atoms = mol.GetAtoms()
+#     for atom in atoms:
+#         h = atom.GetAtomicNum()
 
-        if h == 53:
-            has_I = True
+#         if h == 53:
+#             has_I = True
 
-            explicit_valence = atom.GetExplicitValence()
-            implicit_valence = atom.GetImplicitValence()
-            total_valence = explicit_valence + implicit_valence
+#             explicit_valence = atom.GetExplicitValence()
+#             implicit_valence = atom.GetImplicitValence()
+#             total_valence = explicit_valence + implicit_valence
 
-            if total_valence == 3:
-                is_I_3_bonds = True
-                break
-            elif total_valence == 5:
-                is_I_5_bonds = True
-                break
-    return has_I, is_I_3_bonds, is_I_5_bonds
+#             if total_valence == 3:
+#                 is_I_3_bonds = True
+#                 break
+#             elif total_valence == 5:
+#                 is_I_5_bonds = True
+#                 break
+#     return has_I, is_I_3_bonds, is_I_5_bonds
     
 
 # non_neural_substractures = ['[n+]', '']
 # query_list = [Chem.MolFromSmarts(s)  for s in non_neural_substractures]
-def is_neural_molecule(mol: Chem.Mol | str):
-    if type(mol) == str:
-        if '[n+]' in mol:
-            return False
-        elif '[I+]' in mol:
-            return False
-        elif '[NH3+]' in mol:
-            return False
-        elif '[NH2+]' in mol:
-            return False
-        elif '[NH+]' in mol:
-            return False
-        elif '[S+]' in mol:
-            return False
-        elif '[s+]' in mol:
-            return False
-        elif '[nH+]' in mol:
-            return False
-        elif '[P+]' in mol:
-            return False
-        elif '[Cl+3]' in mol:
-            return False
-        mol = Chem.MolFromSmiles(mol)
+# def is_neural_molecule(mol: Chem.Mol | str):
+#     if type(mol) == str:
+#         if '[n+]' in mol:
+#             return False
+#         elif '[I+]' in mol:
+#             return False
+#         elif '[NH3+]' in mol:
+#             return False
+#         elif '[NH2+]' in mol:
+#             return False
+#         elif '[NH+]' in mol:
+#             return False
+#         elif '[S+]' in mol:
+#             return False
+#         elif '[s+]' in mol:
+#             return False
+#         elif '[nH+]' in mol:
+#             return False
+#         elif '[P+]' in mol:
+#             return False
+#         elif '[Cl+3]' in mol:
+#             return False
+#         mol = Chem.MolFromSmiles(mol)
 
-    query = Chem.MolFromSmarts("[N+;D4](-[*])(-[*])(-[*])-[*]")
-    if mol.HasSubstructMatch(query):
-        return False
+#     query = Chem.MolFromSmarts("[N+;D4](-[*])(-[*])(-[*])-[*]")
+#     if mol.HasSubstructMatch(query):
+#         return False
 
-    total_charge = Chem.rdmolops.GetFormalCharge(mol)
-    if total_charge != 0:
-        return False
+#     total_charge = Chem.rdmolops.GetFormalCharge(mol)
+#     if total_charge != 0:
+#         return False
+#     return True
+
+# def _format_uspto_mol_idx(mol_idx) -> str:
+#     if isinstance(mol_idx, bytes):
+#         mol_idx = mol_idx.decode("utf-8")
+#     if isinstance(mol_idx, str):
+#         return mol_idx if mol_idx.isdigit() else f"{int(mol_idx):07d}"
+#     return f"{int(mol_idx):07d}"
+
+
+# def _save_h5_item_to_npz_dict(
+#     item: h5py.Dataset | h5py.Group,
+#     save_key: str,
+#     npz_data: dict,
+#     ):
+#     for attr_key, attr_value in item.attrs.items():
+#         npz_data[f"{save_key}_attr_{attr_key}"] = np.asarray(attr_value)
+
+#     if isinstance(item, h5py.Dataset):
+#         npz_data[save_key] = item[()]
+#         return
+
+#     for subkey in item.keys():
+#         _save_h5_item_to_npz_dict(item[subkey], f"{save_key}_{subkey}", npz_data)
+
+
+# def _copy_uspto_molecule_without_spectra(
+#     src_file: h5py.File,
+#     dst_file: h5py.File,
+#     mol_idx,
+#     ) -> bool:
+#     mol_idx = _format_uspto_mol_idx(mol_idx)
+#     if mol_idx not in src_file:
+#         print(f"Missing molecule {mol_idx}; skipped.")
+#         return False
+
+#     src_group = src_file[mol_idx]
+#     dst_group = dst_file.create_group(mol_idx)
+#     dst_group.attrs["mol_idx"] = mol_idx
+#     if "smiles" in src_group.attrs:
+#         dst_group.attrs["smiles"] = src_group.attrs["smiles"]
+
+#     if "atom_features" in src_group:
+#         src_group.copy("atom_features", dst_group)
+#     else:
+#         print(f"Molecule {mol_idx} has no atom_features; saved attrs only.")
+
     return True
 
-def _format_uspto_mol_idx(mol_idx) -> str:
-    if isinstance(mol_idx, bytes):
-        mol_idx = mol_idx.decode("utf-8")
-    if isinstance(mol_idx, str):
-        return mol_idx if mol_idx.isdigit() else f"{int(mol_idx):07d}"
-    return f"{int(mol_idx):07d}"
+
+# def read_uspto_h5(
+#     file_path: str,
+#     save_dir: str | Path | None = None,
+#     split_name: str = "split_indices_dedup",
+#     ):
+#     """
+#     Split a large USPTO molecules.h5 by split_indices_dedup.
+
+#     Molecular data are saved as one HDF5 file per split. Each molecule group
+#     only contains mol_idx, smiles and atom_features; spectra are not copied.
+#     The selected split group and valid_indices* are flattened and saved to
+#     indices.npz.
+#     """
+#     save_dir = osp.dirname(file_path) if save_dir is None else str(save_dir)
+#     os.makedirs(save_dir, exist_ok=True)
+
+#     file_list = os.listdir(save_dir)
+#     split_list = ["train", "val", "test"]
+#     for file in file_list:
+#         if file.endswith(".h5"):
+#             if "train" in file: 
+#                 split_list.remove("train")
+#             elif "val" in file:
+#                 split_list.remove("val")
+#             elif "test" in file:
+#                 split_list.remove("test")
+#     if len(split_list) == 0:
+#         log.info("All splits are already processed")
+#         return 
+
+#     indices = {}
+#     split_counts = {}
+#     with h5py.File(file_path, 'r', swmr=True) as f:
+#         if split_name not in f:
+#             raise KeyError(f"Cannot find split group '{split_name}' in {file_path}")
+
+#         for key in [split_name, "valid_indices_h", "valid_indices_c"]:
+#             if key in f:
+#                 _save_h5_item_to_npz_dict(f[key], key, indices)
+
+#         split_group = f[split_name]
+#         for split in split_list:
+#             if split not in split_group:
+#                 raise KeyError(f"Cannot find '{split}' in split group '{split_name}'")
+
+#             split_indices = split_group[split][()]
+#             out_path = osp.join(save_dir, f"{split}_molecules.h5")
+#             copied = 0
+#             with h5py.File(out_path, "w") as out_f:
+#                 out_f.attrs["source_file"] = file_path
+#                 out_f.attrs["split_name"] = split_name
+#                 out_f.attrs["split"] = split
+#                 for mol_idx in tqdm(split_indices, desc=f"Saving {split} molecules", unit="mol"):
+#                     copied += int(_copy_uspto_molecule_without_spectra(f, out_f, mol_idx))
+
+#             split_counts[split] = copied
+
+#     indices["exported_train_count"] = np.asarray(split_counts.get("train", 0), dtype=np.int64)
+#     indices["exported_val_count"] = np.asarray(split_counts.get("val", 0), dtype=np.int64)
+#     indices["exported_test_count"] = np.asarray(split_counts.get("test", 0), dtype=np.int64)
+#     np.savez(osp.join(save_dir, "indices.npz"), **indices)
 
 
-def _save_h5_item_to_npz_dict(
-    item: h5py.Dataset | h5py.Group,
-    save_key: str,
-    npz_data: dict,
-    ):
-    for attr_key, attr_value in item.attrs.items():
-        npz_data[f"{save_key}_attr_{attr_key}"] = np.asarray(attr_value)
-
-    if isinstance(item, h5py.Dataset):
-        npz_data[save_key] = item[()]
-        return
-
-    for subkey in item.keys():
-        _save_h5_item_to_npz_dict(item[subkey], f"{save_key}_{subkey}", npz_data)
-
-
-def _copy_uspto_molecule_without_spectra(
-    src_file: h5py.File,
-    dst_file: h5py.File,
-    mol_idx,
-    ) -> bool:
-    mol_idx = _format_uspto_mol_idx(mol_idx)
-    if mol_idx not in src_file:
-        print(f"Missing molecule {mol_idx}; skipped.")
-        return False
-
-    src_group = src_file[mol_idx]
-    dst_group = dst_file.create_group(mol_idx)
-    dst_group.attrs["mol_idx"] = mol_idx
-    if "smiles" in src_group.attrs:
-        dst_group.attrs["smiles"] = src_group.attrs["smiles"]
-
-    if "atom_features" in src_group:
-        src_group.copy("atom_features", dst_group)
-    else:
-        print(f"Molecule {mol_idx} has no atom_features; saved attrs only.")
-
-    return True
-
-
-def read_uspto_h5(
-    file_path: str,
-    save_dir: str | Path | None = None,
-    split_name: str = "split_indices_dedup",
-    ):
-    """
-    Split a large USPTO molecules.h5 by split_indices_dedup.
-
-    Molecular data are saved as one HDF5 file per split. Each molecule group
-    only contains mol_idx, smiles and atom_features; spectra are not copied.
-    The selected split group and valid_indices* are flattened and saved to
-    indices.npz.
-    """
-    save_dir = osp.dirname(file_path) if save_dir is None else str(save_dir)
-    os.makedirs(save_dir, exist_ok=True)
-
-    file_list = os.listdir(save_dir)
-    split_list = ["train", "val", "test"]
-    for file in file_list:
-        if file.endswith(".h5"):
-            if "train" in file: 
-                split_list.remove("train")
-            elif "val" in file:
-                split_list.remove("val")
-            elif "test" in file:
-                split_list.remove("test")
-    if len(split_list) == 0:
-        log.info("All splits are already processed")
-        return 
-
-    indices = {}
-    split_counts = {}
-    with h5py.File(file_path, 'r', swmr=True) as f:
-        if split_name not in f:
-            raise KeyError(f"Cannot find split group '{split_name}' in {file_path}")
-
-        for key in [split_name, "valid_indices_h", "valid_indices_c"]:
-            if key in f:
-                _save_h5_item_to_npz_dict(f[key], key, indices)
-
-        split_group = f[split_name]
-        for split in split_list:
-            if split not in split_group:
-                raise KeyError(f"Cannot find '{split}' in split group '{split_name}'")
-
-            split_indices = split_group[split][()]
-            out_path = osp.join(save_dir, f"{split}_molecules.h5")
-            copied = 0
-            with h5py.File(out_path, "w") as out_f:
-                out_f.attrs["source_file"] = file_path
-                out_f.attrs["split_name"] = split_name
-                out_f.attrs["split"] = split
-                for mol_idx in tqdm(split_indices, desc=f"Saving {split} molecules", unit="mol"):
-                    copied += int(_copy_uspto_molecule_without_spectra(f, out_f, mol_idx))
-
-            split_counts[split] = copied
-
-    indices["exported_train_count"] = np.asarray(split_counts.get("train", 0), dtype=np.int64)
-    indices["exported_val_count"] = np.asarray(split_counts.get("val", 0), dtype=np.int64)
-    indices["exported_test_count"] = np.asarray(split_counts.get("test", 0), dtype=np.int64)
-    np.savez(osp.join(save_dir, "indices.npz"), **indices)
-
-
-def read_parquets(
-    parquet_dir='../data/uspto/download/data/multimodal_spectroscopic_dataset',
-    save_dir='../data/uspto/preprocessed',
-    ):
-    parquet_files = sorted(os.listdir(parquet_dir), key=lambda x: int(x.split('.')[0].split('_')[-1]))
-    data_list = []
-    for file in tqdm(parquet_files, total=len(parquet_files), desc="Reading parquet files", unit="file"):
-        df = pd.read_parquet(osp.join(parquet_dir, file))
-        data_list.extend(read_parquet_to_nmr_peaks(df))
-        del df
+# def read_parquets(
+#     parquet_dir='../data/uspto/download/data/multimodal_spectroscopic_dataset',
+#     save_dir='../data/uspto/preprocessed',
+#     ):
+#     parquet_files = sorted(os.listdir(parquet_dir), key=lambda x: int(x.split('.')[0].split('_')[-1]))
+#     data_list = []
+#     for file in tqdm(parquet_files, total=len(parquet_files), desc="Reading parquet files", unit="file"):
+#         df = pd.read_parquet(osp.join(parquet_dir, file))
+#         data_list.extend(read_parquet_to_nmr_peaks(df))
+#         del df
     
  
-    os.makedirs(save_dir, exist_ok=True)
-    torch.save(data_list, osp.join(save_dir, "nmr_peaks.pt"))
-    del data_list
-    return data_list
+#     os.makedirs(save_dir, exist_ok=True)
+#     torch.save(data_list, osp.join(save_dir, "nmr_peaks.pt"))
+#     del data_list
+#     return data_list
 
-def read_str(value):
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return value
+# def read_str(value):
+#     if isinstance(value, bytes):
+#         return value.decode("utf-8")
+#     return value
 
-def preprocess_uspto():
+# def preprocess_uspto():
 
-    """
-    item from lmdb:
-        atoms: list, atom symbols
-        coordinates: np.ndarray, (n_atoms, 3)
-        atoms_target: np.ndarray, (n_atoms, 1), nmr shifts
-        atoms_target_mask: np.ndarray, (n_atoms, 1), nmr shifts mask
-        smiles: str
-        db_id: str
-        mol: Chem.Mol
-        inchikey: str
-    """
+#     """
+#     item from lmdb:
+#         atoms: list, atom symbols
+#         coordinates: np.ndarray, (n_atoms, 3)
+#         atoms_target: np.ndarray, (n_atoms, 1), nmr shifts
+#         atoms_target_mask: np.ndarray, (n_atoms, 1), nmr shifts mask
+#         smiles: str
+#         db_id: str
+#         mol: Chem.Mol
+#         inchikey: str
+#     """
 
-    # Download
-    download_dir = os.path.join(target_dir, "download")
-    os.makedirs(download_dir, exist_ok=True)
-    fname = osp.join(download_dir, "uspto.tar.gz")
-    if not osp.exists(fname):
-        log.info(f"The downloaded files will be placed in '{download_dir}'.")
-        log.info(f"Downloading '{URL_USPTO}'...")
-        urllib.request.urlretrieve(URL_USPTO, fname)
-        log.info(f"Done downloading '{URL_USPTO}'...")
+#     # Download
+#     download_dir = os.path.join(target_dir, "download")
+#     os.makedirs(download_dir, exist_ok=True)
+#     fname = osp.join(download_dir, "uspto.tar.gz")
+#     if not osp.exists(fname):
+#         log.info(f"The downloaded files will be placed in '{download_dir}'.")
+#         log.info(f"Downloading '{URL_USPTO}'...")
+#         urllib.request.urlretrieve(URL_USPTO, fname)
+#         log.info(f"Done downloading '{URL_USPTO}'...")
 
-    data_dir = osp.join(download_dir, "data")
-    if not osp.exists(data_dir):
-        # with zipfile.ZipFile(fname, 'r') as zip_ref:
-            # zip_ref.extractall(download_dir)
-        with tarfile.open(fname, 'r') as tar_ref:
-            tar_ref.extractall(download_dir)
-        log.info(f"Done extracting '{fname}'...")
+#     data_dir = osp.join(download_dir, "data")
+#     if not osp.exists(data_dir):
+#         # with zipfile.ZipFile(fname, 'r') as zip_ref:
+#             # zip_ref.extractall(download_dir)
+#         with tarfile.open(fname, 'r') as tar_ref:
+#             tar_ref.extractall(download_dir)
+#         log.info(f"Done extracting '{fname}'...")
     
-    log.info(f"Preprocessing USPTO...")
-    h5_path = osp.join(data_dir, "uspto/molecules.h5")
-    preprocessed_dir = osp.join(download_dir, "preprocessed")
+#     log.info(f"Preprocessing USPTO...")
+#     h5_path = osp.join(data_dir, "uspto/molecules.h5")
+#     preprocessed_dir = osp.join(download_dir, "preprocessed")
     
-    read_uspto_h5(h5_path, save_dir=preprocessed_dir, split_name="split_indices_dedup")
-    log.info(f"Done preprocessing USPTO. Saved files in '{preprocessed_dir}'.")
+#     read_uspto_h5(h5_path, save_dir=preprocessed_dir, split_name="split_indices_dedup")
+#     log.info(f"Done preprocessing USPTO. Saved files in '{preprocessed_dir}'.")
 
 
-    nmr_peaks_file = osp.join(preprocessed_dir, "nmr_peaks.pt")
-    if not osp.exists(nmr_peaks_file):
-        nmr_peaks_data = read_parquets(parquet_dir=osp.join(data_dir, "multimodal_spectroscopic_dataset"), save_dir=preprocessed_dir)
-        log.info(f"Done preprocessing NMR peaks ({len(nmr_peaks_data)} data). Saved files in {nmr_peaks_file}.")
-    else:
-        log.info(f"NMR peaks already processed. Loading from '{nmr_peaks_file}'...")
-        nmr_peaks_data = torch.load(nmr_peaks_file)
-        log.info(f"Done loading NMR peaks ({len(nmr_peaks_data)} data).")
+#     nmr_peaks_file = osp.join(preprocessed_dir, "nmr_peaks.pt")
+#     if not osp.exists(nmr_peaks_file):
+#         nmr_peaks_data = read_parquets(parquet_dir=osp.join(data_dir, "multimodal_spectroscopic_dataset"), save_dir=preprocessed_dir)
+#         log.info(f"Done preprocessing NMR peaks ({len(nmr_peaks_data)} data). Saved files in {nmr_peaks_file}.")
+#     else:
+#         log.info(f"NMR peaks already processed. Loading from '{nmr_peaks_file}'...")
+#         nmr_peaks_data = torch.load(nmr_peaks_file)
+#         log.info(f"Done loading NMR peaks ({len(nmr_peaks_data)} data).")
         
 
-    smiles_to_idx = {}
-    for i, data in tqdm(enumerate(nmr_peaks_data), total=len(nmr_peaks_data), desc="SMILES to NMR data index", unit="data"):
-        if data.smiles not in smiles_to_idx:
-            smiles_to_idx[data.smiles] = i
-        else:
-            if type(smiles_to_idx[data.smiles]) == list:
-                smiles_to_idx[data.smiles].append(i)
-            else:
-                smiles_to_idx[data.smiles] = [smiles_to_idx[data.smiles], i]
+#     smiles_to_idx = {}
+#     for i, data in tqdm(enumerate(nmr_peaks_data), total=len(nmr_peaks_data), desc="SMILES to NMR data index", unit="data"):
+#         if data.smiles not in smiles_to_idx:
+#             smiles_to_idx[data.smiles] = i
+#         else:
+#             if type(smiles_to_idx[data.smiles]) == list:
+#                 smiles_to_idx[data.smiles].append(i)
+#             else:
+#                 smiles_to_idx[data.smiles] = [smiles_to_idx[data.smiles], i]
     
-    save_dir = osp.join(target_dir, "preprocessed")
-    os.makedirs(save_dir, exist_ok=True)
+#     save_dir = osp.join(target_dir, "preprocessed")
+#     os.makedirs(save_dir, exist_ok=True)
 
-    for split in ['val', 'test', 'train']:
-    # for split in ['test', 'train']:
-        h5_file_path = osp.join(preprocessed_dir, f"{split}_molecules.h5")
-        log.info(f"Processing {split} molecules...")
+#     for split in ['val', 'test', 'train']:
+#     # for split in ['test', 'train']:
+#         h5_file_path = osp.join(preprocessed_dir, f"{split}_molecules.h5")
+#         log.info(f"Processing {split} molecules...")
 
-        invalid_mol = {
-            "None_mol": [],
-            "not_neural_molecule": [],
-            "I_3_bonds": [],
-            "I_5_bonds": [],
-            "num_total_mol_with_I": 0,
-            "max_pairwise_dist": 30,
-            "dist_too_large": [],
-            "dataset_max_pairwise_dist": 0,
-            "max_num_atoms": 170,
-            "num_atoms_too_large": [],
-            "not_found_in_nmr_data": [],
-            "geo_error": [],
-        }
-        heavy_atom_count = {}
-        total_heavy_atoms_count = {}
-        split_list = [] 
-        num_mol = 0
-        num_entries = 0
+#         invalid_mol = {
+#             "None_mol": [],
+#             "not_neural_molecule": [],
+#             "I_3_bonds": [],
+#             "I_5_bonds": [],
+#             "num_total_mol_with_I": 0,
+#             "max_pairwise_dist": 30,
+#             "dist_too_large": [],
+#             "dataset_max_pairwise_dist": 0,
+#             "max_num_atoms": 170,
+#             "num_atoms_too_large": [],
+#             "not_found_in_nmr_data": [],
+#             "geo_error": [],
+#         }
+#         heavy_atom_count = {}
+#         total_heavy_atoms_count = {}
+#         split_list = [] 
+#         num_mol = 0
+#         num_entries = 0
 
-        # split_metrics = USPTOPreprocessMetrics(summarize_hidden=True, hidden_prefix="")
+#         # split_metrics = USPTOPreprocessMetrics(summarize_hidden=True, hidden_prefix="")
      
-        with h5py.File(h5_file_path, 'r', swmr=True) as f:
-            for mol_idx in tqdm(f, total=len(f), desc=f"Processing {split} molecules", unit="mol"):
-                mol = f[mol_idx]
-                original_smiles = read_str(mol.attrs["smiles"])
-                id = read_str(mol.attrs["mol_idx"])
+#         with h5py.File(h5_file_path, 'r', swmr=True) as f:
+#             for mol_idx in tqdm(f, total=len(f), desc=f"Processing {split} molecules", unit="mol"):
+#                 mol = f[mol_idx]
+#                 original_smiles = read_str(mol.attrs["smiles"])
+#                 id = read_str(mol.attrs["mol_idx"])
              
-                # === check smiles ===
-                smiles = get_clean_smiles(original_smiles)
-                if smiles is None:
-                    invalid_mol["None_mol"].append(id)
-                    continue
-                if not is_neural_molecule(smiles):
-                    invalid_mol["not_neural_molecule"].append(id)
-                    continue
-                has_I, is_I_3_bonds, is_I_5_bonds = check_I_valence(smiles)
-                if has_I:
-                    if is_I_3_bonds:
-                        invalid_mol["I_3_bonds"].append(id)
-                        continue
-                    elif is_I_5_bonds:
-                        invalid_mol["I_5_bonds"].append(id)
-                        continue
+#                 # === check smiles ===
+#                 smiles = get_clean_smiles(original_smiles)
+#                 if smiles is None:
+#                     invalid_mol["None_mol"].append(id)
+#                     continue
+#                 if not is_neural_molecule(smiles):
+#                     invalid_mol["not_neural_molecule"].append(id)
+#                     continue
+#                 has_I, is_I_3_bonds, is_I_5_bonds = check_I_valence(smiles)
+#                 if has_I:
+#                     if is_I_3_bonds:
+#                         invalid_mol["I_3_bonds"].append(id)
+#                         continue
+#                     elif is_I_5_bonds:
+#                         invalid_mol["I_5_bonds"].append(id)
+#                         continue
                 
-                # === check nmr peaks ===
-                if original_smiles not in smiles_to_idx:
-                    log.info(f"SMILES {original_smiles} not found in nmr data")
-                    invalid_mol["not_found_in_nmr_data"].append(id)
-                    continue
+#                 # === check nmr peaks ===
+#                 if original_smiles not in smiles_to_idx:
+#                     log.info(f"SMILES {original_smiles} not found in nmr data")
+#                     invalid_mol["not_found_in_nmr_data"].append(id)
+#                     continue
 
-                # === process atoms ===
-                if "atom_features" not in mol:
-                    raise KeyError(f"{mol_idx} has no atom_features group")
+#                 # === process atoms ===
+#                 if "atom_features" not in mol:
+#                     raise KeyError(f"{mol_idx} has no atom_features group")
 
-                atom_features = mol["atom_features"]
-                atom_mask = atom_features["atom_mask"][()]
-                num_atoms = int(atom_mask.sum())
+#                 atom_features = mol["atom_features"]
+#                 atom_mask = atom_features["atom_mask"][()]
+#                 num_atoms = int(atom_mask.sum())
 
-                atom_charges = atom_features["atom_charges"][()] # np.ndarray, (num_atoms, 3)
-                assert atom_charges.shape[0] == num_atoms, f"atom_charges.shape[0] != num_atoms: {atom_charges.shape[0]} != {num_atoms}"
+#                 atom_charges = atom_features["atom_charges"][()] # np.ndarray, (num_atoms, 3)
+#                 assert atom_charges.shape[0] == num_atoms, f"atom_charges.shape[0] != num_atoms: {atom_charges.shape[0]} != {num_atoms}"
                 
-                atom_coords = atom_features["atom_coords"][()] # np.ndarray, (3, num_atoms, 3),  3 ground-truth conformers
-                assert atom_coords.shape[1] == num_atoms, f"atom_coords.shape[1] != num_atoms: {atom_coords.shape[1]} != {num_atoms}"
+#                 atom_coords = atom_features["atom_coords"][()] # np.ndarray, (3, num_atoms, 3),  3 ground-truth conformers
+#                 assert atom_coords.shape[1] == num_atoms, f"atom_coords.shape[1] != num_atoms: {atom_coords.shape[1]} != {num_atoms}"
 
-                # check if the molecule is too large (max pairwise distance: 30 Å)
-                pos_list = []
-                # assert atom_coords.shape[0] == 3, f"atom_coords.shape[0] != 3: {atom_coords.shape}"
-                for i in range(atom_coords.shape[0]):
-                    pos = atom_coords[i]
-                    dist_mat = np.linalg.norm(
-                        pos[:, None, :] - pos[None, :, :],
-                        axis=-1
-                    )
+#                 # check if the molecule is too large (max pairwise distance: 30 Å)
+#                 pos_list = []
+#                 # assert atom_coords.shape[0] == 3, f"atom_coords.shape[0] != 3: {atom_coords.shape}"
+#                 for i in range(atom_coords.shape[0]):
+#                     pos = atom_coords[i]
+#                     dist_mat = np.linalg.norm(
+#                         pos[:, None, :] - pos[None, :, :],
+#                         axis=-1
+#                     )
 
-                    max_dist = dist_mat.max()
-                    if max_dist > invalid_mol["max_pairwise_dist"]:
-                        log.info(f"molecule {id}, conformer {i} | pairwise distance {max_dist} > {invalid_mol['max_pairwise_dist']} Å: {smiles}")
-                        continue
-                    pos_list.append(pos)
-                if len(pos_list) == 0:
-                    invalid_mol["dist_too_large"].append(id)
-                    continue
+#                     max_dist = dist_mat.max()
+#                     if max_dist > invalid_mol["max_pairwise_dist"]:
+#                         log.info(f"molecule {id}, conformer {i} | pairwise distance {max_dist} > {invalid_mol['max_pairwise_dist']} Å: {smiles}")
+#                         continue
+#                     pos_list.append(pos)
+#                 if len(pos_list) == 0:
+#                     invalid_mol["dist_too_large"].append(id)
+#                     continue
                 
-                # === get data ===
-                heavy_atoms_mask = (atom_charges != 1)
-                num_heavy_atoms = int(heavy_atoms_mask.sum())
-                if num_heavy_atoms not in total_heavy_atoms_count:
-                    total_heavy_atoms_count[num_heavy_atoms] = 0
-                total_heavy_atoms_count[num_heavy_atoms] += 1
+#                 # === get data ===
+#                 heavy_atoms_mask = (atom_charges != 1)
+#                 num_heavy_atoms = int(heavy_atoms_mask.sum())
+#                 if num_heavy_atoms not in total_heavy_atoms_count:
+#                     total_heavy_atoms_count[num_heavy_atoms] = 0
+#                 total_heavy_atoms_count[num_heavy_atoms] += 1
 
-                heavy_atoms = atom_charges[heavy_atoms_mask]
-                for heavy_atom in heavy_atoms:
-                    heavy_atom = int(heavy_atom)
-                    if heavy_atom not in heavy_atom_count:
-                        heavy_atom_count[heavy_atom] = 0
-                    heavy_atom_count[heavy_atom] += 1
+#                 heavy_atoms = atom_charges[heavy_atoms_mask]
+#                 for heavy_atom in heavy_atoms:
+#                     heavy_atom = int(heavy_atom)
+#                     if heavy_atom not in heavy_atom_count:
+#                         heavy_atom_count[heavy_atom] = 0
+#                     heavy_atom_count[heavy_atom] += 1
                 
-                nmr_idx = smiles_to_idx[original_smiles]
-                if type(nmr_idx) == list:
-                    nmr_data = []
-                    for idx in nmr_idx:
-                        nmr_data.append(nmr_peaks_data[idx])
-                else:
-                    nmr_data = [nmr_peaks_data[nmr_idx]]
-                data_list = process_atoms(
-                    atom_charges, pos_list,
-                    id, smiles, original_smiles,
-                    nmr_data,
-                    split,
-                    ) 
+#                 nmr_idx = smiles_to_idx[original_smiles]
+#                 if type(nmr_idx) == list:
+#                     nmr_data = []
+#                     for idx in nmr_idx:
+#                         nmr_data.append(nmr_peaks_data[idx])
+#                 else:
+#                     nmr_data = [nmr_peaks_data[nmr_idx]]
+#                 data_list = process_atoms(
+#                     atom_charges, pos_list,
+#                     id, smiles, original_smiles,
+#                     nmr_data,
+#                     split,
+#                     ) 
 
                 
-                geo_checked_data_list = []
-                for data in data_list:
-                    try:
-                        split_metrics(data)
-                    except Exception as e:
-                        log.info(f"Geometry Error: Error processing molecule {id}")
-                        log.info(f"Data: {data}")
-                        xyz_txt = get_xyz_txt(
-                            [CHARGE_TO_SYMBOL[int(h)] for h in data.h], 
-                            data.pos.tolist(), 
-                            data.smiles
-                            )
-                        log.info(xyz_txt)
-                        invalid_mol["geo_error"].append(data.id)
-                        continue
-                    geo_checked_data_list.append(data)
+#                 geo_checked_data_list = []
+#                 for data in data_list:
+#                     try:
+#                         split_metrics(data)
+#                     except Exception as e:
+#                         log.info(f"Geometry Error: Error processing molecule {id}")
+#                         log.info(f"Data: {data}")
+#                         xyz_txt = get_xyz_txt(
+#                             [CHARGE_TO_SYMBOL[int(h)] for h in data.h], 
+#                             data.pos.tolist(), 
+#                             data.smiles
+#                             )
+#                         log.info(xyz_txt)
+#                         invalid_mol["geo_error"].append(data.id)
+#                         continue
+#                     geo_checked_data_list.append(data)
                 
-                split_list.extend(geo_checked_data_list) 
-                num_mol += 1
-                num_entries += len(geo_checked_data_list)
+#                 split_list.extend(geo_checked_data_list) 
+#                 num_mol += 1
+#                 num_entries += len(geo_checked_data_list)
 
                 
                 
         
-        log.info(f"Summarizing infos...")
-        infos_path = os.path.join(save_dir, f"{split}_infos.json")
-        agg_infos = split_metrics.summarize()
-        del split_metrics
-        agg_infos['num_mol'] = num_mol
-        agg_infos['num_entries'] = num_entries
-        # save_json(agg_infos, infos_path)
+#         log.info(f"Summarizing infos...")
+#         infos_path = os.path.join(save_dir, f"{split}_infos.json")
+#         agg_infos = split_metrics.summarize()
+#         del split_metrics
+#         agg_infos['num_mol'] = num_mol
+#         agg_infos['num_entries'] = num_entries
+#         # save_json(agg_infos, infos_path)
 
-        pt_path = osp.join(save_dir, f"{split}.pt")
-        torch.save(split_list, pt_path)
-        log.info(f"Done processing split: '{split}'. Saved in '{pt_path}'.")
+#         pt_path = osp.join(save_dir, f"{split}.pt")
+#         torch.save(split_list, pt_path)
+#         log.info(f"Done processing split: '{split}'. Saved in '{pt_path}'.")
     
-    heavy_atom_info = {
-            "heavy_atom_count": heavy_atom_count,
-            "total_heavy_atoms_count": total_heavy_atoms_count
-        }
+#     heavy_atom_info = {
+#             "heavy_atom_count": heavy_atom_count,
+#             "total_heavy_atoms_count": total_heavy_atoms_count
+#         }
 
 BOND_TYPE_TO_idx = {
     Chem.BondType.SINGLE: 1,
@@ -527,33 +515,67 @@ BOND_TYPE_TO_idx = {
     Chem.BondType.AROMATIC: 4,
     }
 
-def get_local_label(atom: Chem.Atom, mol: Chem.Mol=None):
-    """
-    return: [is_aromatic, num_neighbor_H, heavy_atom_neighbor1, bond1, ...]
-        is_aromatic: bool
-        neighbor1: int
-        bond1: int
-        ...
-    """
-    is_aromatic = int(atom.GetIsAromatic())
-    num_neighbor_H = 0
+SYMBOL_TO_CHARGE = {
+    'H': 1,
+    'C': 6, 'N': 7, 'O': 8, 'F': 9,
+    'Si': 14, 'P': 15, 'S': 16, 'Cl': 17,
+    'Br': 35, 'I': 53, 
+}
 
-    neighbors = []
+CHARGE_TO_SYMBOL = {
+        1:  'H',
+        6:  'C',  7:  'N', 8:  'O', 9:  'F',
+        14: 'Si', 15: 'P', 16: 'S', 17: 'Cl', 
+        35: 'Br', 53: 'I',
+    }
+CHARGES = [1, 6, 7, 8, 9, 14, 15, 16, 17, 35, 53]
+
+BOND_TYPE_CANDIDATES = [
+    '1-1',
+    '6-1', '6-2', '6-3', '6-4',
+    '7-1', '7-2', '7-3', '7-4',
+    '8-1', '8-2', '8-4',
+    '9-1', 
+    '15-1', '15-2', '15-4',
+    '16-1', '16-2', '16-4',
+    '17-1', 
+    '35-1', 
+    '53-1', 
+]
+
+
+def get_heavy_atom_local_label(atom: Chem.Atom, mol: Chem.Mol=None, num_max_count: int=4):
+    """
+    return: 
+        [neighbor_type, count]
+    """
+
+    neighbors = atom.GetNeighbors()
+    assert atom.GetAtomicNum() != 1, f"Atom {atom.GetSymbol()} is H"
+        
+    heavy_atom_neighbors = torch.zeros(len(BOND_TYPE_CANDIDATES), dtype=torch.int32) 
+    
+    neighbor_type_counts = {}
     for neighbor in atom.GetNeighbors():
         neighbor_charge = neighbor.GetAtomicNum()
-        if neighbor_charge == 1:
-            num_neighbor_H += 1
-            continue
         bond = mol.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
         bond_type_idx = BOND_TYPE_TO_idx[bond.GetBondType()]
-        neighbors.append([neighbor_charge, bond_type_idx])
+        neighbor_type = f"{neighbor_charge}-{bond_type_idx}"
+        assert neighbor_type in BOND_TYPE_CANDIDATES, f"Invalid neighbor type: {neighbor_type}"
+        if neighbor_type not in neighbor_type_counts:
+            neighbor_type_counts[neighbor_type] = 0
+        neighbor_type_counts[neighbor_type] += 1
     
-    neighbors = sorted(neighbors, key=lambda x: (x[0], x[1]))
-    label = f"{is_aromatic}{num_neighbor_H}"
-    for neighbor in neighbors:
-        label += f"{neighbor[0]}{neighbor[1]}"
-    # print(label)
-    return label
+    for neighbor_type, count in neighbor_type_counts.items():
+        heavy_atom_neighbors[BOND_TYPE_CANDIDATES.index(neighbor_type)] = count
+    
+    return heavy_atom_neighbors
+    
+
+
+    
+    
+    
 
 def smiles_to_local_label(smiles: str):
     
@@ -562,49 +584,30 @@ def smiles_to_local_label(smiles: str):
         raise ValueError(f"Invalid SMILES: {smiles}")
     
     mol=Chem.AddHs(mol)
-    charge_labels = {}
+    
+    canno_atoms = []
+    
+    hydrogen_neighbors = []
+    
+    is_aromatic = []
+    heavy_atom_local_labels = []
+
+    
     for atom in mol.GetAtoms():
+
         charge = atom.GetAtomicNum()
+        canno_atoms.append(charge)
+
         if charge == 1:
+            hydrogen_neighbors.append(atom.GetNeighbors()[0].GetAtomicNum())
             continue
-        if charge not in charge_labels:
-            charge_labels[charge] = {}
+
+        is_aromatic.append(int(atom.GetIsAromatic()))
         
-        label = get_local_label(atom, mol)
-        if label not in charge_labels[charge]:
-            charge_labels[charge][label] = 0
+        label = get_heavy_atom_local_label(atom, mol)
+        heavy_atom_local_labels.append(label)
 
-        charge_labels[charge][label] += 1
-    
-    # print(smiles)
-    # print(charge_labels)
-    # raise ValueError("Stop here")
-    
-    return charge_labels
-
-def build_label_vocab(parquet_dir: str, save_dir: str='./'):
-    parquet_files = sorted(os.listdir(parquet_dir), key=lambda x: int(x.split('.')[0].split('_')[-1]))
-    charge_labels = {}
-    for file in tqdm(parquet_files, total=len(parquet_files), desc="Reading parquet files", unit="file"):
-        df = pd.read_parquet(osp.join(parquet_dir, file))
-        smiles = df['smiles'].tolist()
-        for smile in smiles:
-            charge_labels_i = smiles_to_local_label(smile)
-            for charge, label in charge_labels_i.items():
-                if charge not in charge_labels:
-                    charge_labels[charge] = {}
-                for label, count in label.items():
-                    if label not in charge_labels[charge]:
-                        charge_labels[charge][label] = 0
-                    charge_labels[charge][label] += count
-    sorted_charge_labels = {
-        str(charge): dict(sorted(labels.items(), key=lambda x: (-x[1], x[0])))
-        for charge, labels in sorted(charge_labels.items())
-    }
-    with open(osp.join(save_dir, 'label_vocab.json'), 'w') as f:
-        json.dump(sorted_charge_labels, f, indent=4)
-    
-    
+    return canno_atoms, hydrogen_neighbors, is_aromatic, heavy_atom_local_labels
 
 def preprocess_parquet(df: pd.DataFrame):
     """
@@ -620,8 +623,7 @@ def preprocess_parquet(df: pd.DataFrame):
        'msms_scarf_fragments_positive']
     """
     data_list =[]
-    charge_labels = {}
-    for _, row in df.iterrows():
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing parquet files", unit="file"):
         h_nmr_peaks, c_nmr_peaks = [], []
         
         for peak in row['h_nmr_peaks']:
@@ -629,26 +631,41 @@ def preprocess_parquet(df: pd.DataFrame):
         for peak in row['c_nmr_peaks']:
             c_nmr_peaks.append(peak['delta (ppm)'])
         
-
+        smiles = row['smiles']
+        canno_atoms, hydrogen_neighbors, is_aromatic_heavy_atoms, heavy_atom_local_labels = smiles_to_local_label(smiles)
+        input_h = sorted(canno_atoms)
         data = Data(
-            smiles=row['smiles'],
+            smiles=smiles,
             h_nmr = torch.tensor(sorted(h_nmr_peaks)),
             c_nmr = torch.tensor(sorted(c_nmr_peaks)),
+            h = torch.tensor(input_h),
+            canno_h = torch.tensor(canno_atoms),
+            hydrogen_neighbors = torch.tensor(hydrogen_neighbors), # [N_H, ]
+            is_aromatic_heavy_atoms = torch.tensor(is_aromatic_heavy_atoms), # [N_heavy_atoms, ]
+            heavy_atom_local_labels = torch.stack(heavy_atom_local_labels), # [N_heavy_atoms, NUM_NEIGHBOR_TYPES]
         )
 
         data_list.append(data)
     return data_list
 
+def preprocess_uspto(parquet_dir: str, save_dir: str=None):
+    file_list = os.listdir(parquet_dir)
+    total_data_list = []
+    for file in file_list:
+        if not file.endswith('.parquet'):
+            continue
+        df = pd.read_parquet(osp.join(parquet_dir, file))
+        data_list = preprocess_parquet(df)
+        total_data_list.extend(data_list)
+
+    if save_dir is None:
+        save_dir = osp.dirname(parquet_dir)
+    print(f"Saving to {osp.join(save_dir, 'processed_uspto.pt')}")
+    torch.save(total_data_list, osp.join(save_dir, 'processed_uspto.pt'))
+    
+
 if __name__ == '__main__':
-    # parquet_dir = "./exp_data/example_data_1.parquet"
+    parquet_dir = "../data/uspto/exp_data/"
     # df = pd.read_parquet(parquet_dir)
-    # print(df.columns)
-    build_label_vocab('./exp_data/')
-    # read_parquets()
-    # preprocess_uspto()
-
-
-
-    pass
-
- 
+    # preprocess_parquet(df)
+    preprocess_uspto(parquet_dir)
