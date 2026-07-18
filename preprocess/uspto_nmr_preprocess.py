@@ -23,7 +23,8 @@ import pickle
 from functools import lru_cache
 # log = utils.get_pylogger(__name__)
 
-import h5py
+# import h5py
+from src.metrics.uspto import USPTOPreprocessMetrics
 SEED = 0
 
 
