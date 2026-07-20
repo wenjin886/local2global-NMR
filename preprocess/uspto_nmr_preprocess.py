@@ -655,14 +655,17 @@ def preprocess_parquet(df: pd.DataFrame):
         for peak in row['h_nmr_peaks']:
             shift = float(peak['delta'])
             integration, integration_available = _optional_float(peak.get('nH'))
-            multiplicity = multiplicity_to_index(peak.get('category'))
+            # multiplicity = multiplicity_to_index(peak.get('category'))
+            multiplicity = peak.get('category')
+
             j_values = _parse_j_values(peak.get('j_values'))
             h_peaks.append((
                 shift,
                 integration,
                 integration_available,
                 multiplicity,
-                multiplicity not in (0, 1),
+                # multiplicity not in (0, 1),
+                # multi_mask,
                 j_values,
             ))
         h_peaks.sort(key=lambda values: values[0])
@@ -693,12 +696,13 @@ def preprocess_parquet(df: pd.DataFrame):
             h_nmr_integration_mask=torch.tensor(
                 [values[2] for values in h_peaks], dtype=torch.bool
             ),
-            h_nmr_multiplicity=torch.tensor(
-                [values[3] for values in h_peaks], dtype=torch.long
-            ),
-            h_nmr_multiplicity_mask=torch.tensor(
-                [values[4] for values in h_peaks], dtype=torch.bool
-            ),
+            h_nmr_multiplicity=[values[3] for values in h_peaks],
+            # h_nmr_multiplicity=torch.tensor(
+            #     [values[3] for values in h_peaks], dtype=torch.long
+            # ),
+            # h_nmr_multiplicity_mask=torch.tensor(
+            #     [values[4] for values in h_peaks], dtype=torch.bool
+            # ),
             h_nmr_j=h_nmr_j,
             h_nmr_j_mask=h_nmr_j_mask,
             h = graph_targets["h"],
@@ -712,6 +716,9 @@ def preprocess_parquet(df: pd.DataFrame):
             h_parent_fragment_labels=graph_targets["h_parent_fragment_labels"],
             heavy_fragment_labels=graph_targets["heavy_fragment_labels"],
         )
+        print(data.c_nmr.shape)
+        print(data.c_nmr)
+        raise ValueError("Stop here")
 
         data_list.append(data)
     return data_list

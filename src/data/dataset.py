@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import torch
 from torch.utils.data import Dataset
+import json
 
 from .constants import (
     BOND_TYPE_CANDIDATES,
@@ -169,7 +170,7 @@ class GraphSample:
     h_nmr_integration: torch.Tensor
     h_nmr_integration_mask: torch.Tensor
     h_nmr_multiplicity: torch.Tensor
-    h_nmr_multiplicity_mask: torch.Tensor
+    # h_nmr_multiplicity_mask: torch.Tensor
     h_nmr_j: torch.Tensor
     h_nmr_j_mask: torch.Tensor
     bond_types: torch.Tensor
@@ -281,16 +282,16 @@ class NMRGraphDataset(Dataset):
                 h_nmr, integration_is_available, dtype=torch.bool
             )
         multiplicity = _get_value(item, "h_nmr_multiplicity")
-        multiplicity_is_available = multiplicity is not None
-        if multiplicity is None:
-            multiplicity = torch.full_like(
-                h_nmr, MULTIPLICITY_MISSING_INDEX, dtype=torch.long
-            )
-        multiplicity_mask = _get_value(item, "h_nmr_multiplicity_mask")
-        if multiplicity_mask is None:
-            multiplicity_mask = torch.full_like(
-                h_nmr, multiplicity_is_available, dtype=torch.bool
-            )
+        # multiplicity_is_available = multiplicity is not None
+        # if multiplicity is None:
+        #     multiplicity = torch.full_like(
+        #         h_nmr, MULTIPLICITY_MISSING_INDEX, dtype=torch.long
+        #     )
+        # multiplicity_mask = _get_value(item, "h_nmr_multiplicity_mask")
+        # if multiplicity_mask is None:
+        #     multiplicity_mask = torch.full_like(
+        #         h_nmr, multiplicity_is_available, dtype=torch.bool
+        #     )
         j_values = _get_value(item, "h_nmr_j")
         if j_values is None:
             j_values = torch.zeros((h_nmr.numel(), MAX_J_VALUES), dtype=torch.float)
@@ -306,8 +307,9 @@ class NMRGraphDataset(Dataset):
             c_nmr=_as_1d_tensor(_get_value(item, "c_nmr"), torch.float),
             h_nmr_integration=_as_1d_tensor(integration, torch.float),
             h_nmr_integration_mask=_as_1d_tensor(integration_mask, torch.bool),
-            h_nmr_multiplicity=_as_1d_tensor(multiplicity, torch.long),
-            h_nmr_multiplicity_mask=_as_1d_tensor(multiplicity_mask, torch.bool),
+            h_nmr_multiplicity=multiplicity,
+            # h_nmr_multiplicity=_as_1d_tensor(multiplicity, torch.long),
+            # h_nmr_multiplicity_mask=_as_1d_tensor(multiplicity_mask, torch.bool),
             h_nmr_j=j_values,
             h_nmr_j_mask=torch.as_tensor(j_mask, dtype=torch.bool),
             bond_types=targets["bond_types"],
@@ -411,3 +413,12 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
         h_parent_types=h_parent_types,
         smiles=[sample.smiles for sample in samples],
     )
+
+if __name__ == "__main__":
+    from .transforms import MultiplicityToIndex
+    transform = MultiplicityToIndex(stats_path="data/uspto/exp_data/dataset_infos.json")
+    dataset = NMRGraphDataset("data/uspto/exp_data/processed_uspto.pt", transform=transform)
+    print(dataset[0])
+    # print(dataset[0].h_nmr_multiplicity.shape)
+    print(dataset[0].h_nmr_multiplicity)
+    

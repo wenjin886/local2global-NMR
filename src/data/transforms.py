@@ -86,6 +86,28 @@ class NormalizeNMR:
             setattr(data, key, normalized)
         return data
 
+class MultiplicityToIndex(BaseTransform):
+    def __init__(
+            self,
+            stats_path: str,
+            key: str = "h_nmr_multiplicity",
+
+        ):
+        self.key = key
+        with open(stats_path, encoding="utf-8") as handle:
+            dataset_infos = json.load(handle)
+            multiplicity = dataset_infos['multiplicity_counts'].keys()
+            self.mapping = {v: i for (i, v) in enumerate(multiplicity)}
+        del dataset_infos
+            
+
+    def forward(self, data: Data) -> Data:
+        data_key = getattr(data, self.key)
+        # assert data_key.ndim == 1
+        x = torch.as_tensor([self.mapping[xi] for xi in data_key])
+        setattr(data, self.key, x)
+        return data
+    
 
 @functional_transform('one_hot')
 class OneHot(BaseTransform):
