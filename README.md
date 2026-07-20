@@ -91,9 +91,12 @@ python src/train.py -cn train_uspto_graph \
   lit_module.model.use_smiles_conditioning=true
 ```
 
-Canonical non-stereochemical SMILES are encoded losslessly at character level,
-with BOS/EOS/PAD/UNK control tokens. This avoids collapsing rare bracket, ring,
-charge, or bond syntax into a small hand-written token vocabulary.
+The generation target is canonical isomeric SMILES, so atom chirality and bond
+stereochemistry are preserved. `rxn.chemutils.tokenization.tokenize_smiles`
+produces chemical tokens such as `[C@H]`, `Cl`, `/`, and `\\`. The vocabulary
+is built from the training split during preprocessing and stored in
+`dataset_infos.json` together with BOS/EOS/PAD/UNK control tokens. Validation
+and test tokens absent from the training vocabulary map to `<unk>`.
 
 ## H-to-heavy retrieval
 
@@ -156,6 +159,8 @@ running RDKit in every training epoch.
 USPTO preprocessing removes atom and bond stereochemistry and converts every
 SMILES to a canonical non-isomeric identity before splitting. Consequently,
 variants containing `@`, `/`, or `\\` cannot occur in different splits.
+This non-isomeric identity is used only for grouping and deduplication; it does
+not replace the stereochemistry-preserving SMILES generation target.
 The default split is deterministic with seed 0:
 
 ```text

@@ -30,7 +30,7 @@ def test_normalize_nmr_respects_metadata_masks(tmp_path):
     sample.h_nmr_j = torch.tensor([[9.0, 0.0], [0.0, 0.0]])
     sample.h_nmr_j_mask = torch.tensor([[True, False], [False, False]])
 
-    output = NormalizeNMR(str(path))(sample)
+    output = NormalizeNMR(str(path), encode_smiles=False)(sample)
 
     assert torch.equal(output.h_nmr, torch.tensor([-1.0, 1.0]))
     assert torch.equal(output.c_nmr, torch.tensor([-1.0, 1.0]))
@@ -59,7 +59,7 @@ def test_multiplicity_vocab_keeps_every_training_label(tmp_path):
     sample.c_nmr = torch.zeros(1)
     sample.h_nmr_multiplicity = ["d", "ddddd", "dtdd", "new-label"]
 
-    output = NormalizeNMR(str(path))(sample)
+    output = NormalizeNMR(str(path), encode_smiles=False)(sample)
 
     assert output.h_nmr_multiplicity.tolist() == [3, 4, 5, 2]
     assert output.h_nmr_multiplicity_mask.tolist() == [True, True, True, True]

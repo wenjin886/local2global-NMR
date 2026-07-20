@@ -4,7 +4,12 @@ from typing import Optional, Union
 
 import numpy as np
 
-from src.data.constants import MULTIPLICITY_VOCAB, normalize_multiplicity_label
+from src.data.constants import (
+    MULTIPLICITY_VOCAB,
+    SMILES_SPECIAL_TOKENS,
+    normalize_multiplicity_label,
+)
+from src.data.smiles import tokenize_smiles_tokens
 from .base import Metrics, read_json
 
 
@@ -94,6 +99,10 @@ class USPTOPreprocessMetrics(Metrics):
             if hasattr(item, "h_nmr_multiplicity"):
                 for value in item.h_nmr_multiplicity:
                     self.multiplicity_counts[normalize_multiplicity_label(value)] += 1
+            smiles = getattr(item, "isomeric_smiles", getattr(item, "smiles", ""))
+            smiles_tokens = tokenize_smiles_tokens(smiles)
+            self.smiles_token_counts.update(smiles_tokens)
+            self.smiles_token_lengths.append(len(smiles_tokens) + 1)  # EOS
 
     def summarize(self) -> dict:
         p = self.prefix
@@ -128,6 +137,18 @@ class USPTOPreprocessMetrics(Metrics):
             for label in labels
         }
         summary["num_multiplicity_classes"] = len(labels)
+        observed_smiles_tokens = sorted(
+            token for token in self.smiles_token_counts
+            if token not in SMILES_SPECIAL_TOKENS
+        )
+        smiles_vocab = SMILES_SPECIAL_TOKENS + observed_smiles_tokens
+        summary["smiles_vocab"] = smiles_vocab
+        summary["smiles_token_counts"] = {
+            token: int(self.smiles_token_counts.get(token, 0))
+            for token in smiles_vocab
+        }
+        summary["smiles_vocab_size"] = len(smiles_vocab)
+        summary["max_smiles_tokens"] = max(self.smiles_token_lengths, default=1)
         return summary
 
     def reset(self):
@@ -142,3 +163,5 @@ class USPTOPreprocessMetrics(Metrics):
         self.n_hnmr_shifts_per_mol = []
         self.n_cnmr_shifts_per_mol = []
         self.multiplicity_counts = Counter()
+        self.smiles_token_counts = Counter()
+        self.smiles_token_lengths = []

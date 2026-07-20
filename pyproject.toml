@@ -9,6 +9,7 @@ dependencies = [
   "pyarrow",
   "pytorch-lightning>=1.8,<3",
   "rdkit>=2023.9",
+  "rxn-chem-utils>=1.6",
   "scipy",
   "torch>=1.13",
   "tqdm",
@@ -23,4 +24,3 @@ include = ["src*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

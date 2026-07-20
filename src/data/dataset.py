@@ -11,7 +11,6 @@ from .constants import (
     SMILES_BOS_INDEX,
     SMILES_EOS_INDEX,
     SMILES_PAD_INDEX,
-    encode_smiles,
     MAX_J_VALUES,
     MULTIPLICITY_MISSING_INDEX,
     normalize_multiplicity_label,
@@ -71,6 +70,18 @@ def canonicalize_smiles_without_stereo(smiles: str) -> str:
         raise ValueError("Invalid SMILES: %s" % smiles)
     Chem.RemoveStereochemistry(molecule)
     return Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=False)
+
+
+def canonicalize_smiles_with_stereo(smiles: str) -> str:
+    """Return canonical isomeric SMILES for sequence-generation supervision."""
+    try:
+        from rdkit import Chem
+    except ImportError as error:
+        raise ImportError("RDKit is required to canonicalize SMILES") from error
+    molecule = Chem.MolFromSmiles(smiles)
+    if molecule is None:
+        raise ValueError("Invalid SMILES: %s" % smiles)
+    return Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
 
 
 def graph_targets_from_smiles(smiles: str) -> Dict[str, torch.Tensor]:
@@ -191,6 +202,8 @@ class GraphSample:
     h_parent_types: torch.Tensor
     smiles: str = ""
     canonical_smiles: str = ""
+    isomeric_smiles: str = ""
+    smiles_token_ids: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -267,6 +280,7 @@ class NMRGraphDataset(Dataset):
         item = copy.copy(self.items[index])
         smiles = _get_value(item, "smiles", "")
         canonical_smiles = _get_value(item, "canonical_smiles", "")
+        isomeric_smiles = _get_value(item, "isomeric_smiles", smiles)
         if all(_get_value(item, key) is not None for key in self.REQUIRED_TARGETS):
             targets = {
                 "h": _as_1d_tensor(_get_value(item, "h"), torch.long),
@@ -337,6 +351,7 @@ class NMRGraphDataset(Dataset):
             h_parent_types=targets["h_parent_types"],
             smiles=smiles,
             canonical_smiles=canonical_smiles,
+            isomeric_smiles=isomeric_smiles,
         )
         return self.transform(sample) if self.transform is not None else sample
 
@@ -397,10 +412,11 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
         h_nmr_mask[index, :sample.h_nmr.numel()] = True
         c_nmr_mask[index, :sample.c_nmr.numel()] = True
 
-    smiles_ids = [
-        encode_smiles(sample.canonical_smiles or sample.smiles)
-        for sample in samples
-    ]
+    if any(sample.smiles_token_ids is None for sample in samples):
+        raise TypeError(
+            "SMILES must be encoded from the train vocabulary before collation"
+        )
+    smiles_ids = [sample.smiles_token_ids.tolist() for sample in samples]
     smiles_input_ids = _pad_1d([
         torch.tensor([SMILES_BOS_INDEX] + values, dtype=torch.long)
         for values in smiles_ids

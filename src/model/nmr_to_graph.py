@@ -1,9 +1,10 @@
+import json
 from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 from torch import nn
 
-from src.data.constants import BOND_TYPE_CANDIDATES, HEAVY_ATOM_TYPES, SMILES_VOCAB
+from src.data.constants import BOND_TYPE_CANDIDATES, HEAVY_ATOM_TYPES
 from src.nn.attention import MaskedCrossAttentionBlock, MaskedSelfAttentionEncoder
 from src.nn.embedding import AtomSlotEmbedding, CNMRPeakEmbedding, HNMRPeakEmbedding
 from src.nn.smiles import NMRToSMILESDecoder
@@ -49,6 +50,8 @@ class NMRToGraph(nn.Module):
             use_smiles_conditioning: bool = False,
             num_smiles_layers: int = 3,
             max_smiles_length: int = 256,
+            smiles_vocab_path: Optional[str] = None,
+            smiles_vocab_size: Optional[int] = None,
             teacher_force_smiles_during_eval: bool = False,
             dropout: float = 0.0,
     ):
@@ -84,11 +87,18 @@ class NMRToGraph(nn.Module):
         self.teacher_force_smiles_during_eval = teacher_force_smiles_during_eval
         self.max_smiles_length = max_smiles_length
         if use_smiles_loss or use_smiles_conditioning:
+            if smiles_vocab_path is not None:
+                with open(smiles_vocab_path, encoding="utf-8") as handle:
+                    smiles_vocab_size = len(json.load(handle)["smiles_vocab"])
+            if smiles_vocab_size is None:
+                raise ValueError(
+                    "SMILES decoder requires smiles_vocab_path or smiles_vocab_size"
+                )
             self.smiles_decoder = NMRToSMILESDecoder(
                 hidden_dim=hidden_dim,
                 num_heads=num_heads,
                 num_layers=num_smiles_layers,
-                vocab_size=len(SMILES_VOCAB),
+                vocab_size=smiles_vocab_size,
                 max_length=max_smiles_length,
                 dropout=dropout,
             )

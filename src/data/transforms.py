@@ -5,8 +5,10 @@ from src.data.constants import (
     MULTIPLICITY_MISSING_INDEX,
     MULTIPLICITY_UNKNOWN_INDEX,
     MULTIPLICITY_VOCAB,
+    SMILES_UNKNOWN_INDEX,
     normalize_multiplicity_label,
 )
+from src.data.smiles import tokenize_smiles_tokens
 try:
     from torch_geometric.data import Data
     from torch_geometric.data.datapipes import functional_transform
@@ -50,6 +52,7 @@ class NormalizeNMR:
             normalize_h_integration: bool = True,
             normalize_h_j: bool = True,
             encode_multiplicity: bool = True,
+            encode_smiles: bool = True,
             max_multiplicity_classes: int = 512,
             eps: float = 1e-6,
     ):
@@ -86,6 +89,13 @@ class NormalizeNMR:
             )
         self.multiplicity_mapping = {
             label: index for index, label in enumerate(labels)
+        }
+        self.encode_smiles = encode_smiles
+        smiles_vocab = self.stats.get("smiles_vocab")
+        if self.encode_smiles and smiles_vocab is None:
+            raise KeyError("dataset_infos.json does not contain smiles_vocab")
+        self.smiles_mapping = {
+            token: index for index, token in enumerate(smiles_vocab or [])
         }
 
     def _stat(self, name: str, suffix: str) -> float:
@@ -126,6 +136,13 @@ class NormalizeNMR:
                     "h_nmr_multiplicity_mask",
                     values.long().ne(MULTIPLICITY_MISSING_INDEX),
                 )
+        if self.encode_smiles:
+            smiles = getattr(data, "isomeric_smiles", getattr(data, "smiles", ""))
+            tokens = tokenize_smiles_tokens(smiles)
+            data.smiles_token_ids = torch.tensor([
+                self.smiles_mapping.get(token, SMILES_UNKNOWN_INDEX)
+                for token in tokens
+            ], dtype=torch.long)
         return data
 
 class MultiplicityToIndex(BaseTransform):

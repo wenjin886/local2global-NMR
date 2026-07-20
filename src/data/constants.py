@@ -28,20 +28,11 @@ MULTIPLICITY_MISSING_INDEX = MULTIPLICITY_TO_INDEX["<missing>"]
 MULTIPLICITY_UNKNOWN_INDEX = MULTIPLICITY_TO_INDEX["<unk>"]
 MAX_J_VALUES = 6
 
-# Lossless character-level canonical-SMILES vocabulary. Printable ASCII covers
-# bracket expressions, ring indices, charges, and all standard bond symbols.
 SMILES_SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>"]
-SMILES_CHARACTERS = [chr(code) for code in range(33, 127)]
-SMILES_VOCAB = SMILES_SPECIAL_TOKENS + SMILES_CHARACTERS
-SMILES_TO_INDEX = {token: index for index, token in enumerate(SMILES_VOCAB)}
-SMILES_PAD_INDEX = SMILES_TO_INDEX["<pad>"]
-SMILES_BOS_INDEX = SMILES_TO_INDEX["<bos>"]
-SMILES_EOS_INDEX = SMILES_TO_INDEX["<eos>"]
-SMILES_UNKNOWN_INDEX = SMILES_TO_INDEX["<unk>"]
-
-
-def encode_smiles(smiles: str) -> List[int]:
-    return [SMILES_TO_INDEX.get(char, SMILES_UNKNOWN_INDEX) for char in smiles]
+SMILES_PAD_INDEX = 0
+SMILES_BOS_INDEX = 1
+SMILES_EOS_INDEX = 2
+SMILES_UNKNOWN_INDEX = 3
 
 
 def normalize_multiplicity_label(value) -> str:

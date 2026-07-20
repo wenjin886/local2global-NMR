@@ -650,6 +650,7 @@ def preprocess_parquet(df: pd.DataFrame):
     """
     data_list =[]
     from src.data.dataset import (
+        canonicalize_smiles_with_stereo,
         canonicalize_smiles_without_stereo,
         graph_targets_from_smiles,
     )
@@ -686,11 +687,13 @@ def preprocess_parquet(df: pd.DataFrame):
         
         smiles = row['smiles']
         canonical_smiles = canonicalize_smiles_without_stereo(smiles)
+        isomeric_smiles = canonicalize_smiles_with_stereo(smiles)
         canno_atoms, hydrogen_neighbors, is_aromatic_heavy_atoms, heavy_atom_local_labels = smiles_to_local_label(smiles)
         graph_targets = graph_targets_from_smiles(smiles)
         data = Data(
             smiles=smiles,
             canonical_smiles=canonical_smiles,
+            isomeric_smiles=isomeric_smiles,
             h_nmr=torch.tensor([values[0] for values in h_peaks], dtype=torch.float),
             c_nmr=torch.tensor(sorted(c_nmr_peaks), dtype=torch.float),
             h_nmr_integration=torch.tensor(

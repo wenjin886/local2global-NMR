@@ -46,6 +46,9 @@ def make_sample():
         h_parent_fragment_labels=h_parent_fragments,
         h_parent_types=torch.tensor([6, 6, 6, 8, -100, -100]),
         smiles="CO",
+        canonical_smiles="CO",
+        isomeric_smiles="CO",
+        smiles_token_ids=torch.tensor([4, 5]),
     )
 
 
@@ -144,6 +147,7 @@ def test_smiles_teacher_forcing_loss_and_greedy_conditioning():
         use_smiles_conditioning=True,
         num_smiles_layers=1,
         max_smiles_length=32,
+        smiles_vocab_size=6,
     )
     model.train()
     outputs = model(**batch.model_inputs())

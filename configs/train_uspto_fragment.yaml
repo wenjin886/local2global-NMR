@@ -34,6 +34,7 @@ datamodule:
     normalize_h_integration: true
     normalize_h_j: true
     encode_multiplicity: true
+    encode_smiles: true
     max_multiplicity_classes: 512
 
 lit_module:
@@ -59,6 +60,7 @@ lit_module:
     use_smiles_conditioning: false
     num_smiles_layers: 6
     max_smiles_length: 500
+    smiles_vocab_path: ${data_path}/dataset_infos.json
     teacher_force_smiles_during_eval: false
     dropout: 0.1
   criterion:
