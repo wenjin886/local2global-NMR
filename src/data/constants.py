@@ -17,16 +17,9 @@ BOND_TYPE_CANDIDATES = [
 HEAVY_ATOM_TYPES = [6, 7, 8, 9, 14, 15, 16, 17, 35, 53]
 NUM_BOND_TYPES = 5  # none, single, double, triple, aromatic
 
-# USPTO stores proton multiplicity as a categorical string.  Keep padding,
-# genuinely missing metadata, and out-of-vocabulary values distinct.
-MULTIPLICITY_VOCAB = [
-    "<pad>", "<missing>", "<unk>",
-    "s", "d", "t", "q", "p", "hept", "m", "h",
-    "dd", "dt", "td", "ddd", "dq", "qd", "tt", "qt", "tq",
-    "dddd", "ddt", "dtd", "dtt", "dqt", "dp", "pd", "pt",
-    "ddtd", "ddq", "dddt", "ddddt", "dttt", "heptd", "dh",
-    "dqd"
-]
+# Actual labels are collected without frequency filtering by the training-set
+# metrics. Only the control tokens are fixed globally.
+MULTIPLICITY_VOCAB = ["<pad>", "<missing>", "<unk>"]
 MULTIPLICITY_TO_INDEX = {
     value: index for index, value in enumerate(MULTIPLICITY_VOCAB)
 }
@@ -36,13 +29,13 @@ MULTIPLICITY_UNKNOWN_INDEX = MULTIPLICITY_TO_INDEX["<unk>"]
 MAX_J_VALUES = 6
 
 
-def multiplicity_to_index(value) -> int:
+def normalize_multiplicity_label(value) -> str:
     if value is None:
-        return MULTIPLICITY_MISSING_INDEX
+        return "<missing>"
     value = str(value).strip().lower()
     if not value or value in {"nan", "none", "null"}:
-        return MULTIPLICITY_MISSING_INDEX
-    return MULTIPLICITY_TO_INDEX.get(value, MULTIPLICITY_UNKNOWN_INDEX)
+        return "<missing>"
+    return value
 
 
 def parse_bond_type_candidates(

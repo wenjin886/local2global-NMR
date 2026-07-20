@@ -10,6 +10,7 @@ from .constants import (
     BOND_TYPE_CANDIDATES,
     MAX_J_VALUES,
     MULTIPLICITY_MISSING_INDEX,
+    normalize_multiplicity_label,
 )
 
 
@@ -55,6 +56,19 @@ def _fragment_count(atom: Any, molecule: Any) -> torch.Tensor:
     return counts
 
 
+def canonicalize_smiles_without_stereo(smiles: str) -> str:
+    """Return a canonical molecular identity with all stereochemistry removed."""
+    try:
+        from rdkit import Chem
+    except ImportError as error:
+        raise ImportError("RDKit is required to canonicalize SMILES") from error
+    molecule = Chem.MolFromSmiles(smiles)
+    if molecule is None:
+        raise ValueError("Invalid SMILES: %s" % smiles)
+    Chem.RemoveStereochemistry(molecule)
+    return Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=False)
+
+
 def graph_targets_from_smiles(smiles: str) -> Dict[str, torch.Tensor]:
     """Build element-grouped canonical heavy queries and explicit-H targets.
 
@@ -70,14 +84,7 @@ def graph_targets_from_smiles(smiles: str) -> Dict[str, torch.Tensor]:
             "Install project dependencies or materialize targets elsewhere."
         ) from error
 
-    molecule_without_h = Chem.MolFromSmiles(smiles)
-    if molecule_without_h is None:
-        raise ValueError("Invalid SMILES: %s" % smiles)
-    canonical_smiles = Chem.MolToSmiles(
-        molecule_without_h,
-        canonical=True,
-        isomericSmiles=False,
-    )
+    canonical_smiles = canonicalize_smiles_without_stereo(smiles)
     molecule = Chem.AddHs(Chem.MolFromSmiles(canonical_smiles))
     canonical_ranks = list(Chem.CanonicalRankAtoms(molecule, breakTies=True))
 
@@ -169,8 +176,8 @@ class GraphSample:
     c_nmr: torch.Tensor
     h_nmr_integration: torch.Tensor
     h_nmr_integration_mask: torch.Tensor
-    h_nmr_multiplicity: torch.Tensor
-    # h_nmr_multiplicity_mask: torch.Tensor
+    h_nmr_multiplicity: Any
+    h_nmr_multiplicity_mask: torch.Tensor
     h_nmr_j: torch.Tensor
     h_nmr_j_mask: torch.Tensor
     bond_types: torch.Tensor
@@ -282,16 +289,17 @@ class NMRGraphDataset(Dataset):
                 h_nmr, integration_is_available, dtype=torch.bool
             )
         multiplicity = _get_value(item, "h_nmr_multiplicity")
-        # multiplicity_is_available = multiplicity is not None
-        # if multiplicity is None:
-        #     multiplicity = torch.full_like(
-        #         h_nmr, MULTIPLICITY_MISSING_INDEX, dtype=torch.long
-        #     )
-        # multiplicity_mask = _get_value(item, "h_nmr_multiplicity_mask")
-        # if multiplicity_mask is None:
-        #     multiplicity_mask = torch.full_like(
-        #         h_nmr, multiplicity_is_available, dtype=torch.bool
-        #     )
+        if multiplicity is None:
+            multiplicity = ["<missing>"] * h_nmr.numel()
+        multiplicity_mask = _get_value(item, "h_nmr_multiplicity_mask")
+        if multiplicity_mask is None:
+            if torch.is_tensor(multiplicity):
+                multiplicity_mask = multiplicity.ne(MULTIPLICITY_MISSING_INDEX)
+            else:
+                multiplicity_mask = torch.tensor([
+                    normalize_multiplicity_label(value) != "<missing>"
+                    for value in multiplicity
+                ], dtype=torch.bool)
         j_values = _get_value(item, "h_nmr_j")
         if j_values is None:
             j_values = torch.zeros((h_nmr.numel(), MAX_J_VALUES), dtype=torch.float)
@@ -308,8 +316,7 @@ class NMRGraphDataset(Dataset):
             h_nmr_integration=_as_1d_tensor(integration, torch.float),
             h_nmr_integration_mask=_as_1d_tensor(integration_mask, torch.bool),
             h_nmr_multiplicity=multiplicity,
-            # h_nmr_multiplicity=_as_1d_tensor(multiplicity, torch.long),
-            # h_nmr_multiplicity_mask=_as_1d_tensor(multiplicity_mask, torch.bool),
+            h_nmr_multiplicity_mask=_as_1d_tensor(multiplicity_mask, torch.bool),
             h_nmr_j=j_values,
             h_nmr_j_mask=torch.as_tensor(j_mask, dtype=torch.bool),
             bond_types=targets["bond_types"],
@@ -358,6 +365,10 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
     h_nmr_integration_mask = _pad_1d(
         [sample.h_nmr_integration_mask for sample in samples], False, torch.bool
     )
+    if any(not torch.is_tensor(sample.h_nmr_multiplicity) for sample in samples):
+        raise TypeError(
+            "Raw multiplicity labels must be encoded by NormalizeNMR before collation"
+        )
     h_nmr_multiplicity = _pad_1d(
         [sample.h_nmr_multiplicity for sample in samples], 0, torch.long
     )

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .layers import MLP
-from src.data.constants import MULTIPLICITY_PAD_INDEX, MULTIPLICITY_VOCAB
+from src.data.constants import MULTIPLICITY_PAD_INDEX
 
 
 class FourierEmbedding(nn.Module):
@@ -203,7 +203,7 @@ class HNMRPeakEmbedding(nn.Module):
             self,
             hidden_dim,
             num_fourier_features=64,
-            num_multiplicity_classes=len(MULTIPLICITY_VOCAB),
+            num_multiplicity_classes=512,
             use_integration=True,
             use_multiplicity=True,
             use_j=True,

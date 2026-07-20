@@ -1,5 +1,6 @@
 import os
 import os.path as osp
+import argparse
 
 import urllib.request
 from pathlib import Path
@@ -26,7 +27,7 @@ from functools import lru_cache
 # import h5py
 from src.metrics.uspto import USPTOPreprocessMetrics
 from src.metrics.base import save_json
-from src.data.constants import MAX_J_VALUES, multiplicity_to_index
+from src.data.constants import MAX_J_VALUES, normalize_multiplicity_label
 SEED = 0
 
 
@@ -648,15 +649,17 @@ def preprocess_parquet(df: pd.DataFrame):
        'msms_scarf_fragments_positive']
     """
     data_list =[]
-    from src.data.dataset import graph_targets_from_smiles
+    from src.data.dataset import (
+        canonicalize_smiles_without_stereo,
+        graph_targets_from_smiles,
+    )
 
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing parquet files", unit="file"):
         h_peaks = []
         for peak in row['h_nmr_peaks']:
             shift = float(peak['delta'])
             integration, integration_available = _optional_float(peak.get('nH'))
-            # multiplicity = multiplicity_to_index(peak.get('category'))
-            multiplicity = peak.get('category')
+            multiplicity = normalize_multiplicity_label(peak.get('category'))
 
             j_values = _parse_j_values(peak.get('j_values'))
             h_peaks.append((
@@ -664,8 +667,6 @@ def preprocess_parquet(df: pd.DataFrame):
                 integration,
                 integration_available,
                 multiplicity,
-                # multiplicity not in (0, 1),
-                # multi_mask,
                 j_values,
             ))
         h_peaks.sort(key=lambda values: values[0])
@@ -684,10 +685,12 @@ def preprocess_parquet(df: pd.DataFrame):
                 h_nmr_j_mask[peak_index, :len(j_values)] = True
         
         smiles = row['smiles']
+        canonical_smiles = canonicalize_smiles_without_stereo(smiles)
         canno_atoms, hydrogen_neighbors, is_aromatic_heavy_atoms, heavy_atom_local_labels = smiles_to_local_label(smiles)
         graph_targets = graph_targets_from_smiles(smiles)
         data = Data(
             smiles=smiles,
+            canonical_smiles=canonical_smiles,
             h_nmr=torch.tensor([values[0] for values in h_peaks], dtype=torch.float),
             c_nmr=torch.tensor(sorted(c_nmr_peaks), dtype=torch.float),
             h_nmr_integration=torch.tensor(
@@ -697,12 +700,6 @@ def preprocess_parquet(df: pd.DataFrame):
                 [values[2] for values in h_peaks], dtype=torch.bool
             ),
             h_nmr_multiplicity=[values[3] for values in h_peaks],
-            # h_nmr_multiplicity=torch.tensor(
-            #     [values[3] for values in h_peaks], dtype=torch.long
-            # ),
-            # h_nmr_multiplicity_mask=torch.tensor(
-            #     [values[4] for values in h_peaks], dtype=torch.bool
-            # ),
             h_nmr_j=h_nmr_j,
             h_nmr_j_mask=h_nmr_j_mask,
             h = graph_targets["h"],
@@ -716,15 +713,66 @@ def preprocess_parquet(df: pd.DataFrame):
             h_parent_fragment_labels=graph_targets["h_parent_fragment_labels"],
             heavy_fragment_labels=graph_targets["heavy_fragment_labels"],
         )
-        print(data.c_nmr.shape)
-        print(data.c_nmr)
-        raise ValueError("Stop here")
-
         data_list.append(data)
     return data_list
 
-def preprocess_uspto(parquet_dir: str, save_dir: str=None):
-    file_list = os.listdir(parquet_dir)
+def split_by_canonical_smiles(
+        data_list,
+        ratios=(0.85, 0.05, 0.10),
+        seed=SEED,
+        deduplicate=True,
+):
+    """Split molecule groups without non-stereochemical SMILES leakage."""
+    if len(ratios) != 3 or any(value < 0 for value in ratios):
+        raise ValueError("ratios must contain three non-negative values")
+    if not np.isclose(sum(ratios), 1.0):
+        raise ValueError("split ratios must sum to 1")
+
+    from src.data.dataset import canonicalize_smiles_without_stereo
+
+    groups = {}
+    for data in data_list:
+        key = getattr(data, "canonical_smiles", None)
+        if key is None:
+            key = canonicalize_smiles_without_stereo(data.smiles)
+            data.canonical_smiles = key
+        groups.setdefault(key, []).append(data)
+
+    keys = sorted(groups)
+    np.random.default_rng(seed).shuffle(keys)
+    num_groups = len(keys)
+    num_train = int(ratios[0] * num_groups)
+    num_val = int(ratios[1] * num_groups)
+    key_splits = {
+        "train": keys[:num_train],
+        "val": keys[num_train:num_train + num_val],
+        "test": keys[num_train + num_val:],
+    }
+
+    splits = {}
+    for split, split_keys in key_splits.items():
+        if deduplicate:
+            splits[split] = [groups[key][0] for key in split_keys]
+        else:
+            splits[split] = [
+                item for key in split_keys for item in groups[key]
+            ]
+
+    key_sets = {name: set(values) for name, values in key_splits.items()}
+    assert key_sets["train"].isdisjoint(key_sets["val"])
+    assert key_sets["train"].isdisjoint(key_sets["test"])
+    assert key_sets["val"].isdisjoint(key_sets["test"])
+    return splits, key_splits, groups
+
+
+def preprocess_uspto(
+        parquet_dir: str,
+        save_dir: str = None,
+        split_ratios=(0.85, 0.05, 0.10),
+        seed=SEED,
+        deduplicate=True,
+):
+    file_list = sorted(os.listdir(parquet_dir))
     total_data_list = []
     for file in file_list:
         if not file.endswith('.parquet'):
@@ -736,17 +784,55 @@ def preprocess_uspto(parquet_dir: str, save_dir: str=None):
     if save_dir is None:
         save_dir = osp.dirname(parquet_dir)
     os.makedirs(save_dir, exist_ok=True)
-    print(f"Saving to {osp.join(save_dir, 'processed_uspto.pt')}")
-    torch.save(total_data_list, osp.join(save_dir, 'processed_uspto.pt'))
+    splits, key_splits, groups = split_by_canonical_smiles(
+        total_data_list,
+        ratios=split_ratios,
+        seed=seed,
+        deduplicate=deduplicate,
+    )
+    for split, data_list in splits.items():
+        path = osp.join(save_dir, f"{split}.pt")
+        torch.save(data_list, path)
+        print(f"Saved {len(data_list)} samples to {path}")
+
     metrics = USPTOPreprocessMetrics()
-    metrics.update(total_data_list)
+    metrics.update(splits["train"])
     infos_path = osp.join(save_dir, 'dataset_infos.json')
     save_json(metrics.summarize(), infos_path)
     print(f"Saved normalization statistics to {infos_path}")
+
+    manifest = {
+        "seed": int(seed),
+        "requested_ratios": list(split_ratios),
+        "deduplicated": bool(deduplicate),
+        "num_input_records": len(total_data_list),
+        "num_unique_non_stereo_molecules": len(groups),
+        "num_removed_duplicate_records": (
+            len(total_data_list) - len(groups) if deduplicate else 0
+        ),
+        "num_records": {name: len(values) for name, values in splits.items()},
+        "num_molecules": {
+            name: len(values) for name, values in key_splits.items()
+        },
+        "canonical_smiles": key_splits,
+    }
+    save_json(manifest, osp.join(save_dir, "split_manifest.json"))
     
 
 if __name__ == '__main__':
-    parquet_dir = "./data/uspto/exp_data/"
-    # df = pd.read_parquet(parquet_dir)
-    # preprocess_parquet(df)
-    preprocess_uspto(parquet_dir)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--parquet_dir", default="./data/uspto/exp_data/")
+    parser.add_argument("--save_dir", default=None)
+    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument(
+        "--keep_duplicate_records",
+        action="store_true",
+        help="Keep repeated spectra, while grouping each molecule into one split.",
+    )
+    args = parser.parse_args()
+    preprocess_uspto(
+        parquet_dir=args.parquet_dir,
+        save_dir=args.save_dir,
+        seed=args.seed,
+        deduplicate=not args.keep_duplicate_records,
+    )

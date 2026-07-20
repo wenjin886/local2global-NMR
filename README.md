@@ -97,7 +97,7 @@ h                           element-sorted explicit atom slots
 h_nmr, c_nmr                unassigned peak lists
 h_nmr_integration           optional proton integrations
 h_nmr_integration_mask      which integrations are observed
-h_nmr_multiplicity          categorical multiplicity IDs
+h_nmr_multiplicity          raw labels on disk; categorical IDs after transform
 h_nmr_multiplicity_mask     which multiplicities are observed
 h_nmr_j                     padded per-peak J-value sets
 h_nmr_j_mask                valid entries in each J-value set
@@ -108,25 +108,49 @@ h_attachment                H row -> ordered heavy query index
 bond_types                  [N, N] heavy-heavy targets
 ```
 
-Targets can be built once from an existing serialized NMR dataset:
+Each dataset-specific preprocess is responsible for materializing these graph
+targets together with its spectrum fields. `NMRGraphDataset` can still
+construct missing targets lazily from `smiles`, but materialization avoids
+running RDKit in every training epoch.
 
-```bash
-python preprocess/build_graph_dataset.py \
-  --input_path data/uspto/preprocessed/train_raw.pt \
-  --output_path data/uspto/preprocessed/train.pt
+## Leakage-safe USPTO split
+
+USPTO preprocessing removes atom and bond stereochemistry and converts every
+SMILES to a canonical non-isomeric identity before splitting. Consequently,
+variants containing `@`, `/`, or `\\` cannot occur in different splits.
+The default split is deterministic with seed 0:
+
+```text
+train : validation : test = 0.85 : 0.05 : 0.10
 ```
 
-`NMRGraphDataset` can also construct missing targets lazily from `smiles`, but
-materialization avoids running RDKit in every training epoch.
+By default, repeated records for the same non-stereochemical molecule are
+globally deduplicated. The command writes `train.pt`, `val.pt`, `test.pt`, and
+an auditable `split_manifest.json`:
+
+```bash
+python preprocess/uspto_nmr_preprocess.py \
+  --parquet_dir data/uspto/exp_data \
+  --save_dir data/uspto/preprocessed \
+  --seed 0
+```
+
+To retain repeated experimental spectra without leakage, pass
+`--keep_duplicate_records`. All records belonging to one canonical molecule
+will still be assigned to the same split. `dataset_infos.json` is always
+computed from the training split only.
 
 ## Spectrum metadata and normalization
 
 USPTO preprocessing keeps every proton peak as one aligned record: sorting by
 shift also reorders its `nH`, `category`, and `j_values`. `dataset_infos.json`
 records training-corpus mean/std for continuous H shift, C shift, integration,
-and individual J values. Multiplicity is categorical, so the file records its
-fixed vocabulary and histogram rather than an arbitrary mean/std over category
-IDs.
+and individual J values. Multiplicity is categorical, so the file records every
+training label, including rare compound labels such as `ddddd` and `dtdd`, plus
+an aligned histogram rather than an arbitrary mean/std over category IDs. The
+raw strings remain in the preprocessed samples and are converted to IDs only by
+the dataset transform. Only labels absent from the training vocabulary map to
+`<unk>` at validation or inference time.
 
 `NormalizeNMR` reads these statistics and z-score normalizes continuous values
 in the dataset transform. Missing integration and J entries remain zero under

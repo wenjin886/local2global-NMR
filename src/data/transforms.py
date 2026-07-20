@@ -1,6 +1,12 @@
 import json
 
 import torch
+from src.data.constants import (
+    MULTIPLICITY_MISSING_INDEX,
+    MULTIPLICITY_UNKNOWN_INDEX,
+    MULTIPLICITY_VOCAB,
+    normalize_multiplicity_label,
+)
 try:
     from torch_geometric.data import Data
     from torch_geometric.data.datapipes import functional_transform
@@ -43,6 +49,8 @@ class NormalizeNMR:
             normalize_c_shift: bool = True,
             normalize_h_integration: bool = True,
             normalize_h_j: bool = True,
+            encode_multiplicity: bool = True,
+            max_multiplicity_classes: int = 512,
             eps: float = 1e-6,
     ):
         with open(stats_path, encoding="utf-8") as handle:
@@ -64,6 +72,21 @@ class NormalizeNMR:
             "h_nmr_j": "h_nmr_j_mask",
         }
         self.eps = eps
+        self.encode_multiplicity = encode_multiplicity
+        labels = self.stats.get("multiplicity_labels")
+        if labels is None:
+            observed = sorted(self.stats.get("multiplicity_counts", {}).keys())
+            labels = MULTIPLICITY_VOCAB + [
+                label for label in observed if label not in MULTIPLICITY_VOCAB
+            ]
+        if len(labels) > max_multiplicity_classes:
+            raise ValueError(
+                f"Found {len(labels)} multiplicity labels, but "
+                f"max_multiplicity_classes={max_multiplicity_classes}"
+            )
+        self.multiplicity_mapping = {
+            label: index for index, label in enumerate(labels)
+        }
 
     def _stat(self, name: str, suffix: str) -> float:
         for key in (f"{name}_{suffix}", f"_{name}_{suffix}"):
@@ -84,6 +107,25 @@ class NormalizeNMR:
                 mask = getattr(data, mask_name).bool()
                 normalized = torch.where(mask, normalized, torch.zeros_like(normalized))
             setattr(data, key, normalized)
+        if self.encode_multiplicity and hasattr(data, "h_nmr_multiplicity"):
+            values = getattr(data, "h_nmr_multiplicity")
+            if not torch.is_tensor(values):
+                labels = [normalize_multiplicity_label(value) for value in values]
+                values = torch.tensor([
+                    self.multiplicity_mapping.get(label, MULTIPLICITY_UNKNOWN_INDEX)
+                    for label in labels
+                ], dtype=torch.long)
+                mask = torch.tensor([
+                    label != "<missing>" for label in labels
+                ], dtype=torch.bool)
+                setattr(data, "h_nmr_multiplicity", values)
+                setattr(data, "h_nmr_multiplicity_mask", mask)
+            elif not hasattr(data, "h_nmr_multiplicity_mask"):
+                setattr(
+                    data,
+                    "h_nmr_multiplicity_mask",
+                    values.long().ne(MULTIPLICITY_MISSING_INDEX),
+                )
         return data
 
 class MultiplicityToIndex(BaseTransform):
@@ -96,16 +138,27 @@ class MultiplicityToIndex(BaseTransform):
         self.key = key
         with open(stats_path, encoding="utf-8") as handle:
             dataset_infos = json.load(handle)
-            multiplicity = dataset_infos['multiplicity_counts'].keys()
-            self.mapping = {v: i for (i, v) in enumerate(multiplicity)}
+            labels = dataset_infos.get("multiplicity_labels")
+            if labels is None:
+                labels = MULTIPLICITY_VOCAB + sorted(
+                    label for label in dataset_infos['multiplicity_counts']
+                    if label not in MULTIPLICITY_VOCAB
+                )
+            self.mapping = {value: index for index, value in enumerate(labels)}
         del dataset_infos
             
 
     def forward(self, data: Data) -> Data:
         data_key = getattr(data, self.key)
         # assert data_key.ndim == 1
-        x = torch.as_tensor([self.mapping[xi] for xi in data_key])
+        labels = [normalize_multiplicity_label(value) for value in data_key]
+        x = torch.as_tensor([
+            self.mapping.get(value, MULTIPLICITY_UNKNOWN_INDEX) for value in labels
+        ], dtype=torch.long)
         setattr(data, self.key, x)
+        data.h_nmr_multiplicity_mask = torch.tensor([
+            value != "<missing>" for value in labels
+        ], dtype=torch.bool)
         return data
     
 

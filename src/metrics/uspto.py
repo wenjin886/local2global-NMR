@@ -4,7 +4,7 @@ from typing import Optional, Union
 
 import numpy as np
 
-# from src.data.constants import MULTIPLICITY_VOCAB
+from src.data.constants import MULTIPLICITY_VOCAB, normalize_multiplicity_label
 from .base import Metrics, read_json
 
 
@@ -92,16 +92,8 @@ class USPTOPreprocessMetrics(Metrics):
                         mask.sum(dim=-1).detach().cpu().tolist()
                     )
             if hasattr(item, "h_nmr_multiplicity"):
-                # ids = item.h_nmr_multiplicity.detach().cpu().reshape(-1).tolist()
-                # mask = getattr(item, "h_nmr_multiplicity_mask", None)
-                # if mask is not None:
-                #     keep = mask.detach().cpu().reshape(-1).tolist()
-                #     ids = [value for value, valid in zip(ids, keep) if valid]
-                # # self.multiplicity_counts.update(int(value) for value in ids)
-                # for value in ids:
-                #     self.multiplicity_counts[value] = self.multiplicity_counts.get(value, 0) + 1
                 for value in item.h_nmr_multiplicity:
-                    self.multiplicity_counts[value] = self.multiplicity_counts.get(value, 0) + 1
+                    self.multiplicity_counts[normalize_multiplicity_label(value)] += 1
 
     def summarize(self) -> dict:
         p = self.prefix
@@ -109,11 +101,6 @@ class USPTOPreprocessMetrics(Metrics):
             "max_num_atoms": self.max_num_atoms,
             "max_num_heavy_atoms": self.max_num_heavy_atoms,
             "max_neighbor_type_count": self.max_neighbor_type_count,
-            # f"{p}hnmr_multiplicity_vocab": MULTIPLICITY_VOCAB,
-            # f"{p}hnmr_multiplicity_hist": [
-                # self.multiplicity_counts.get(index, 0)
-                # for index in range(len(MULTIPLICITY_VOCAB))
-            # ],
         }
         summary.update(_continuous_summary(self.hnmr_shifts, f"{p}hnmr_shift"))
         summary.update(_continuous_summary(self.cnmr_shifts, f"{p}cnmr_shift"))
@@ -130,7 +117,17 @@ class USPTOPreprocessMetrics(Metrics):
         summary.update(_continuous_summary(
             self.n_cnmr_shifts_per_mol, f"{p}n_cnmr_shifts_per_mol"
         ))
-        summary['multiplicity_counts'] = dict(sorted(self.multiplicity_counts.items(), key=lambda x: x[1], reverse=True))
+        observed_labels = sorted(
+            label for label in self.multiplicity_counts
+            if label not in MULTIPLICITY_VOCAB
+        )
+        labels = MULTIPLICITY_VOCAB + observed_labels
+        summary["multiplicity_labels"] = labels
+        summary["multiplicity_counts"] = {
+            label: int(self.multiplicity_counts.get(label, 0))
+            for label in labels
+        }
+        summary["num_multiplicity_classes"] = len(labels)
         return summary
 
     def reset(self):
@@ -144,5 +141,4 @@ class USPTOPreprocessMetrics(Metrics):
         self.n_j_values_per_peak = []
         self.n_hnmr_shifts_per_mol = []
         self.n_cnmr_shifts_per_mol = []
-        # self.multiplicity_counts = Counter()
-        self.multiplicity_counts = {}
+        self.multiplicity_counts = Counter()

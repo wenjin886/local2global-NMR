@@ -27,6 +27,8 @@ datamodule:
     normalize_c_shift: true
     normalize_h_integration: true
     normalize_h_j: true
+    encode_multiplicity: true
+    max_multiplicity_classes: 512
 
 lit_module:
   _target_: src.lit.module.LitNMRToGraph
@@ -46,6 +48,7 @@ lit_module:
     use_h_integration: true
     use_h_multiplicity: true
     use_h_j: true
+    max_multiplicity_classes: 512
     dropout: 0.1
   criterion:
     _target_: src.model.loss.NMRGraphLoss

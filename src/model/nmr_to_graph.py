@@ -43,6 +43,7 @@ class NMRToGraph(nn.Module):
             use_h_integration: bool = True,
             use_h_multiplicity: bool = True,
             use_h_j: bool = True,
+            max_multiplicity_classes: int = 512,
             dropout: float = 0.0,
     ):
         super().__init__()
@@ -55,6 +56,7 @@ class NMRToGraph(nn.Module):
         self.h_peak_embedding = HNMRPeakEmbedding(
             hidden_dim=hidden_dim,
             num_fourier_features=num_fourier_features,
+            num_multiplicity_classes=max_multiplicity_classes,
             use_integration=use_h_integration,
             use_multiplicity=use_h_multiplicity,
             use_j=use_h_j,
