@@ -720,7 +720,7 @@ def split_by_canonical_smiles(
         data_list,
         ratios=(0.85, 0.05, 0.10),
         seed=SEED,
-        deduplicate=True,
+        deduplicate=False,
 ):
     """Split molecule groups without non-stereochemical SMILES leakage."""
     if len(ratios) != 3 or any(value < 0 for value in ratios):
@@ -772,9 +772,9 @@ def preprocess_uspto(
         seed=SEED,
         deduplicate=True,
 ):
-    file_list = sorted(os.listdir(parquet_dir))
+    file_list = sorted(os.listdir(parquet_dir), key=lambda x: int(x.split('.')[0].split('_')[-1]))
     total_data_list = []
-    for file in file_list:
+    for file in tqdm(file_list, total=len(file_list), desc="Reading parquet files", unit="file"):
         if not file.endswith('.parquet'):
             continue
         df = pd.read_parquet(osp.join(parquet_dir, file))
@@ -795,11 +795,12 @@ def preprocess_uspto(
         torch.save(data_list, path)
         print(f"Saved {len(data_list)} samples to {path}")
 
-    metrics = USPTOPreprocessMetrics()
-    metrics.update(splits["train"])
-    infos_path = osp.join(save_dir, 'dataset_infos.json')
-    save_json(metrics.summarize(), infos_path)
-    print(f"Saved normalization statistics to {infos_path}")
+    for split in ["train", "val", "test"]:
+        metrics = USPTOPreprocessMetrics()
+        metrics.update(splits[split])
+        infos_path = osp.join(save_dir, f'dataset_infos_{split}.json')
+        save_json(metrics.summarize(), infos_path)
+        print(f"Saved normalization statistics to {infos_path}")
 
     manifest = {
         "seed": int(seed),

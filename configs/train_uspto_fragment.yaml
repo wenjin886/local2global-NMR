@@ -3,26 +3,32 @@ project: local2global-nmr
 train: true
 test: false
 
-data_path: ${oc.env:DATA_PATH,data/uspto/preprocessed}
-log_path: ${oc.env:LOG_PATH,logs}
-output_dir: ${hydra:runtime.output_dir}
+data_path: ${oc.env:DATA_PATH}
+data_name: uspto
 
-hidden_dim: 256
+output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}
+log_path: ${output_dir}
+
+group: test
+exp_name: fragment_smiles_d512
+exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+
+hidden_dim: 512
 num_heads: 8
-max_num_atoms: 192
+max_num_atoms: 101
 
 datamodule:
   _target_: src.data.datamodule.NMRGraphDataModule
   train_path: ${data_path}/train.pt
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
-  train_batch_size: 32
+  train_batch_size: 64
   val_batch_size: 64
   num_workers: 4
   pin_memory: true
   transform:
     _target_: src.data.transforms.NormalizeNMR
-    stats_path: ${data_path}/dataset_infos.json
+    stats_path: ${data_path}/dataset_infos_train.json
     normalize_h_shift: true
     normalize_c_shift: true
     normalize_h_integration: true
@@ -36,7 +42,7 @@ lit_module:
     _target_: src.model.nmr_to_graph.NMRToGraph
     hidden_dim: ${hidden_dim}
     num_heads: ${num_heads}
-    num_spectrum_layers: 3
+    num_spectrum_layers: 6
     num_atom_spectrum_layers: 3
     num_atom_interaction_layers: 2
     num_fourier_features: 64
@@ -51,8 +57,8 @@ lit_module:
     max_multiplicity_classes: 512
     use_smiles_loss: true
     use_smiles_conditioning: false
-    num_smiles_layers: 3
-    max_smiles_length: 256
+    num_smiles_layers: 6
+    max_smiles_length: 500
     teacher_force_smiles_during_eval: false
     dropout: 0.1
   criterion:
@@ -89,6 +95,7 @@ logger:
     save_dir: ${output_dir}
     project: ${project}
     log_model: false
+    name: ${exp_name}
 
 trainer:
   _target_: pytorch_lightning.Trainer
@@ -96,7 +103,7 @@ trainer:
   devices: 1
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
-  max_epochs: 500
+  max_epochs: 100
   check_val_every_n_epoch: 1
   num_sanity_val_steps: 2
 
@@ -105,4 +112,4 @@ ckpt_path: null
 
 hydra:
   run:
-    dir: ${log_path}/uspto_fragment/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}
+    dir: ${log_path}/${exp_save_dir_name}
