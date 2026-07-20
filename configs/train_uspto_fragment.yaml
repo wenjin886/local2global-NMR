@@ -49,6 +49,11 @@ lit_module:
     use_h_multiplicity: true
     use_h_j: true
     max_multiplicity_classes: 512
+    use_smiles_loss: true
+    use_smiles_conditioning: false
+    num_smiles_layers: 3
+    max_smiles_length: 256
+    teacher_force_smiles_during_eval: false
     dropout: 0.1
   criterion:
     _target_: src.model.loss.NMRGraphLoss
@@ -62,6 +67,7 @@ lit_module:
     h_entropy_weight: 0.0
     edge_weight: 0.0
     fragment_edge_consistency_weight: 0.0
+    smiles_weight: 1.0
     permutation_invariant_hydrogens: true
   lr: 2e-4
   weight_decay: 1e-12

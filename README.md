@@ -8,6 +8,7 @@ local-to-global curriculum:
 element-sorted explicit atom slots + separately embedded 1H/13C peak sets
     (1H shift + optional integration/multiplicity/J metadata)
     -> shared atom-spectrum cross-attention
+    -> optional canonical-SMILES decoding and atom conditioning
     -> element-grouped ordered heavy-atom queries
     -> factorized local-fragment prediction
     -> molecule-local H-to-heavy retrieval
@@ -56,6 +57,43 @@ H-parent classes, and heavy-edge targets.
 
 This order is an internal training coordinate system. A final molecular graph
 can still be canonicalized after connectivity is predicted.
+
+## Optional SMILES auxiliary task
+
+The encoded NMR peak set can condition a causal canonical-SMILES decoder. Two
+independent switches control its use:
+
+```yaml
+lit_module.model.use_smiles_loss: true
+lit_module.criterion.smiles_weight: 1.0
+lit_module.model.use_smiles_conditioning: false
+```
+
+`use_smiles_loss` enables the auxiliary sequence objective.
+`use_smiles_conditioning` additionally lets atom features cross-attend to the
+SMILES decoder hidden states. Decoder logits remain available for cross-entropy,
+generation, and analysis; the graph branch consumes hidden states rather than
+the vocabulary-sized logits.
+
+Training always uses teacher forcing. Evaluation and inference use greedy
+self-conditioned generation by default, making the exposure gap visible in
+`smiles_token_accuracy`, `smiles_exact_match`, and downstream graph metrics.
+For an explicit teacher-forced upper-bound evaluation, set:
+
+```yaml
+lit_module.model.teacher_force_smiles_during_eval: true
+```
+
+To run the proposed upper-bound conditioning experiment:
+
+```bash
+python src/train.py -cn train_uspto_graph \
+  lit_module.model.use_smiles_conditioning=true
+```
+
+Canonical non-stereochemical SMILES are encoded losslessly at character level,
+with BOS/EOS/PAD/UNK control tokens. This avoids collapsing rare bracket, ring,
+charge, or bond syntax into a small hand-written token vocabulary.
 
 ## H-to-heavy retrieval
 

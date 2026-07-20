@@ -3,9 +3,10 @@ from typing import Dict, Optional, Sequence, Tuple
 import torch
 from torch import nn
 
-from src.data.constants import BOND_TYPE_CANDIDATES, HEAVY_ATOM_TYPES
+from src.data.constants import BOND_TYPE_CANDIDATES, HEAVY_ATOM_TYPES, SMILES_VOCAB
 from src.nn.attention import MaskedCrossAttentionBlock, MaskedSelfAttentionEncoder
 from src.nn.embedding import AtomSlotEmbedding, CNMRPeakEmbedding, HNMRPeakEmbedding
+from src.nn.smiles import NMRToSMILESDecoder
 from src.nn.graph import (
     AtomInteractionBlock,
     FactorizedFragmentReadout,
@@ -44,6 +45,11 @@ class NMRToGraph(nn.Module):
             use_h_multiplicity: bool = True,
             use_h_j: bool = True,
             max_multiplicity_classes: int = 512,
+            use_smiles_loss: bool = False,
+            use_smiles_conditioning: bool = False,
+            num_smiles_layers: int = 3,
+            max_smiles_length: int = 256,
+            teacher_force_smiles_during_eval: bool = False,
             dropout: float = 0.0,
     ):
         super().__init__()
@@ -73,6 +79,21 @@ class NMRToGraph(nn.Module):
             num_layers=num_spectrum_layers,
             dropout=dropout,
         )
+        self.use_smiles_loss = use_smiles_loss
+        self.use_smiles_conditioning = use_smiles_conditioning
+        self.teacher_force_smiles_during_eval = teacher_force_smiles_during_eval
+        self.max_smiles_length = max_smiles_length
+        if use_smiles_loss or use_smiles_conditioning:
+            self.smiles_decoder = NMRToSMILESDecoder(
+                hidden_dim=hidden_dim,
+                num_heads=num_heads,
+                num_layers=num_smiles_layers,
+                vocab_size=len(SMILES_VOCAB),
+                max_length=max_smiles_length,
+                dropout=dropout,
+            )
+        else:
+            self.smiles_decoder = None
         self.atom_spectrum_layers = nn.ModuleList([
             MaskedCrossAttentionBlock(
                 hidden_dim=hidden_dim,
@@ -81,6 +102,14 @@ class NMRToGraph(nn.Module):
             )
             for _ in range(num_atom_spectrum_layers)
         ])
+        self.atom_smiles_layer = (
+            MaskedCrossAttentionBlock(
+                hidden_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+            )
+            if use_smiles_conditioning else None
+        )
         self.heavy_query_embedding = nn.Embedding(max_num_atoms, hidden_dim)
         self.heavy_query_decoder = MaskedCrossAttentionBlock(
             hidden_dim=hidden_dim,
@@ -152,6 +181,9 @@ class NMRToGraph(nn.Module):
             h_nmr_multiplicity_mask: Optional[torch.Tensor] = None,
             h_nmr_j: Optional[torch.Tensor] = None,
             h_nmr_j_mask: Optional[torch.Tensor] = None,
+            smiles_input_ids: Optional[torch.Tensor] = None,
+            smiles_input_mask: Optional[torch.Tensor] = None,
+            teacher_force_smiles: Optional[bool] = None,
     ) -> Dict[str, object]:
         atom_mask = atom_mask.bool()
         h_nmr_mask = h_nmr_mask.bool()
@@ -181,6 +213,33 @@ class NMRToGraph(nn.Module):
             peak_mask,
         )
 
+        smiles_outputs = None
+        if self.smiles_decoder is not None:
+            if teacher_force_smiles is None:
+                teacher_force_smiles = (
+                    self.training or self.teacher_force_smiles_during_eval
+                )
+            if teacher_force_smiles:
+                if smiles_input_ids is None or smiles_input_mask is None:
+                    raise ValueError("Teacher forcing requires SMILES input tensors")
+                smiles_outputs = self.smiles_decoder.teacher_force(
+                    input_ids=smiles_input_ids,
+                    input_mask=smiles_input_mask,
+                    memory=peak_features,
+                    memory_mask=peak_mask,
+                )
+            else:
+                max_steps = (
+                    smiles_input_ids.size(1)
+                    if smiles_input_ids is not None
+                    else self.max_smiles_length
+                )
+                smiles_outputs = self.smiles_decoder.generate(
+                    memory=peak_features,
+                    memory_mask=peak_mask,
+                    max_steps=max_steps,
+                )
+
         atom_features_pre_ca = self.atom_embedding(atom_types)
         atom_features = atom_features_pre_ca * atom_mask.unsqueeze(-1)
         atom_spectrum_attention = None
@@ -190,6 +249,15 @@ class NMRToGraph(nn.Module):
                 context=peak_features,
                 query_mask=atom_mask,
                 context_mask=peak_mask,
+            )
+
+        atom_smiles_attention = None
+        if self.atom_smiles_layer is not None:
+            atom_features, atom_smiles_attention = self.atom_smiles_layer(
+                query=atom_features,
+                context=smiles_outputs["hidden_states"],
+                query_mask=atom_mask,
+                context_mask=smiles_outputs["mask"],
             )
 
         # ``data.h`` is element-sorted. The within-heavy rank therefore defines
@@ -258,6 +326,24 @@ class NMRToGraph(nn.Module):
             "peak_features": peak_features,
             "h_peak_features": h_peak_features,
             "c_peak_features": c_peak_features,
+            "smiles_logits": (
+                smiles_outputs["logits"] if smiles_outputs is not None else None
+            ),
+            "smiles_hidden_states": (
+                smiles_outputs["hidden_states"]
+                if smiles_outputs is not None else None
+            ),
+            "smiles_token_ids": (
+                smiles_outputs["token_ids"] if smiles_outputs is not None else None
+            ),
+            "smiles_token_mask": (
+                smiles_outputs["mask"] if smiles_outputs is not None else None
+            ),
+            "smiles_teacher_forced": (
+                smiles_outputs["teacher_forced"]
+                if smiles_outputs is not None else None
+            ),
+            "use_smiles_loss": self.use_smiles_loss,
             "heavy_mask": heavy_mask,
             "hydrogen_mask": hydrogen_mask,
             "heavy_edge_logits": edge_logits,
@@ -276,6 +362,7 @@ class NMRToGraph(nn.Module):
             "attention": {
                 "spectrum": spectrum_attention,
                 "atom_to_spectrum": atom_spectrum_attention,
+                "atom_to_smiles": atom_smiles_attention,
                 "heavy_query_to_atoms": heavy_query_attention,
                 "atom_interaction": interaction_attention,
             },

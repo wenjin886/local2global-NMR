@@ -8,6 +8,10 @@ import json
 
 from .constants import (
     BOND_TYPE_CANDIDATES,
+    SMILES_BOS_INDEX,
+    SMILES_EOS_INDEX,
+    SMILES_PAD_INDEX,
+    encode_smiles,
     MAX_J_VALUES,
     MULTIPLICITY_MISSING_INDEX,
     normalize_multiplicity_label,
@@ -186,6 +190,7 @@ class GraphSample:
     h_parent_fragment_labels: torch.Tensor
     h_parent_types: torch.Tensor
     smiles: str = ""
+    canonical_smiles: str = ""
 
 
 @dataclass
@@ -207,6 +212,9 @@ class GraphBatch:
     heavy_fragment_labels: torch.Tensor
     h_parent_fragment_labels: torch.Tensor
     h_parent_types: torch.Tensor
+    smiles_input_ids: torch.Tensor
+    smiles_input_mask: torch.Tensor
+    smiles_target_ids: torch.Tensor
     smiles: List[str]
 
     def to(self, device: torch.device) -> "GraphBatch":
@@ -230,6 +238,8 @@ class GraphBatch:
             "h_nmr_j_mask": self.h_nmr_j_mask,
             "c_nmr": self.c_nmr,
             "c_nmr_mask": self.c_nmr_mask,
+            "smiles_input_ids": self.smiles_input_ids,
+            "smiles_input_mask": self.smiles_input_mask,
         }
 
 
@@ -256,6 +266,7 @@ class NMRGraphDataset(Dataset):
     def __getitem__(self, index: int) -> GraphSample:
         item = copy.copy(self.items[index])
         smiles = _get_value(item, "smiles", "")
+        canonical_smiles = _get_value(item, "canonical_smiles", "")
         if all(_get_value(item, key) is not None for key in self.REQUIRED_TARGETS):
             targets = {
                 "h": _as_1d_tensor(_get_value(item, "h"), torch.long),
@@ -325,6 +336,7 @@ class NMRGraphDataset(Dataset):
             h_parent_fragment_labels=targets["h_parent_fragment_labels"],
             h_parent_types=targets["h_parent_types"],
             smiles=smiles,
+            canonical_smiles=canonical_smiles,
         )
         return self.transform(sample) if self.transform is not None else sample
 
@@ -385,6 +397,20 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
         h_nmr_mask[index, :sample.h_nmr.numel()] = True
         c_nmr_mask[index, :sample.c_nmr.numel()] = True
 
+    smiles_ids = [
+        encode_smiles(sample.canonical_smiles or sample.smiles)
+        for sample in samples
+    ]
+    smiles_input_ids = _pad_1d([
+        torch.tensor([SMILES_BOS_INDEX] + values, dtype=torch.long)
+        for values in smiles_ids
+    ], SMILES_PAD_INDEX, torch.long)
+    smiles_target_ids = _pad_1d([
+        torch.tensor(values + [SMILES_EOS_INDEX], dtype=torch.long)
+        for values in smiles_ids
+    ], SMILES_PAD_INDEX, torch.long)
+    smiles_input_mask = smiles_input_ids.ne(SMILES_PAD_INDEX)
+
     batch_size, num_atoms = atom_types.shape
     num_fragments = len(BOND_TYPE_CANDIDATES)
     bond_types = torch.full(
@@ -422,6 +448,9 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
         heavy_fragment_labels=heavy_fragment_labels,
         h_parent_fragment_labels=h_parent_fragment_labels,
         h_parent_types=h_parent_types,
+        smiles_input_ids=smiles_input_ids,
+        smiles_input_mask=smiles_input_mask,
+        smiles_target_ids=smiles_target_ids,
         smiles=[sample.smiles for sample in samples],
     )
 

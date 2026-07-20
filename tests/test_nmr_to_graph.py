@@ -49,7 +49,7 @@ def make_sample():
     )
 
 
-def make_model():
+def make_model(**kwargs):
     return NMRToGraph(
         hidden_dim=32,
         num_heads=4,
@@ -59,6 +59,7 @@ def make_model():
         num_fourier_features=16,
         max_num_atoms=16,
         attachment_dim=16,
+        **kwargs,
     )
 
 
@@ -134,3 +135,37 @@ def test_fragment_only_stage_has_no_edge_or_attachment_gradient():
     assert model.fragment_readout.readout[-1].weight.grad is not None
     edge_gradient = model.edge_readout.mlp[-1].weight.grad
     assert edge_gradient is None or torch.count_nonzero(edge_gradient) == 0
+
+
+def test_smiles_teacher_forcing_loss_and_greedy_conditioning():
+    batch = collate_nmr_graph([make_sample(), make_sample()])
+    model = make_model(
+        use_smiles_loss=True,
+        use_smiles_conditioning=True,
+        num_smiles_layers=1,
+        max_smiles_length=32,
+    )
+    model.train()
+    outputs = model(**batch.model_inputs())
+    assert outputs["smiles_teacher_forced"] is True
+    assert outputs["smiles_logits"].shape[:2] == batch.smiles_target_ids.shape
+    criterion = NMRGraphLoss(smiles_weight=1.0)
+    loss, losses = criterion(
+        outputs=outputs,
+        atom_types=batch.atom_types,
+        bond_types=batch.bond_types,
+        h_attachment=batch.h_attachment,
+        heavy_fragment_labels=batch.heavy_fragment_labels,
+        h_parent_fragment_labels=batch.h_parent_fragment_labels,
+        h_parent_types=batch.h_parent_types,
+        smiles_target_ids=batch.smiles_target_ids,
+    )
+    loss.backward()
+    assert torch.isfinite(losses["smiles"])
+    assert model.smiles_decoder.output_projection.weight.grad is not None
+
+    model.eval()
+    with torch.no_grad():
+        generated = model(**batch.model_inputs())
+    assert generated["smiles_teacher_forced"] is False
+    assert generated["smiles_token_ids"].shape == batch.smiles_target_ids.shape

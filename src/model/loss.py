@@ -6,6 +6,7 @@ from scipy.optimize import linear_sum_assignment
 from torch import nn
 
 from src.data.constants import parse_bond_type_candidates
+from src.data.constants import SMILES_PAD_INDEX
 
 
 class NMRGraphLoss(nn.Module):
@@ -23,6 +24,7 @@ class NMRGraphLoss(nn.Module):
             h_entropy_weight: float = 0.0,
             edge_weight: float = 1.0,
             fragment_edge_consistency_weight: float = 0.25,
+            smiles_weight: float = 0.0,
             edge_class_weights: Optional[torch.Tensor] = None,
             permutation_invariant_hydrogens: bool = True,
     ):
@@ -37,6 +39,7 @@ class NMRGraphLoss(nn.Module):
         self.h_entropy_weight = h_entropy_weight
         self.edge_weight = edge_weight
         self.fragment_edge_consistency_weight = fragment_edge_consistency_weight
+        self.smiles_weight = smiles_weight
         self.permutation_invariant_hydrogens = permutation_invariant_hydrogens
         if edge_class_weights is None:
             self.register_buffer("edge_class_weights", None)
@@ -304,6 +307,7 @@ class NMRGraphLoss(nn.Module):
             heavy_fragment_labels: torch.Tensor,
             h_parent_fragment_labels: torch.Tensor,
             h_parent_types: torch.Tensor,
+            smiles_target_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         losses = {}
         losses["heavy_fragment"] = self.fragment_count_loss(
@@ -369,6 +373,21 @@ class NMRGraphLoss(nn.Module):
             if self.fragment_edge_consistency_weight != 0
             else zero
         )
+        if self.smiles_weight != 0 and outputs.get("use_smiles_loss", False):
+            if outputs.get("smiles_logits") is None or smiles_target_ids is None:
+                raise ValueError(
+                    "smiles_weight > 0 requires decoder logits and SMILES targets"
+                )
+            logits = outputs["smiles_logits"]
+            if logits.shape[:2] != smiles_target_ids.shape:
+                raise ValueError("SMILES logits and targets have incompatible shapes")
+            losses["smiles"] = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                smiles_target_ids.reshape(-1),
+                ignore_index=SMILES_PAD_INDEX,
+            )
+        else:
+            losses["smiles"] = zero
 
         total = (
             self.heavy_fragment_weight * losses["heavy_fragment"]
@@ -382,6 +401,7 @@ class NMRGraphLoss(nn.Module):
             + self.edge_weight * losses["edge"]
             + self.fragment_edge_consistency_weight
             * losses["fragment_edge_consistency"]
+            + self.smiles_weight * losses["smiles"]
         )
         losses["weighted"] = total
         return total, losses

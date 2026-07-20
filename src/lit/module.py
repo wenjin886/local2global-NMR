@@ -38,6 +38,7 @@ class LitNMRToGraph(pl.LightningModule):
             heavy_fragment_labels=batch.heavy_fragment_labels,
             h_parent_fragment_labels=batch.h_parent_fragment_labels,
             h_parent_types=batch.h_parent_types,
+            smiles_target_ids=batch.smiles_target_ids,
         )
         return loss, losses, outputs
 
@@ -119,12 +120,23 @@ class LitNMRToGraph(pl.LightningModule):
         else:
             fragment_count_accuracy = outputs["fragment_logits"].sum() * 0.0
             fragment_presence_accuracy = fragment_count_accuracy
-        return {
+        metrics = {
             "edge_accuracy": edge_accuracy,
             "fragment_count_accuracy": fragment_count_accuracy,
             "fragment_presence_accuracy": fragment_presence_accuracy,
             "h_count_mae": h_count_mae,
         }
+        if outputs.get("smiles_token_ids") is not None:
+            valid = batch.smiles_target_ids.ne(0)
+            predictions = outputs["smiles_token_ids"]
+            correct = predictions.eq(batch.smiles_target_ids) & valid
+            metrics["smiles_token_accuracy"] = (
+                correct.sum().float() / valid.sum().clamp_min(1)
+            )
+            metrics["smiles_exact_match"] = (
+                (correct | ~valid).all(dim=1).float().mean()
+            )
+        return metrics
 
     def transfer_batch_to_device(
             self,
