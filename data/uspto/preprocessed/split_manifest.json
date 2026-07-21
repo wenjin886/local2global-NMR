@@ -5,7 +5,7 @@
         0.05,
         0.1
     ],
-    "deduplicated": true,
+    "deduplicated": false,
     "num_input_records": 200,
     "num_unique_non_stereo_molecules": 200,
     "num_removed_duplicate_records": 0,
