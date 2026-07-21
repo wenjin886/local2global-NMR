@@ -22,16 +22,17 @@ from src.nn.graph import (
 class NMRToGraph(nn.Module):
     """Predict molecular connectivity from atom slots and unassigned NMR peaks.
 
-    All atoms share the same embedding and spectrum cross-attention.  Features
-    are split into hydrogen and heavy-atom subsets only after NMR conditioning.
+    Atom slots, 1H peaks, and 13C peaks are concatenated and jointly encoded.
+    Features are split into their original modalities only after this shared
+    self-attention, while downstream queries can continue to read the complete
+    joint memory.
     """
 
     def __init__(
             self,
             hidden_dim: int = 256,
             num_heads: int = 8,
-            num_spectrum_layers: int = 3,
-            num_atom_spectrum_layers: int = 3,
+            num_joint_layers: int = 3,
             num_atom_interaction_layers: int = 2,
             num_fourier_features: int = 64,
             max_atomic_number: int = 100,
@@ -76,10 +77,10 @@ class NMRToGraph(nn.Module):
             num_fourier_features=num_fourier_features,
             dropout=dropout,
         )
-        self.spectrum_encoder = MaskedSelfAttentionEncoder(
+        self.joint_encoder = MaskedSelfAttentionEncoder(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
-            num_layers=num_spectrum_layers,
+            num_layers=num_joint_layers,
             dropout=dropout,
         )
         self.use_smiles_loss = use_smiles_loss
@@ -106,14 +107,6 @@ class NMRToGraph(nn.Module):
             )
         else:
             self.smiles_decoder = None
-        self.atom_spectrum_layers = nn.ModuleList([
-            MaskedCrossAttentionBlock(
-                hidden_dim=hidden_dim,
-                num_heads=num_heads,
-                dropout=dropout,
-            )
-            for _ in range(num_atom_spectrum_layers)
-        ])
         self.atom_smiles_layer = (
             MaskedCrossAttentionBlock(
                 hidden_dim=hidden_dim,
@@ -214,15 +207,31 @@ class NMRToGraph(nn.Module):
             j_mask=h_nmr_j_mask,
         )
         c_peak_features = self.c_peak_embedding(c_nmr, c_nmr_mask)
+        atom_features_pre_joint = self.atom_embedding(atom_types)
+        atom_features_pre_joint = (
+            atom_features_pre_joint * atom_mask.unsqueeze(-1)
+        )
+        joint_features = torch.cat(
+            [atom_features_pre_joint, h_peak_features, c_peak_features], dim=1
+        )
+        joint_mask = torch.cat(
+            [atom_mask, h_nmr_mask, c_nmr_mask], dim=1
+        )
+        joint_features, joint_attention = self.joint_encoder(
+            joint_features,
+            joint_mask,
+        )
+
+        num_atoms = atom_types.size(1)
+        num_h_peaks = h_nmr.size(1)
+        atom_features = joint_features[:, :num_atoms]
+        h_peak_features = joint_features[:, num_atoms:num_atoms + num_h_peaks]
+        c_peak_features = joint_features[:, num_atoms + num_h_peaks:]
         peak_features, peak_mask = self._combine_spectra(
             h_features=h_peak_features,
             h_nmr_mask=h_nmr_mask,
             c_features=c_peak_features,
             c_nmr_mask=c_nmr_mask,
-        )
-        peak_features, spectrum_attention = self.spectrum_encoder(
-            peak_features,
-            peak_mask,
         )
 
         smiles_outputs = None
@@ -237,8 +246,8 @@ class NMRToGraph(nn.Module):
                 smiles_outputs = self.smiles_decoder.teacher_force(
                     input_ids=smiles_input_ids,
                     input_mask=smiles_input_mask,
-                    memory=peak_features,
-                    memory_mask=peak_mask,
+                    memory=joint_features,
+                    memory_mask=joint_mask,
                 )
             else:
                 max_steps = (
@@ -247,21 +256,10 @@ class NMRToGraph(nn.Module):
                     else self.max_smiles_length
                 )
                 smiles_outputs = self.smiles_decoder.generate(
-                    memory=peak_features,
-                    memory_mask=peak_mask,
+                    memory=joint_features,
+                    memory_mask=joint_mask,
                     max_steps=max_steps,
                 )
-
-        atom_features_pre_ca = self.atom_embedding(atom_types)
-        atom_features = atom_features_pre_ca * atom_mask.unsqueeze(-1)
-        atom_spectrum_attention = None
-        for layer in self.atom_spectrum_layers:
-            atom_features, atom_spectrum_attention = layer(
-                query=atom_features,
-                context=peak_features,
-                query_mask=atom_mask,
-                context_mask=peak_mask,
-            )
 
         atom_smiles_attention = None
         if self.atom_smiles_layer is not None:
@@ -278,9 +276,9 @@ class NMRToGraph(nn.Module):
         heavy_query_seed = atom_features + self.heavy_query_embedding(heavy_rank)
         heavy_query_features, heavy_query_attention = self.heavy_query_decoder(
             query=heavy_query_seed,
-            context=atom_features,
+            context=joint_features,
             query_mask=heavy_mask,
-            context_mask=atom_mask,
+            context_mask=joint_mask,
         )
         atom_features = torch.where(
             heavy_mask.unsqueeze(-1),
@@ -331,10 +329,13 @@ class NMRToGraph(nn.Module):
         )
 
         return {
-            "atom_features_pre_ca": atom_features_pre_ca,
+            "atom_features_pre_joint": atom_features_pre_joint,
+            # Backward-compatible alias for existing representation scripts.
+            "atom_features_pre_ca": atom_features_pre_joint,
             "atom_features": atom_features,
             "heavy_query_features": atom_features,
             "graph_atom_features": refined_atom_features,
+            "joint_features": joint_features,
             "peak_features": peak_features,
             "h_peak_features": h_peak_features,
             "c_peak_features": c_peak_features,
@@ -372,10 +373,9 @@ class NMRToGraph(nn.Module):
             "hydrogen_context": hydrogen_context,
             "assigned_h_count": assigned_h_count,
             "attention": {
-                "spectrum": spectrum_attention,
-                "atom_to_spectrum": atom_spectrum_attention,
+                "joint": joint_attention,
                 "atom_to_smiles": atom_smiles_attention,
-                "heavy_query_to_atoms": heavy_query_attention,
+                "heavy_query_to_joint": heavy_query_attention,
                 "atom_interaction": interaction_attention,
             },
         }

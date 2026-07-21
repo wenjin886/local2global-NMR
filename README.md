@@ -7,8 +7,8 @@ local-to-global curriculum:
 ```text
 element-sorted explicit atom slots + separately embedded 1H/13C peak sets
     (1H shift + optional integration/multiplicity/J metadata)
-    -> shared atom-spectrum cross-attention
-    -> optional canonical-SMILES decoding and atom conditioning
+    -> concatenated joint atom/1H/13C self-attention
+    -> optional canonical-SMILES auxiliary decoding from joint memory
     -> element-grouped ordered heavy-atom queries
     -> factorized local-fragment prediction
     -> molecule-local H-to-heavy retrieval
@@ -51,17 +51,18 @@ Hungarian algorithm, because explicit H slots have no intrinsic ordering.
 
 Input atoms are sorted by element. Heavy targets use the same element groups and
 RDKit canonical ranks to break ties within each group. The model adds learned
-within-heavy query embeddings and decodes them against all NMR-conditioned atom
-features. The resulting indices form one stable interface for fragment targets,
-H-parent classes, and heavy-edge targets.
+within-heavy query embeddings to the jointly encoded atom features, then decodes
+the resulting seeds against the complete joint atom/NMR memory. The resulting
+indices form one stable interface for fragment targets, H-parent classes, and
+heavy-edge targets.
 
 This order is an internal training coordinate system. A final molecular graph
 can still be canonicalized after connectivity is predicted.
 
 ## Optional SMILES auxiliary task
 
-The encoded NMR peak set can condition a causal canonical-SMILES decoder. Two
-independent switches control its use:
+The complete joint atom/NMR memory conditions a causal canonical-SMILES decoder.
+Two independent switches control its use:
 
 ```yaml
 lit_module.model.use_smiles_loss: true
@@ -69,11 +70,11 @@ lit_module.criterion.smiles_weight: 1.0
 lit_module.model.use_smiles_conditioning: false
 ```
 
-`use_smiles_loss` enables the auxiliary sequence objective.
-`use_smiles_conditioning` additionally lets atom features cross-attend to the
-SMILES decoder hidden states. Decoder logits remain available for cross-entropy,
-generation, and analysis; the graph branch consumes hidden states rather than
-the vocabulary-sized logits.
+`use_smiles_loss` enables the auxiliary sequence objective. With the default
+`use_smiles_conditioning: false`, the decoder is an independent training head:
+its loss updates the joint encoder, but its hidden states and logits never enter
+the graph branch. `use_smiles_conditioning` retains an experimental interface
+that additionally lets atom features read decoder hidden states.
 
 Training and the full validation loader use teacher forcing. A separate fixed
 validation subset uses greedy self-conditioned generation, making the exposure
@@ -305,17 +306,20 @@ fragment supervision
 The forward output exposes:
 
 ```text
-atom_features_pre_ca
+atom_features_pre_joint
 atom_features
 heavy_query_features
+joint_features
 hydrogen_attachment_features
 heavy_attachment_features
 graph_atom_features
 attention
 ```
 
-These tensors can be used for pre/post-CA t-SNE, fragment linear probes,
-H-parent retrieval analysis, and atom-spectrum attention visualization.
+These tensors can be used for pre/post-joint-encoder t-SNE, fragment linear
+probes, H-parent retrieval analysis, and joint atom-spectrum attention
+visualization. SMILES generation reads the joint memory as an auxiliary task;
+its decoder states do not condition the graph pipeline by default.
 
 ## Installation and tests
 

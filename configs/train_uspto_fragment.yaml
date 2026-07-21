@@ -45,8 +45,7 @@ lit_module:
     _target_: src.model.nmr_to_graph.NMRToGraph
     hidden_dim: ${hidden_dim}
     num_heads: ${num_heads}
-    num_spectrum_layers: 6
-    num_atom_spectrum_layers: 3
+    num_joint_layers: 6
     num_atom_interaction_layers: 2
     num_fourier_features: 64
     max_num_atoms: ${max_num_atoms}

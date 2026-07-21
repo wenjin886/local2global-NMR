@@ -56,8 +56,7 @@ def make_model(**kwargs):
     return NMRToGraph(
         hidden_dim=32,
         num_heads=4,
-        num_spectrum_layers=1,
-        num_atom_spectrum_layers=1,
+        num_joint_layers=1,
         num_atom_interaction_layers=1,
         num_fourier_features=16,
         max_num_atoms=16,
@@ -80,6 +79,9 @@ def test_forward_masks_fragments_and_probabilities():
     assert outputs["heavy_edge_logits"].shape == (2, 6, 6, 5)
     assert outputs["h_peak_features"].shape == (2, 2, 32)
     assert outputs["c_peak_features"].shape == (2, 1, 32)
+    assert outputs["joint_features"].shape == (2, 9, 32)
+    assert outputs["attention"]["joint"].shape[-2:] == (9, 9)
+    assert outputs["attention"]["heavy_query_to_joint"].shape[-2:] == (6, 9)
     assert torch.allclose(
         outputs["heavy_edge_logits"],
         outputs["heavy_edge_logits"].transpose(1, 2),
@@ -140,11 +142,11 @@ def test_fragment_only_stage_has_no_edge_or_attachment_gradient():
     assert edge_gradient is None or torch.count_nonzero(edge_gradient) == 0
 
 
-def test_smiles_teacher_forcing_loss_and_greedy_conditioning():
+def test_smiles_teacher_forcing_loss_and_greedy_generation():
     batch = collate_nmr_graph([make_sample(), make_sample()])
     model = make_model(
         use_smiles_loss=True,
-        use_smiles_conditioning=True,
+        use_smiles_conditioning=False,
         num_smiles_layers=1,
         max_smiles_length=32,
         smiles_vocab_size=6,
@@ -153,6 +155,7 @@ def test_smiles_teacher_forcing_loss_and_greedy_conditioning():
     outputs = model(**batch.model_inputs())
     assert outputs["smiles_teacher_forced"] is True
     assert outputs["smiles_logits"].shape[:2] == batch.smiles_target_ids.shape
+    assert outputs["attention"]["atom_to_smiles"] is None
     criterion = NMRGraphLoss(smiles_weight=1.0)
     loss, losses = criterion(
         outputs=outputs,
