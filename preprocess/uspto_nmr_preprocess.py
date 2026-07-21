@@ -15,7 +15,7 @@ from rdkit import Chem
 import tarfile
 import pandas as pd
 
-
+import time
 from typing import List
 
 import json
@@ -939,7 +939,9 @@ def preprocess_uspto(
             info_path = paths[split]["info"]
             if osp.isfile(info_path):
                 continue
+            print(f"Start loading {paths[split]['data']} for dataset info...")
             data_list = _load_torch(paths[split]["data"])
+            print(f"Done loading. Time taken: {time.time() - start_time:.2f} seconds.")
             first_multiplicity = (
                 getattr(data_list[0], "h_nmr_multiplicity", None)
                 if data_list else None
@@ -958,7 +960,10 @@ def preprocess_uspto(
 
         train_infos = read_json(paths["train"]["info"])
         for split in SPLIT_NAMES:
+            print(f"Start loading {paths[split]['data']} for categorical mapping...")
+            start_time = time.time()
             data_list = _load_torch(paths[split]["data"])
+            print(f"Done loading. Time taken: {time.time() - start_time:.2f} seconds.")
             _map_and_save_split(
                 data_list,
                 paths[split]["data"],
