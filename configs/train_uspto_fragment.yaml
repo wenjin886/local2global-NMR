@@ -6,14 +6,15 @@ test: false
 data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
-output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}
-log_path: ${output_dir}
+
 
 group: test
-exp_name: fragment_smiles_d512
+exp_name: fragment_smiles_d256
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
+log_path: ${output_dir}/logs
 
-hidden_dim: 512
+hidden_dim: 256
 num_heads: 8
 max_num_atoms: 101
 
@@ -22,10 +23,10 @@ datamodule:
   train_path: ${data_path}/train.pt
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
-  train_batch_size: 64
+  train_batch_size: 128
   val_batch_size: 64
-  num_workers: 4
-  pin_memory: true
+  num_workers: 0
+  pin_memory: false
   val_generation_size: 1024
   val_generation_seed: 0
   transform:
@@ -56,11 +57,11 @@ lit_module:
     use_h_integration: true
     use_h_multiplicity: true
     use_h_j: true
-    max_multiplicity_classes: 512
+    max_multiplicity_classes: 122
     use_smiles_loss: true
     use_smiles_conditioning: false
     num_smiles_layers: 6
-    max_smiles_length: 500
+    max_smiles_length: 75
     smiles_vocab_path: ${data_path}/dataset_infos_train.json
     teacher_force_smiles_during_eval: false
     dropout: 0.1
@@ -115,4 +116,4 @@ ckpt_path: null
 
 hydra:
   run:
-    dir: ${log_path}/${exp_save_dir_name}
+    dir: ${log_path}

@@ -5,6 +5,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from .dataset import NMRGraphDataset, collate_nmr_graph
+import time
 
 
 class NMRGraphDataModule(pl.LightningDataModule):
@@ -26,29 +27,42 @@ class NMRGraphDataModule(pl.LightningDataModule):
         self.transform = transform
 
     def setup(self, stage: Optional[str] = None) -> None:
-        self.train_dataset = NMRGraphDataset(
-            self.hparams.train_path, transform=self.transform
-        )
-        self.val_dataset = NMRGraphDataset(
-            self.hparams.val_path, transform=self.transform
-        )
-        generation_size = min(
-            self.hparams.val_generation_size, len(self.val_dataset)
-        )
-        generator = torch.Generator().manual_seed(
-            self.hparams.val_generation_seed
-        )
-        generation_indices = torch.randperm(
-            len(self.val_dataset), generator=generator
-        )[:generation_size].tolist()
-        self.val_generation_dataset = Subset(
-            self.val_dataset, generation_indices
-        )
-        self.test_dataset = (
-            NMRGraphDataset(self.hparams.test_path, transform=self.transform)
-            if self.hparams.test_path
-            else None
-        )
+        if stage in [None, "fit"]:
+            print("Start loading dataset...")
+            start_time = time.time()
+            
+            self.val_dataset = NMRGraphDataset(
+                self.hparams.val_path, transform=self.transform
+            )
+            print(f"Done loading val dataset: {len(self.val_dataset)} Time taken: {time.time() - start_time:.2f}s")
+
+            start_time = time.time()
+            generation_size = min(
+                self.hparams.val_generation_size, len(self.val_dataset)
+            )
+            generator = torch.Generator().manual_seed(
+                self.hparams.val_generation_seed
+            )
+            generation_indices = torch.randperm(
+                len(self.val_dataset), generator=generator
+            )[:generation_size].tolist()
+            self.val_generation_dataset = Subset(
+                self.val_dataset, generation_indices
+            )
+            print(f"Done loading val generation dataset: {len(self.val_generation_dataset)} Time taken: {time.time() - start_time:.2f}s")
+
+            start_time = time.time()
+            self.train_dataset = NMRGraphDataset(
+                self.hparams.train_path, transform=self.transform
+            )
+            print(f"Done loading train dataset: {len(self.train_dataset)} Time taken: {time.time() - start_time:.2f}s")
+        if stage in [None, "test"]:
+            self.test_dataset = (
+                NMRGraphDataset(self.hparams.test_path, transform=self.transform)
+                if self.hparams.test_path
+                else None
+            )
+            print("Done loading test dataset: ", len(self.test_dataset))
 
     def _loader(self, dataset, batch_size: int, shuffle: bool) -> DataLoader:
         return DataLoader(
