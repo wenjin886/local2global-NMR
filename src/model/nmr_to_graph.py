@@ -4,7 +4,11 @@ from typing import Dict, Optional, Sequence, Tuple
 import torch
 from torch import nn
 
-from src.data.constants import BOND_TYPE_CANDIDATES, HEAVY_ATOM_TYPES
+from src.data.constants import (
+    BOND_TYPE_CANDIDATES,
+    HEAVY_ATOM_TYPES,
+    SMILES_PAD_INDEX,
+)
 from src.nn.attention import MaskedCrossAttentionBlock, MaskedSelfAttentionEncoder
 from src.nn.embedding import AtomSlotEmbedding, CNMRPeakEmbedding, HNMRPeakEmbedding
 from src.nn.smiles import NMRToSMILESDecoder
@@ -17,6 +21,14 @@ from src.nn.graph import (
     HydrogenAttachmentReadout,
     HydrogenParentEnvironmentReadout,
 )
+
+
+def _xavier_initialize_matrices(module: nn.Module) -> None:
+    """Apply Xavier only to matrix parameters inside a selected submodule."""
+    with torch.no_grad():
+        for parameter in module.parameters():
+            if parameter.dim() > 1:
+                nn.init.xavier_uniform_(parameter)
 
 
 class NMRToGraph(nn.Module):
@@ -54,6 +66,8 @@ class NMRToGraph(nn.Module):
             smiles_vocab_path: Optional[str] = None,
             smiles_vocab_size: Optional[int] = None,
             teacher_force_smiles_during_eval: bool = False,
+            predict_attachments: bool = True,
+            predict_edges: bool = True,
             dropout: float = 0.0,
     ):
         super().__init__()
@@ -83,8 +97,13 @@ class NMRToGraph(nn.Module):
             num_layers=num_joint_layers,
             dropout=dropout,
         )
+        _xavier_initialize_matrices(self.joint_encoder)
         self.use_smiles_loss = use_smiles_loss
         self.use_smiles_conditioning = use_smiles_conditioning
+        self.predict_attachments = predict_attachments
+        self.predict_edges = predict_edges
+        if predict_edges and not predict_attachments:
+            raise ValueError("predict_edges requires predict_attachments")
         self.teacher_force_smiles_during_eval = teacher_force_smiles_during_eval
         self.max_smiles_length = max_smiles_length
         self.smiles_vocab = None
@@ -105,6 +124,11 @@ class NMRToGraph(nn.Module):
                 max_length=max_smiles_length,
                 dropout=dropout,
             )
+            _xavier_initialize_matrices(self.smiles_decoder)
+            with torch.no_grad():
+                self.smiles_decoder.token_embedding.weight[
+                    SMILES_PAD_INDEX
+                ].zero_()
         else:
             self.smiles_decoder = None
         self.atom_smiles_layer = (
@@ -299,34 +323,47 @@ class NMRToGraph(nn.Module):
         h_parent_type_logits, h_parent_fragment_logits = (
             self.h_parent_environment_readout(atom_features)
         )
-        (
-            attachment_logits,
-            attachment_probabilities,
-            hydrogen_attachment_features,
-            heavy_attachment_features,
-        ) = self.attachment_readout(
-            atom_features=atom_features,
-            hydrogen_mask=hydrogen_mask,
-            heavy_mask=heavy_mask,
-        )
-        fragment_conditioned_features, expected_fragment_counts = (
-            self.fragment_conditioner(
+        attachment_logits = None
+        attachment_probabilities = None
+        hydrogen_attachment_features = None
+        heavy_attachment_features = None
+        if self.predict_attachments:
+            (
+                attachment_logits,
+                attachment_probabilities,
+                hydrogen_attachment_features,
+                heavy_attachment_features,
+            ) = self.attachment_readout(
                 atom_features=atom_features,
-                fragment_logits=fragment_logits,
+                hydrogen_mask=hydrogen_mask,
                 heavy_mask=heavy_mask,
             )
-        )
-        refined_atom_features, hydrogen_context, assigned_h_count = (
-            self.h_context_aggregator(
-                atom_features=fragment_conditioned_features,
-                attachment_probabilities=attachment_probabilities,
-                heavy_mask=heavy_mask,
+
+        refined_atom_features = atom_features
+        expected_fragment_counts = None
+        hydrogen_context = None
+        assigned_h_count = None
+        edge_logits = None
+        heavy_edge_mask = None
+        if self.predict_edges:
+            fragment_conditioned_features, expected_fragment_counts = (
+                self.fragment_conditioner(
+                    atom_features=atom_features,
+                    fragment_logits=fragment_logits,
+                    heavy_mask=heavy_mask,
+                )
             )
-        )
-        edge_logits, heavy_edge_mask = self.edge_readout(
-            refined_atom_features,
-            heavy_mask,
-        )
+            refined_atom_features, hydrogen_context, assigned_h_count = (
+                self.h_context_aggregator(
+                    atom_features=fragment_conditioned_features,
+                    attachment_probabilities=attachment_probabilities,
+                    heavy_mask=heavy_mask,
+                )
+            )
+            edge_logits, heavy_edge_mask = self.edge_readout(
+                refined_atom_features,
+                heavy_mask,
+            )
 
         return {
             "atom_features_pre_joint": atom_features_pre_joint,

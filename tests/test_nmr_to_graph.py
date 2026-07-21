@@ -2,7 +2,7 @@ import json
 
 import torch
 
-from src.data.constants import BOND_TYPE_CANDIDATES
+from src.data.constants import BOND_TYPE_CANDIDATES, SMILES_PAD_INDEX
 from src.data.dataset import GraphSample, TransformingCollator, collate_nmr_graph
 from src.data.transforms import NormalizeNMR
 from src.model.loss import NMRGraphLoss
@@ -155,7 +155,7 @@ def test_full_graph_loss_backpropagates_without_valence_term():
 
 def test_fragment_only_stage_has_no_edge_or_attachment_gradient():
     batch = collate_nmr_graph([make_sample()])
-    model = make_model()
+    model = make_model(predict_attachments=False, predict_edges=False)
     criterion = NMRGraphLoss(
         h_attachment_weight=0.0,
         h_count_weight=0.0,
@@ -163,6 +163,9 @@ def test_fragment_only_stage_has_no_edge_or_attachment_gradient():
         fragment_edge_consistency_weight=0.0,
     )
     outputs = model(**batch.model_inputs())
+    assert outputs["h_attachment_logits"] is None
+    assert outputs["heavy_edge_logits"] is None
+    assert outputs["graph_atom_features"] is outputs["atom_features"]
     loss, _ = criterion(
         outputs=outputs,
         atom_types=batch.atom_types,
@@ -193,6 +196,9 @@ def test_smiles_teacher_forcing_loss_and_greedy_generation():
     assert outputs["smiles_teacher_forced"] is True
     assert outputs["smiles_logits"].shape[:2] == batch.smiles_target_ids.shape
     assert outputs["attention"]["atom_to_smiles"] is None
+    assert torch.count_nonzero(
+        model.smiles_decoder.token_embedding.weight[SMILES_PAD_INDEX]
+    ) == 0
     criterion = NMRGraphLoss(smiles_weight=1.0)
     loss, losses = criterion(
         outputs=outputs,

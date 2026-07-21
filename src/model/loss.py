@@ -309,6 +309,21 @@ class NMRGraphLoss(nn.Module):
             h_parent_types: torch.Tensor,
             smiles_target_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        attachment_required = any(weight != 0 for weight in (
+            self.h_attachment_weight,
+            self.h_count_weight,
+            self.h_entropy_weight,
+        ))
+        if attachment_required and outputs.get("h_attachment_probabilities") is None:
+            raise ValueError(
+                "Attachment losses require model.predict_attachments=true"
+            )
+        edge_required = (
+            self.edge_weight != 0 or self.fragment_edge_consistency_weight != 0
+        )
+        if edge_required and outputs.get("heavy_edge_logits") is None:
+            raise ValueError("Edge losses require model.predict_edges=true")
+
         losses = {}
         losses["heavy_fragment"] = self.fragment_count_loss(
             outputs["fragment_logits"],

@@ -5,7 +5,12 @@ import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
-from src.data.constants import SMILES_BOS_INDEX, SMILES_EOS_INDEX, SMILES_PAD_INDEX
+from src.data.constants import (
+    BOND_TYPE_CANDIDATES,
+    SMILES_BOS_INDEX,
+    SMILES_EOS_INDEX,
+    SMILES_PAD_INDEX,
+)
 from src.data.dataset import GraphBatch
 from src.model.loss import NMRGraphLoss
 from src.model.nmr_to_graph import NMRToGraph
@@ -19,10 +24,13 @@ class LitNMRToGraph(pl.LightningModule):
             lr: float = 2e-4,
             weight_decay: float = 1e-12,
             warm_up_steps: int = 100,
+            num_val_examples_to_log: int = 10,
     ):
         super().__init__()
         self.model = model
         self.criterion = criterion
+        self.num_val_examples_to_log = num_val_examples_to_log
+        self._validation_examples = []
         self.save_hyperparameters(ignore=["model", "criterion"])
 
     def forward(
@@ -69,18 +77,19 @@ class LitNMRToGraph(pl.LightningModule):
             batch_size=batch.atom_types.size(0),
             add_dataloader_idx=False,
         )
-        metrics = self._batch_metrics(
-            outputs,
-            batch,
-            smiles_mode="teacher" if teacher_force_smiles else "greedy",
-        )
-        self.log_dict(
-            {"%s/%s" % (stage, key): value for key, value in metrics.items()},
-            on_step=False,
-            on_epoch=True,
-            batch_size=batch.atom_types.size(0),
-            add_dataloader_idx=False,
-        )
+        if stage != "train":
+            metrics = self._batch_metrics(
+                outputs,
+                batch,
+                smiles_mode="teacher" if teacher_force_smiles else "greedy",
+            )
+            self.log_dict(
+                {"%s/%s" % (stage, key): value for key, value in metrics.items()},
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch.atom_types.size(0),
+                add_dataloader_idx=False,
+            )
         return loss
 
     def training_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
@@ -105,6 +114,7 @@ class LitNMRToGraph(pl.LightningModule):
             batch_size=batch.atom_types.size(0),
             add_dataloader_idx=False,
         )
+        self._collect_validation_examples(outputs, batch)
 
     def test_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "test", teacher_force_smiles=False)
@@ -117,18 +127,20 @@ class LitNMRToGraph(pl.LightningModule):
     ) -> Dict[str, torch.Tensor]:
         zero = outputs["fragment_logits"].sum() * 0.0
 
-        edge_mask = outputs["heavy_edge_mask"] & torch.triu(
-            torch.ones_like(outputs["heavy_edge_mask"], dtype=torch.bool),
-            diagonal=1,
-        )
-        edge_mask = edge_mask & batch.bond_types.ge(0)
-        if edge_mask.any():
-            edge_prediction = outputs["heavy_edge_logits"].argmax(dim=-1)
-            edge_accuracy = (
-                edge_prediction[edge_mask] == batch.bond_types[edge_mask]
-            ).float().mean()
-        else:
-            edge_accuracy = zero
+        edge_accuracy = None
+        if outputs.get("heavy_edge_logits") is not None:
+            edge_mask = outputs["heavy_edge_mask"] & torch.triu(
+                torch.ones_like(outputs["heavy_edge_mask"], dtype=torch.bool),
+                diagonal=1,
+            )
+            edge_mask = edge_mask & batch.bond_types.ge(0)
+            if edge_mask.any():
+                edge_prediction = outputs["heavy_edge_logits"].argmax(dim=-1)
+                edge_accuracy = (
+                    edge_prediction[edge_mask] == batch.bond_types[edge_mask]
+                ).float().mean()
+            else:
+                edge_accuracy = zero
 
         fragment_prediction = outputs["fragment_logits"].argmax(dim=-1)
         fragment_scores = []
@@ -213,34 +225,35 @@ class LitNMRToGraph(pl.LightningModule):
                     (type_correct & fragment_correct).float().mean()
                 )
 
-                predicted_attachment = outputs["h_attachment_logits"][
-                    sample_index, predicted_rows
-                ].argmax(dim=-1)
-                target_attachment = batch.h_attachment[sample_index, target_rows]
-                num_atoms = batch.atom_types.size(1)
-                predicted_histogram = torch.bincount(
-                    predicted_attachment, minlength=num_atoms
-                )
-                target_histogram = torch.bincount(
-                    target_attachment, minlength=num_atoms
-                )
-                h_attachment_accuracies.append(
-                    torch.minimum(predicted_histogram, target_histogram).sum().float()
-                    / target_attachment.numel()
-                )
+                if outputs.get("h_attachment_logits") is not None:
+                    predicted_attachment = outputs["h_attachment_logits"][
+                        sample_index, predicted_rows
+                    ].argmax(dim=-1)
+                    target_attachment = batch.h_attachment[sample_index, target_rows]
+                    num_atoms = batch.atom_types.size(1)
+                    predicted_histogram = torch.bincount(
+                        predicted_attachment, minlength=num_atoms
+                    )
+                    target_histogram = torch.bincount(
+                        target_attachment, minlength=num_atoms
+                    )
+                    h_attachment_accuracies.append(
+                        torch.minimum(
+                            predicted_histogram, target_histogram
+                        ).sum().float() / target_attachment.numel()
+                    )
 
-                soft_counts = outputs["h_attachment_probabilities"][
-                    sample_index
-                ].sum(dim=0)
-                h_count_maes.append(
-                    (soft_counts[heavy] - target_histogram[heavy]).abs().mean()
-                )
+                    soft_counts = outputs["h_attachment_probabilities"][
+                        sample_index
+                    ].sum(dim=0)
+                    h_count_maes.append(
+                        (soft_counts[heavy] - target_histogram[heavy]).abs().mean()
+                    )
 
         def mean(values):
             return torch.stack(values).mean() if values else zero
 
         metrics = {
-            "edge_accuracy": edge_accuracy,
             "heavy_fragment_score": mean(fragment_scores),
             "heavy_fragment_presence_macro_f1": mean(presence_macro_f1s),
             "heavy_fragment_positive_count_accuracy": mean(
@@ -255,6 +268,11 @@ class LitNMRToGraph(pl.LightningModule):
             "h_attachment_multiset_accuracy": mean(h_attachment_accuracies),
             "h_count_mae": mean(h_count_maes),
         }
+        if edge_accuracy is not None:
+            metrics["edge_accuracy"] = edge_accuracy
+        if outputs.get("h_attachment_logits") is None:
+            metrics.pop("h_attachment_multiset_accuracy")
+            metrics.pop("h_count_mae")
         if outputs.get("smiles_token_ids") is not None:
             valid = batch.smiles_target_ids.ne(SMILES_PAD_INDEX)
             predictions = outputs["smiles_token_ids"]
@@ -282,6 +300,112 @@ class LitNMRToGraph(pl.LightningModule):
                     stereo_agnostic
                 )
         return metrics
+
+    def on_validation_epoch_start(self) -> None:
+        self._validation_examples = []
+
+    @staticmethod
+    def _format_fragments(
+            atom_types: torch.Tensor,
+            fragment_counts: torch.Tensor,
+            heavy_mask: torch.Tensor,
+    ) -> str:
+        rows = []
+        for atom_index in heavy_mask.nonzero(as_tuple=False).flatten().tolist():
+            counts = fragment_counts[atom_index]
+            ports = [
+                f"{candidate}x{int(count)}"
+                for candidate, count in zip(BOND_TYPE_CANDIDATES, counts.tolist())
+                if count > 0
+            ]
+            rows.append(
+                f"{atom_index}:Z{int(atom_types[atom_index])}="
+                + (",".join(ports) if ports else "none")
+            )
+        return "; ".join(rows)
+
+    def _collect_validation_examples(
+            self,
+            outputs: Dict[str, object],
+            batch: GraphBatch,
+    ) -> None:
+        if (
+            self.num_val_examples_to_log <= 0
+            or self.trainer.sanity_checking
+            or outputs.get("smiles_token_ids") is None
+            or self.model.smiles_vocab is None
+        ):
+            return
+        remaining = self.num_val_examples_to_log - len(self._validation_examples)
+        if remaining <= 0:
+            return
+        fragment_predictions = outputs["fragment_logits"].argmax(dim=-1)
+        for sample_index in range(min(remaining, batch.atom_types.size(0))):
+            target_smiles = self._decode_smiles(batch.smiles_target_ids[sample_index])
+            predicted_smiles = self._decode_smiles(
+                outputs["smiles_token_ids"][sample_index]
+            )
+            from rdkit import Chem, rdBase
+            with rdBase.BlockLogs():
+                predicted_molecule = Chem.MolFromSmiles(predicted_smiles)
+                target_molecule = Chem.MolFromSmiles(target_smiles)
+            predicted_valid = predicted_molecule is not None
+            non_stereo_exact = False
+            if predicted_molecule is not None and target_molecule is not None:
+                predicted_non_stereo = Chem.MolToSmiles(
+                    predicted_molecule, canonical=True, isomericSmiles=False
+                )
+                target_non_stereo = Chem.MolToSmiles(
+                    target_molecule, canonical=True, isomericSmiles=False
+                )
+                non_stereo_exact = predicted_non_stereo == target_non_stereo
+            heavy_mask = outputs["heavy_mask"][sample_index]
+            target_fragments = self._format_fragments(
+                batch.atom_types[sample_index],
+                batch.heavy_fragment_labels[sample_index],
+                heavy_mask,
+            )
+            predicted_fragments = self._format_fragments(
+                batch.atom_types[sample_index],
+                fragment_predictions[sample_index],
+                heavy_mask,
+            )
+            self._validation_examples.append([
+                int(self.current_epoch),
+                target_smiles,
+                predicted_smiles,
+                predicted_smiles == target_smiles,
+                predicted_valid,
+                non_stereo_exact,
+                target_fragments,
+                predicted_fragments,
+            ])
+
+    def on_validation_epoch_end(self) -> None:
+        if (
+            not self._validation_examples
+            or self.trainer.sanity_checking
+            or not self.trainer.is_global_zero
+        ):
+            return
+        columns = [
+            "epoch",
+            "target_smiles",
+            "predicted_smiles",
+            "smiles_exact",
+            "smiles_valid",
+            "smiles_non_stereo_exact",
+            "target_fragments",
+            "predicted_fragments",
+        ]
+        for logger in self.trainer.loggers:
+            if hasattr(logger, "log_table"):
+                logger.log_table(
+                    key="val/examples",
+                    columns=columns,
+                    data=self._validation_examples,
+                    step=self.global_step,
+                )
 
     def _decode_smiles(self, token_ids: torch.Tensor) -> str:
         tokens = []

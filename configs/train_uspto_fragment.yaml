@@ -64,6 +64,8 @@ lit_module:
     max_smiles_length: 75
     smiles_vocab_path: ${data_path}/dataset_infos_train.json
     teacher_force_smiles_during_eval: false
+    predict_attachments: false
+    predict_edges: false
     dropout: 0.1
   criterion:
     _target_: src.model.loss.NMRGraphLoss
@@ -82,6 +84,7 @@ lit_module:
   lr: 2e-4
   weight_decay: 1e-12
   warm_up_steps: 100
+  num_val_examples_to_log: 10
 
 callbacks:
   model_checkpoint:
@@ -92,6 +95,9 @@ callbacks:
     mode: max
     save_last: true
     save_top_k: 3
+  learning_rate_monitor:
+    _target_: pytorch_lightning.callbacks.LearningRateMonitor
+    logging_interval: step
 
 logger:
   wandb:

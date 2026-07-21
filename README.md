@@ -20,6 +20,10 @@ No molecular formula is used. `data.h` supplies the exact explicit atom
 inventory, including H. The current objective intentionally contains no valence
 loss.
 
+Matrix parameters inside the joint encoder and SMILES decoder use Xavier
+uniform initialization. Other graph heads retain their module-specific PyTorch
+defaults, and SMILES/atom padding embedding rows remain zero.
+
 ## Factorized fragment representation
 
 The previous element-specific local-label vocabulary was replaced because its
@@ -125,9 +129,13 @@ datamodule.val_generation_seed: 0
 
 The full loader reports teacher-forced token accuracy, exact match, and
 perplexity. The fixed subset reports greedy exact match, RDKit validity, and
-stereo-agnostic exact match under the `val_generation/` namespace. It also
-reports the same fragment and H metrics using generated SMILES conditioning,
-which directly measures the teacher-forcing exposure gap.
+stereo-agnostic exact match under the `val_generation/` namespace. The first 10
+molecules of this deterministic subset are also logged once per epoch as a W&B
+table containing target/predicted SMILES, validity and exactness, plus readable
+target/predicted heavy-atom fragment counts. This reuses the existing greedy
+outputs and does not run an additional generation pass. A
+`LearningRateMonitor` records the optimizer learning rate at every step,
+including warmup.
 
 ## H-to-heavy retrieval
 
@@ -283,6 +291,12 @@ H parent fragment count + presence
 H parent element
 ```
 
+The fragment configuration sets `predict_attachments: false` and
+`predict_edges: false`. Attachment, H-context aggregation, and the dense
+`[B,N,N,3D]` heavy-edge readout are skipped entirely instead of being computed
+with zero loss weights. Training steps log losses only; molecule-wise Hungarian
+classification metrics are evaluated during validation.
+
 ### Stage 2: add H-parent retrieval
 
 Start from the Stage-1 checkpoint and enable attachment/count losses while
@@ -291,6 +305,7 @@ keeping edge losses disabled:
 ```bash
 python src/train.py -cn train_uspto_graph \
   ckpt_path=/path/to/fragment.ckpt \
+  lit_module.model.predict_edges=false \
   lit_module.criterion.edge_weight=0 \
   lit_module.criterion.fragment_edge_consistency_weight=0
 ```
