@@ -95,7 +95,7 @@ The generation target is canonical isomeric SMILES, so atom chirality and bond
 stereochemistry are preserved. `rxn.chemutils.tokenization.tokenize_smiles`
 produces chemical tokens such as `[C@H]`, `Cl`, `/`, and `\\`. The vocabulary
 is built from the training split during preprocessing and stored in
-`dataset_infos.json` together with BOS/EOS/PAD/UNK control tokens. Validation
+`dataset_infos_train.json` together with BOS/EOS/PAD/UNK control tokens. Validation
 and test tokens absent from the training vocabulary map to `<unk>`.
 
 ## Validation metrics
@@ -210,20 +210,28 @@ python preprocess/uspto_nmr_preprocess.py \
 
 To retain repeated experimental spectra without leakage, pass
 `--keep_duplicate_records`. All records belonging to one canonical molecule
-will still be assigned to the same split. `dataset_infos.json` is always
+will still be assigned to the same split. `dataset_infos_train.json` is always
 computed from the training split only.
 
 ## Spectrum metadata and normalization
 
 USPTO preprocessing keeps every proton peak as one aligned record: sorting by
-shift also reorders its `nH`, `category`, and `j_values`. `dataset_infos.json`
-records training-corpus mean/std for continuous H shift, C shift, integration,
-and individual J values. Multiplicity is categorical, so the file records every
-training label, including rare compound labels such as `ddddd` and `dtdd`, plus
-an aligned histogram rather than an arbitrary mean/std over category IDs. The
-raw strings remain in the preprocessed samples and are converted to IDs only by
-the dataset transform. Only labels absent from the training vocabulary map to
-`<unk>` at validation or inference time.
+shift also reorders its `nH`, `category`, and `j_values`.
+`dataset_infos_{train,val,test}.json` records the corresponding split's
+descriptive statistics for continuous H shift, C shift, integration, and J
+values. Only the train file is used for runtime normalization and categorical
+vocabularies. Multiplicity is categorical, so it records every observed label,
+including rare compound labels such as `ddddd` and `dtdd`, plus an aligned
+histogram rather than an arbitrary mean/std over category IDs. The
+raw strings are scanned before saving, then converted once during preprocessing
+with the training vocabulary. Only labels absent from the training vocabulary
+map to `<unk>` in validation or test data. Runtime transforms therefore only
+normalize continuous values and do not repeat SMILES tokenization or categorical
+mapping every epoch.
+The info files also carry a categorical mapping version, so rerunning the
+preprocessor can detect fully materialized splits without loading the large
+`.pt` files again. Existing raw split files are upgraded one at a time and
+atomically replaced only after the mapped replacement is written successfully.
 
 `NormalizeNMR` reads these statistics and z-score normalizes continuous values
 in the dataset transform. Missing integration and J entries remain zero under
@@ -243,7 +251,7 @@ datamodule.transform.normalize_h_j: false
 ```
 
 Compute normalization statistics from the training split only and reuse that
-same `dataset_infos.json` for validation and test data.
+same `dataset_infos_train.json` for validation and test normalization/mapping.
 
 ## Training curriculum
 

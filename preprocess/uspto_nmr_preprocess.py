@@ -1,6 +1,7 @@
 import os
 import os.path as osp
 import argparse
+import gc
 
 import urllib.request
 from pathlib import Path
@@ -26,9 +27,18 @@ from functools import lru_cache
 
 # import h5py
 from src.metrics.uspto import USPTOPreprocessMetrics
-from src.metrics.base import save_json
-from src.data.constants import MAX_J_VALUES, normalize_multiplicity_label
+from src.metrics.base import read_json, save_json
+from src.data.constants import (
+    MAX_J_VALUES,
+    MULTIPLICITY_MISSING_INDEX,
+    MULTIPLICITY_UNKNOWN_INDEX,
+    SMILES_UNKNOWN_INDEX,
+    normalize_multiplicity_label,
+)
+from src.data.smiles import tokenize_smiles_tokens
 SEED = 0
+SPLIT_NAMES = ("train", "val", "test")
+CATEGORICAL_MAPPING_VERSION = 1
 
 
 
@@ -768,6 +778,130 @@ def split_by_canonical_smiles(
     return splits, key_splits, groups
 
 
+def _split_paths(save_dir):
+    return {
+        split: {
+            "data": osp.join(save_dir, f"{split}.pt"),
+            "info": osp.join(save_dir, f"dataset_infos_{split}.json"),
+        }
+        for split in SPLIT_NAMES
+    }
+
+
+def _load_torch(path):
+    try:
+        return torch.load(path, weights_only=False)
+    except TypeError:  # PyTorch < 2.0
+        return torch.load(path)
+
+
+def _atomic_torch_save(data, path):
+    temporary_path = f"{path}.mapping.tmp"
+    try:
+        torch.save(data, temporary_path)
+        os.replace(temporary_path, path)
+    finally:
+        if osp.exists(temporary_path):
+            os.remove(temporary_path)
+
+
+def _save_split_metrics(splits, paths):
+    """Scan raw labels before any categorical mapping is applied."""
+    for split in SPLIT_NAMES:
+        metrics = USPTOPreprocessMetrics()
+        metrics.update(splits[split])
+        save_json(metrics.summarize(), paths[split]["info"])
+        print(f"Saved normalization statistics to {paths[split]['info']}")
+
+
+def _encode_categorical_inputs(data_list, train_infos, split):
+    multiplicity_mapping = {
+        label: index
+        for index, label in enumerate(train_infos["multiplicity_labels"])
+    }
+    smiles_mapping = {
+        token: index for index, token in enumerate(train_infos["smiles_vocab"])
+    }
+    num_unknown_multiplicity = 0
+    num_unknown_smiles = 0
+    for data in tqdm(
+            data_list,
+            desc=f"Encoding {split} multiplicity/SMILES",
+            unit="molecule",
+    ):
+        multiplicity = getattr(data, "h_nmr_multiplicity", None)
+        if multiplicity is None:
+            labels = ["<missing>"] * int(data.h_nmr.numel())
+        elif torch.is_tensor(multiplicity):
+            # Already encoded files are idempotent. Raw labels cannot be
+            # reconstructed from IDs, so only validate them against train vocab.
+            if multiplicity.numel() and (
+                multiplicity.min().item() < 0
+                or multiplicity.max().item() >= len(multiplicity_mapping)
+            ):
+                raise ValueError(
+                    f"{split} contains multiplicity IDs outside the train vocabulary"
+                )
+            data.h_nmr_multiplicity = multiplicity.to(torch.int16)
+            if not hasattr(data, "h_nmr_multiplicity_mask"):
+                data.h_nmr_multiplicity_mask = multiplicity.ne(
+                    MULTIPLICITY_MISSING_INDEX
+                )
+            labels = None
+        else:
+            labels = [normalize_multiplicity_label(value) for value in multiplicity]
+
+        if labels is not None:
+            encoded = []
+            for label in labels:
+                index = multiplicity_mapping.get(
+                    label, MULTIPLICITY_UNKNOWN_INDEX
+                )
+                num_unknown_multiplicity += int(index == MULTIPLICITY_UNKNOWN_INDEX)
+                encoded.append(index)
+            data.h_nmr_multiplicity = torch.tensor(encoded, dtype=torch.int16)
+            data.h_nmr_multiplicity_mask = torch.tensor([
+                label != "<missing>" for label in labels
+            ], dtype=torch.bool)
+
+        smiles_ids = getattr(data, "smiles_token_ids", None)
+        if smiles_ids is not None:
+            smiles_ids = torch.as_tensor(smiles_ids)
+            if smiles_ids.numel() and (
+                smiles_ids.min().item() < 0
+                or smiles_ids.max().item() >= len(smiles_mapping)
+            ):
+                raise ValueError(
+                    f"{split} contains SMILES IDs outside the train vocabulary"
+                )
+            data.smiles_token_ids = smiles_ids.to(torch.int16)
+        else:
+            smiles = getattr(data, "isomeric_smiles", data.smiles)
+            encoded = []
+            for token in tokenize_smiles_tokens(smiles):
+                index = smiles_mapping.get(token, SMILES_UNKNOWN_INDEX)
+                num_unknown_smiles += int(index == SMILES_UNKNOWN_INDEX)
+                encoded.append(index)
+            data.smiles_token_ids = torch.tensor(encoded, dtype=torch.int16)
+
+    print(
+        f"{split}: mapped {len(data_list)} molecules; "
+        f"unknown multiplicities={num_unknown_multiplicity}, "
+        f"unknown SMILES tokens={num_unknown_smiles}"
+    )
+    return data_list
+
+
+def _map_and_save_split(data_list, path, info_path, train_infos, split):
+    data_list = _encode_categorical_inputs(data_list, train_infos, split)
+    _atomic_torch_save(data_list, path)
+    split_infos = read_json(info_path)
+    split_infos["categorical_mapping_version"] = CATEGORICAL_MAPPING_VERSION
+    split_infos["categorical_vocab_source"] = "dataset_infos_train.json"
+    save_json(split_infos, info_path)
+    print(f"Saved {len(data_list)} mapped samples to {path}")
+
+
 def preprocess_uspto(
         parquet_dir: str,
         save_dir: str = None,
@@ -775,46 +909,113 @@ def preprocess_uspto(
         seed=SEED,
         deduplicate=True,
 ):
-    file_list = sorted(os.listdir(parquet_dir), key=lambda x: int(x.split('.')[0].split('_')[-1]))
+    if save_dir is None:
+        save_dir = osp.dirname(parquet_dir)
+    os.makedirs(save_dir, exist_ok=True)
+    paths = _split_paths(save_dir)
+    data_files_exist = all(
+        osp.isfile(paths[split]["data"]) for split in SPLIT_NAMES
+    )
+    info_files_exist = all(
+        osp.isfile(paths[split]["info"]) for split in SPLIT_NAMES
+    )
+    already_mapped = info_files_exist and all(
+        read_json(paths[split]["info"]).get("categorical_mapping_version")
+        == CATEGORICAL_MAPPING_VERSION
+        for split in SPLIT_NAMES
+    )
+
+    if data_files_exist and already_mapped:
+        print("Found complete, already-mapped split artifacts; nothing to do")
+        return
+
+    if data_files_exist:
+        status = "complete" if info_files_exist else "missing some metrics files"
+        print(
+            f"Found existing train/val/test.pt ({status}); "
+            "skipping parquet preprocessing"
+        )
+        for split in SPLIT_NAMES:
+            info_path = paths[split]["info"]
+            if osp.isfile(info_path):
+                continue
+            data_list = _load_torch(paths[split]["data"])
+            first_multiplicity = (
+                getattr(data_list[0], "h_nmr_multiplicity", None)
+                if data_list else None
+            )
+            if split == "train" and torch.is_tensor(first_multiplicity):
+                raise RuntimeError(
+                    "dataset_infos_train.json is missing, but train.pt is already "
+                    "mapped; the original categorical labels cannot be recovered"
+                )
+            metrics = USPTOPreprocessMetrics()
+            metrics.update(data_list)
+            save_json(metrics.summarize(), info_path)
+            print(f"Saved normalization statistics to {info_path}")
+            del data_list, metrics
+            gc.collect()
+
+        train_infos = read_json(paths["train"]["info"])
+        for split in SPLIT_NAMES:
+            data_list = _load_torch(paths[split]["data"])
+            _map_and_save_split(
+                data_list,
+                paths[split]["data"],
+                paths[split]["info"],
+                train_infos,
+                split,
+            )
+            del data_list
+            gc.collect()
+        return
+
+    file_list = sorted(
+        (file for file in os.listdir(parquet_dir) if file.endswith(".parquet")),
+        key=lambda value: int(value.split('.')[0].split('_')[-1]),
+    )
     total_data_list = []
     for file in tqdm(file_list, total=len(file_list), desc="Reading parquet files", unit="file"):
-        if not file.endswith('.parquet'):
-            continue
         df = pd.read_parquet(osp.join(parquet_dir, file))
         data_list = preprocess_parquet(df)
         total_data_list.extend(data_list)
 
-    if save_dir is None:
-        save_dir = osp.dirname(parquet_dir)
-    os.makedirs(save_dir, exist_ok=True)
     splits, key_splits, groups = split_by_canonical_smiles(
         total_data_list,
         ratios=split_ratios,
         seed=seed,
         deduplicate=deduplicate,
     )
-    for split, data_list in splits.items():
-        path = osp.join(save_dir, f"{split}.pt")
-        torch.save(data_list, path)
-        print(f"Saved {len(data_list)} samples to {path}")
-
-    for split in ["train", "val", "test"]:
-        metrics = USPTOPreprocessMetrics()
-        metrics.update(splits[split])
-        infos_path = osp.join(save_dir, f'dataset_infos_{split}.json')
-        save_json(metrics.summarize(), infos_path)
-        print(f"Saved normalization statistics to {infos_path}")
+    num_input_records = len(total_data_list)
+    split_counts = {name: len(values) for name, values in splits.items()}
+    # Metrics must see raw categorical labels. All three splits are encoded
+    # afterwards with the train vocabulary to keep token IDs consistent.
+    _save_split_metrics(splits, paths)
+    train_infos = read_json(paths["train"]["info"])
+    del total_data_list
+    gc.collect()
+    for split in SPLIT_NAMES:
+        data_list = splits.pop(split)
+        _map_and_save_split(
+            data_list,
+            paths[split]["data"],
+            paths[split]["info"],
+            train_infos,
+            split,
+        )
+        del data_list
+        gc.collect()
 
     manifest = {
         "seed": int(seed),
         "requested_ratios": list(split_ratios),
         "deduplicated": bool(deduplicate),
-        "num_input_records": len(total_data_list),
+        "num_input_records": num_input_records,
         "num_unique_non_stereo_molecules": len(groups),
         "num_removed_duplicate_records": (
-            len(total_data_list) - len(groups) if deduplicate else 0
+            num_input_records - len(groups) if deduplicate else 0
         ),
-        "num_records": {name: len(values) for name, values in splits.items()},
+        "num_records": split_counts,
         "num_molecules": {
             name: len(values) for name, values in key_splits.items()
         },
