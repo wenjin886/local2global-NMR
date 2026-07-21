@@ -1,7 +1,10 @@
+import json
+
 import torch
 
 from src.data.constants import BOND_TYPE_CANDIDATES
-from src.data.dataset import GraphSample, collate_nmr_graph
+from src.data.dataset import GraphSample, TransformingCollator, collate_nmr_graph
+from src.data.transforms import NormalizeNMR
 from src.model.loss import NMRGraphLoss
 from src.model.nmr_to_graph import NMRToGraph
 
@@ -45,8 +48,6 @@ def make_sample():
         heavy_fragment_labels=heavy_fragments,
         h_parent_fragment_labels=h_parent_fragments,
         h_parent_types=torch.tensor([6, 6, 6, 8, -100, -100]),
-        smiles="CO",
-        canonical_smiles="CO",
         isomeric_smiles="CO",
         smiles_token_ids=torch.tensor([4, 5]),
     )
@@ -91,6 +92,42 @@ def test_forward_masks_fragments_and_probabilities():
     row_sums = outputs["h_attachment_probabilities"].sum(dim=-1)
     assert torch.allclose(row_sums[outputs["hydrogen_mask"]], torch.ones(8))
     assert torch.all(row_sums[outputs["heavy_mask"]] == 0)
+
+
+def test_collator_expands_compact_dtypes_and_normalizes_batch(tmp_path):
+    sample = make_sample()
+    sample.h = sample.h.to(torch.uint8)
+    sample.bond_types = sample.bond_types.to(torch.uint8)
+    sample.h_attachment = sample.h_attachment.to(torch.int16)
+    sample.heavy_fragment_labels = sample.heavy_fragment_labels.to(torch.int8)
+    sample.h_parent_fragment_labels = sample.h_parent_fragment_labels.to(torch.int8)
+    sample.h_parent_types = sample.h_parent_types.to(torch.int8)
+    sample.h_nmr_multiplicity = sample.h_nmr_multiplicity.to(torch.int16)
+    sample.smiles_token_ids = sample.smiles_token_ids.to(torch.int16)
+
+    stats = {
+        "hnmr_shift_mean": 4.0,
+        "hnmr_shift_std": 2.0,
+        "cnmr_shift_mean": 40.0,
+        "cnmr_shift_std": 10.0,
+        "hnmr_integration_mean": 2.0,
+        "hnmr_integration_std": 1.0,
+        "hnmr_j_mean": 5.0,
+        "hnmr_j_std": 2.0,
+    }
+    path = tmp_path / "dataset_infos.json"
+    path.write_text(json.dumps(stats))
+    normalizer = NormalizeNMR(
+        str(path), encode_multiplicity=False, encode_smiles=False
+    )
+    batch = TransformingCollator(normalizer)([sample])
+
+    assert batch.atom_types.dtype == torch.long
+    assert batch.bond_types.dtype == torch.long
+    assert batch.heavy_fragment_labels.dtype == torch.long
+    assert batch.smiles_target_ids.dtype == torch.long
+    assert torch.allclose(batch.h_nmr, torch.tensor([[-0.4, 0.35]]))
+    assert torch.allclose(batch.c_nmr, torch.tensor([[1.0]]))
 
 
 def test_full_graph_loss_backpropagates_without_valence_term():

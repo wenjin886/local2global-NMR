@@ -169,21 +169,30 @@ h                           element-sorted explicit atom slots
 h_nmr, c_nmr                unassigned peak lists
 h_nmr_integration           optional proton integrations
 h_nmr_integration_mask      which integrations are observed
-h_nmr_multiplicity          raw labels on disk; categorical IDs after transform
+h_nmr_multiplicity          int16 categorical IDs from the train vocabulary
 h_nmr_multiplicity_mask     which multiplicities are observed
 h_nmr_j                     padded per-peak J-value sets
 h_nmr_j_mask                valid entries in each J-value set
-heavy_fragment_labels       [N, num_fragment_types]
-h_parent_fragment_labels    [N, num_fragment_types]
-h_parent_types              [N]
-h_attachment                H row -> ordered heavy query index
-bond_types                  [N, N] heavy-heavy targets
+heavy_fragment_labels       int8 [N, num_fragment_types]
+h_parent_fragment_labels    int8 [N, num_fragment_types]
+h_parent_types              int8 [N]
+h_attachment                int16 H row -> ordered heavy query index
+bond_types                  uint8 [N, N] heavy-heavy targets
+isomeric_smiles             canonical stereochemistry-preserving target
+smiles_token_ids            int16 token IDs for isomeric_smiles
 ```
+
+Atomic numbers are stored as `uint8`. Superseded `canno_h`,
+`hydrogen_neighbors`, `heavy_atom_local_labels`, and separately stored aromatic
+flags are removed. Aromaticity remains represented by bond type 4 and can be
+derived from fragment or edge targets. Original and non-stereochemical SMILES
+are used during preprocessing/splitting but are not duplicated in every saved
+sample.
 
 Each dataset-specific preprocess is responsible for materializing these graph
 targets together with its spectrum fields. `NMRGraphDataset` can still
-construct missing targets lazily from `smiles`, but materialization avoids
-running RDKit in every training epoch.
+construct missing targets lazily from `isomeric_smiles`, but materialization
+avoids running RDKit in every training epoch.
 
 ## Leakage-safe USPTO split
 
@@ -229,16 +238,19 @@ with the training vocabulary. Only labels absent from the training vocabulary
 map to `<unk>` in validation or test data. Runtime transforms therefore only
 normalize continuous values and do not repeat SMILES tokenization or categorical
 mapping every epoch.
-The info files also carry a categorical mapping version, so rerunning the
-preprocessor can detect fully materialized splits without loading the large
-`.pt` files again. Existing raw split files are upgraded one at a time and
-atomically replaced only after the mapped replacement is written successfully.
+The info files carry categorical-mapping and compact-storage versions, so
+rerunning the preprocessor can detect fully materialized splits without loading
+the large `.pt` files again. Existing split files are upgraded one at a time and
+atomically replaced only after the mapped, compact replacement is written
+successfully.
 
 `NormalizeNMR` reads these statistics and z-score normalizes continuous values
-in the dataset transform. Missing integration and J entries remain zero under
-their availability masks. The model then uses independent H and C shift
-embeddings. The H branch adds optional integration, multiplicity, and
-permutation-invariant J-set embeddings before the two nuclei are concatenated.
+after variable-size samples have been padded into a batch. This replaces many
+per-sample tensor operations with one vectorized operation per field. Padding
+and missing integration/J entries remain zero under their masks. The model then
+uses independent H and C shift embeddings. The H branch adds optional
+integration, multiplicity, and permutation-invariant J-set embeddings before
+the two nuclei are concatenated.
 
 The metadata interfaces can be disabled independently for datasets that do not
 provide them:
@@ -247,8 +259,8 @@ provide them:
 lit_module.model.use_h_integration: false
 lit_module.model.use_h_multiplicity: false
 lit_module.model.use_h_j: false
-datamodule.transform.normalize_h_integration: false
-datamodule.transform.normalize_h_j: false
+datamodule.batch_transform.normalize_h_integration: false
+datamodule.batch_transform.normalize_h_j: false
 ```
 
 Compute normalization statistics from the training split only and reuse that

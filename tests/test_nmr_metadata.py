@@ -23,8 +23,10 @@ def test_normalize_nmr_respects_metadata_masks(tmp_path):
     path = tmp_path / "dataset_infos.json"
     path.write_text(json.dumps(stats))
     sample = Sample()
-    sample.h_nmr = torch.tensor([3.0, 7.0])
-    sample.c_nmr = torch.tensor([50.0, 150.0])
+    sample.h_nmr = torch.tensor([[3.0, 7.0, 0.0]])
+    sample.h_nmr_mask = torch.tensor([[True, True, False]])
+    sample.c_nmr = torch.tensor([[50.0, 150.0, 0.0]])
+    sample.c_nmr_mask = torch.tensor([[True, True, False]])
     sample.h_nmr_integration = torch.tensor([3.0, 0.0])
     sample.h_nmr_integration_mask = torch.tensor([True, False])
     sample.h_nmr_j = torch.tensor([[9.0, 0.0], [0.0, 0.0]])
@@ -32,8 +34,8 @@ def test_normalize_nmr_respects_metadata_masks(tmp_path):
 
     output = NormalizeNMR(str(path), encode_smiles=False)(sample)
 
-    assert torch.equal(output.h_nmr, torch.tensor([-1.0, 1.0]))
-    assert torch.equal(output.c_nmr, torch.tensor([-1.0, 1.0]))
+    assert torch.equal(output.h_nmr, torch.tensor([[-1.0, 1.0, 0.0]]))
+    assert torch.equal(output.c_nmr, torch.tensor([[-1.0, 1.0, 0.0]]))
     assert torch.equal(output.h_nmr_integration, torch.tensor([1.0, 0.0]))
     assert torch.equal(output.h_nmr_j, torch.tensor([[1.0, 0.0], [0.0, 0.0]]))
 

@@ -71,6 +71,8 @@ class NormalizeNMR:
             "h_nmr_j": "hnmr_j",
         }
         self.masks = {
+            "h_nmr": "h_nmr_mask",
+            "c_nmr": "c_nmr_mask",
             "h_nmr_integration": "h_nmr_integration_mask",
             "h_nmr_j": "h_nmr_j_mask",
         }

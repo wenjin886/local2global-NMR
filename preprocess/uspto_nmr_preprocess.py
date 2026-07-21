@@ -36,6 +36,7 @@ from src.data.constants import (
     normalize_multiplicity_label,
 )
 from src.data.smiles import tokenize_smiles_tokens
+from src.data.storage import COMPACT_STORAGE_VERSION, compact_sample_storage
 SEED = 0
 SPLIT_NAMES = ("train", "val", "test")
 CATEGORICAL_MAPPING_VERSION = 1
@@ -522,101 +523,6 @@ def process_atoms(
 #             "total_heavy_atoms_count": total_heavy_atoms_count
 #         }
 
-BOND_TYPE_TO_idx = {
-    Chem.BondType.SINGLE: 1,
-    Chem.BondType.DOUBLE: 2,
-    Chem.BondType.TRIPLE: 3,
-    Chem.BondType.AROMATIC: 4,
-    }
-
-SYMBOL_TO_CHARGE = {
-    'H': 1,
-    'C': 6, 'N': 7, 'O': 8, 'F': 9,
-    'Si': 14, 'P': 15, 'S': 16, 'Cl': 17,
-    'Br': 35, 'I': 53, 
-}
-
-CHARGE_TO_SYMBOL = {
-        1:  'H',
-        6:  'C',  7:  'N', 8:  'O', 9:  'F',
-        14: 'Si', 15: 'P', 16: 'S', 17: 'Cl', 
-        35: 'Br', 53: 'I',
-    }
-CHARGES = [1, 6, 7, 8, 9, 14, 15, 16, 17, 35, 53]
-
-BOND_TYPE_CANDIDATES = [
-    '1-1',
-    '6-1', '6-2', '6-3', '6-4',
-    '7-1', '7-2', '7-3', '7-4',
-    '8-1', '8-2', '8-4',
-    '9-1', 
-    '15-1', '15-2', '15-4',
-    '16-1', '16-2', '16-4',
-    '17-1', 
-    '35-1', 
-    '53-1', 
-]
-
-
-def get_heavy_atom_local_label(atom: Chem.Atom, mol: Chem.Mol=None, num_max_count: int=4):
-    """
-    return: 
-        [neighbor_type, count]
-    """
-    assert atom.GetAtomicNum() != 1, f"Atom {atom.GetSymbol()} is H"
-        
-    heavy_atom_neighbors = torch.zeros(len(BOND_TYPE_CANDIDATES), dtype=torch.int32) 
-    
-    neighbor_type_counts = {}
-    for neighbor in atom.GetNeighbors():
-        neighbor_charge = neighbor.GetAtomicNum()
-        bond = mol.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
-        bond_type_idx = BOND_TYPE_TO_idx[bond.GetBondType()]
-        neighbor_type = f"{neighbor_charge}-{bond_type_idx}"
-        assert neighbor_type in BOND_TYPE_CANDIDATES, f"Invalid neighbor type: {neighbor_type}"
-        if neighbor_type not in neighbor_type_counts:
-            neighbor_type_counts[neighbor_type] = 0
-        neighbor_type_counts[neighbor_type] += 1
-    
-    for neighbor_type, count in neighbor_type_counts.items():
-        heavy_atom_neighbors[BOND_TYPE_CANDIDATES.index(neighbor_type)] = count
-    
-    return heavy_atom_neighbors
-    
-
-
-def smiles_to_local_label(smiles: str):
-    
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        raise ValueError(f"Invalid SMILES: {smiles}")
-    
-    mol=Chem.AddHs(mol)
-    
-    canno_atoms = []
-    
-    hydrogen_neighbors = []
-    
-    is_aromatic = []
-    heavy_atom_local_labels = []
-
-    
-    for atom in mol.GetAtoms():
-
-        charge = atom.GetAtomicNum()
-        canno_atoms.append(charge)
-
-        if charge == 1:
-            hydrogen_neighbors.append(atom.GetNeighbors()[0].GetAtomicNum())
-            continue
-
-        is_aromatic.append(int(atom.GetIsAromatic()))
-        
-        label = get_heavy_atom_local_label(atom, mol)
-        heavy_atom_local_labels.append(label)
-
-    return canno_atoms, hydrogen_neighbors, is_aromatic, heavy_atom_local_labels
-
 def _parse_j_values(value):
     if value is None:
         return []
@@ -698,7 +604,6 @@ def preprocess_parquet(df: pd.DataFrame):
         smiles = row['smiles']
         canonical_smiles = canonicalize_smiles_without_stereo(smiles)
         isomeric_smiles = canonicalize_smiles_with_stereo(smiles)
-        canno_atoms, hydrogen_neighbors, is_aromatic_heavy_atoms, heavy_atom_local_labels = smiles_to_local_label(smiles)
         graph_targets = graph_targets_from_smiles(smiles)
         data = Data(
             smiles=smiles,
@@ -716,10 +621,6 @@ def preprocess_parquet(df: pd.DataFrame):
             h_nmr_j=h_nmr_j,
             h_nmr_j_mask=h_nmr_j_mask,
             h = graph_targets["h"],
-            canno_h = torch.tensor(canno_atoms),
-            hydrogen_neighbors = torch.tensor(hydrogen_neighbors), # [N_H, ]
-            is_aromatic_heavy_atoms = torch.tensor(is_aromatic_heavy_atoms), # [N_heavy_atoms, ]
-            heavy_atom_local_labels = torch.stack(heavy_atom_local_labels), # [N_heavy_atoms, NUM_NEIGHBOR_TYPES]
             bond_types=graph_targets["bond_types"],
             h_attachment=graph_targets["h_attachment"],
             h_parent_types=graph_targets["h_parent_types"],
@@ -876,7 +777,9 @@ def _encode_categorical_inputs(data_list, train_infos, split):
                 )
             data.smiles_token_ids = smiles_ids.to(torch.int16)
         else:
-            smiles = getattr(data, "isomeric_smiles", data.smiles)
+            smiles = getattr(data, "isomeric_smiles", None)
+            if smiles is None:
+                smiles = getattr(data, "smiles", "")
             encoded = []
             for token in tokenize_smiles_tokens(smiles):
                 index = smiles_mapping.get(token, SMILES_UNKNOWN_INDEX)
@@ -894,12 +797,19 @@ def _encode_categorical_inputs(data_list, train_infos, split):
 
 def _map_and_save_split(data_list, path, info_path, train_infos, split):
     data_list = _encode_categorical_inputs(data_list, train_infos, split)
+    for data in tqdm(
+            data_list,
+            desc=f"Compacting {split} storage",
+            unit="molecule",
+    ):
+        compact_sample_storage(data)
     _atomic_torch_save(data_list, path)
     split_infos = read_json(info_path)
     split_infos["categorical_mapping_version"] = CATEGORICAL_MAPPING_VERSION
     split_infos["categorical_vocab_source"] = "dataset_infos_train.json"
+    split_infos["compact_storage_version"] = COMPACT_STORAGE_VERSION
     save_json(split_infos, info_path)
-    print(f"Saved {len(data_list)} mapped samples to {path}")
+    print(f"Saved {len(data_list)} mapped, compact samples to {path}")
 
 
 def preprocess_uspto(
@@ -924,9 +834,17 @@ def preprocess_uspto(
         == CATEGORICAL_MAPPING_VERSION
         for split in SPLIT_NAMES
     )
+    already_compact = info_files_exist and all(
+        read_json(paths[split]["info"]).get("compact_storage_version")
+        == COMPACT_STORAGE_VERSION
+        for split in SPLIT_NAMES
+    )
 
-    if data_files_exist and already_mapped:
-        print("Found complete, already-mapped split artifacts; nothing to do")
+    if data_files_exist and already_mapped and already_compact:
+        print(
+            "Found complete, already-mapped compact split artifacts; "
+            "nothing to do"
+        )
         return
 
     if data_files_exist:
@@ -940,6 +858,7 @@ def preprocess_uspto(
             if osp.isfile(info_path):
                 continue
             print(f"Start loading {paths[split]['data']} for dataset info...")
+            start_time = time.time()
             data_list = _load_torch(paths[split]["data"])
             print(f"Done loading. Time taken: {time.time() - start_time:.2f} seconds.")
             first_multiplicity = (
@@ -960,7 +879,7 @@ def preprocess_uspto(
 
         train_infos = read_json(paths["train"]["info"])
         for split in SPLIT_NAMES:
-            print(f"Start loading {paths[split]['data']} for categorical mapping...")
+            print(f"Start loading {paths[split]['data']} for mapping/compaction...")
             start_time = time.time()
             data_list = _load_torch(paths[split]["data"])
             print(f"Done loading. Time taken: {time.time() - start_time:.2f} seconds.")

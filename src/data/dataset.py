@@ -1,6 +1,6 @@
 import copy
 from dataclasses import dataclass, fields
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import torch
 from torch.utils.data import Dataset
@@ -34,11 +34,16 @@ def _get_value(item: Any, key: str, default: Any = None) -> Any:
     return getattr(item, key, default)
 
 
-def _as_1d_tensor(value: Any, dtype: torch.dtype) -> torch.Tensor:
+def _as_1d_tensor(
+        value: Any,
+        dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
     if value is None:
-        return torch.empty(0, dtype=dtype)
+        return torch.empty(0, dtype=dtype or torch.get_default_dtype())
     tensor = value if torch.is_tensor(value) else torch.as_tensor(value)
-    return tensor.to(dtype=dtype).reshape(-1)
+    if dtype is not None:
+        tensor = tensor.to(dtype=dtype)
+    return tensor.reshape(-1)
 
 
 def _fragment_count(atom: Any, molecule: Any) -> torch.Tensor:
@@ -200,8 +205,6 @@ class GraphSample:
     heavy_fragment_labels: torch.Tensor
     h_parent_fragment_labels: torch.Tensor
     h_parent_types: torch.Tensor
-    smiles: str = ""
-    canonical_smiles: str = ""
     isomeric_smiles: str = ""
     smiles_token_ids: Optional[torch.Tensor] = None
 
@@ -228,7 +231,6 @@ class GraphBatch:
     smiles_input_ids: torch.Tensor
     smiles_input_mask: torch.Tensor
     smiles_target_ids: torch.Tensor
-    smiles: List[str]
 
     def to(self, device: torch.device) -> "GraphBatch":
         values = {}
@@ -278,30 +280,24 @@ class NMRGraphDataset(Dataset):
 
     def __getitem__(self, index: int) -> GraphSample:
         item = copy.copy(self.items[index])
-        smiles = _get_value(item, "smiles", "")
-        canonical_smiles = _get_value(item, "canonical_smiles", "")
-        isomeric_smiles = _get_value(item, "isomeric_smiles", smiles)
+        isomeric_smiles = _get_value(
+            item, "isomeric_smiles", _get_value(item, "smiles", "")
+        )
         if all(_get_value(item, key) is not None for key in self.REQUIRED_TARGETS):
             targets = {
-                "h": _as_1d_tensor(_get_value(item, "h"), torch.long),
-                "bond_types": torch.as_tensor(
-                    _get_value(item, "bond_types"), dtype=torch.long
-                ),
-                "h_attachment": _as_1d_tensor(
-                    _get_value(item, "h_attachment"), torch.long
-                ),
+                "h": _as_1d_tensor(_get_value(item, "h")),
+                "bond_types": torch.as_tensor(_get_value(item, "bond_types")),
+                "h_attachment": _as_1d_tensor(_get_value(item, "h_attachment")),
                 "heavy_fragment_labels": torch.as_tensor(
-                    _get_value(item, "heavy_fragment_labels"), dtype=torch.long
+                    _get_value(item, "heavy_fragment_labels")
                 ),
                 "h_parent_fragment_labels": torch.as_tensor(
-                    _get_value(item, "h_parent_fragment_labels"), dtype=torch.long
+                    _get_value(item, "h_parent_fragment_labels")
                 ),
-                "h_parent_types": _as_1d_tensor(
-                    _get_value(item, "h_parent_types"), torch.long
-                ),
+                "h_parent_types": _as_1d_tensor(_get_value(item, "h_parent_types")),
             }
         else:
-            targets = graph_targets_from_smiles(smiles)
+            targets = graph_targets_from_smiles(isomeric_smiles)
 
         h_nmr = _as_1d_tensor(_get_value(item, "h_nmr"), torch.float)
         integration = _get_value(item, "h_nmr_integration")
@@ -349,8 +345,6 @@ class NMRGraphDataset(Dataset):
             heavy_fragment_labels=targets["heavy_fragment_labels"],
             h_parent_fragment_labels=targets["h_parent_fragment_labels"],
             h_parent_types=targets["h_parent_types"],
-            smiles=smiles,
-            canonical_smiles=canonical_smiles,
             isomeric_smiles=isomeric_smiles,
             smiles_token_ids=_get_value(item, "smiles_token_ids"),
         )
@@ -395,7 +389,7 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
     )
     if any(not torch.is_tensor(sample.h_nmr_multiplicity) for sample in samples):
         raise TypeError(
-            "Raw multiplicity labels must be encoded by NormalizeNMR before collation"
+            "Raw multiplicity labels must be encoded during preprocessing"
         )
     h_nmr_multiplicity = _pad_1d(
         [sample.h_nmr_multiplicity for sample in samples], 0, torch.long
@@ -417,14 +411,19 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
         raise TypeError(
             "SMILES must be encoded from the train vocabulary before collation"
         )
-    smiles_ids = [sample.smiles_token_ids.tolist() for sample in samples]
     smiles_input_ids = _pad_1d([
-        torch.tensor([SMILES_BOS_INDEX] + values, dtype=torch.long)
-        for values in smiles_ids
+        torch.cat([
+            torch.tensor([SMILES_BOS_INDEX], dtype=torch.long),
+            sample.smiles_token_ids.long(),
+        ])
+        for sample in samples
     ], SMILES_PAD_INDEX, torch.long)
     smiles_target_ids = _pad_1d([
-        torch.tensor(values + [SMILES_EOS_INDEX], dtype=torch.long)
-        for values in smiles_ids
+        torch.cat([
+            sample.smiles_token_ids.long(),
+            torch.tensor([SMILES_EOS_INDEX], dtype=torch.long),
+        ])
+        for sample in samples
     ], SMILES_PAD_INDEX, torch.long)
     smiles_input_mask = smiles_input_ids.ne(SMILES_PAD_INDEX)
 
@@ -468,8 +467,18 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
         smiles_input_ids=smiles_input_ids,
         smiles_input_mask=smiles_input_mask,
         smiles_target_ids=smiles_target_ids,
-        smiles=[sample.smiles for sample in samples],
     )
+
+
+class TransformingCollator:
+    """Collate variable-size samples before applying a vectorized transform."""
+
+    def __init__(self, transform=None):
+        self.transform = transform
+
+    def __call__(self, samples):
+        batch = collate_nmr_graph(samples)
+        return self.transform(batch) if self.transform is not None else batch
 
 if __name__ == "__main__":
     from .transforms import MultiplicityToIndex

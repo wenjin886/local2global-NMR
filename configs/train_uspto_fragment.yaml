@@ -29,7 +29,7 @@ datamodule:
   pin_memory: false
   val_generation_size: 1024
   val_generation_seed: 0
-  transform:
+  batch_transform:
     _target_: src.data.transforms.NormalizeNMR
     stats_path: ${data_path}/dataset_infos_train.json
     normalize_h_shift: true

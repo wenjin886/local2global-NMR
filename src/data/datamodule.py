@@ -4,7 +4,7 @@ import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from .dataset import NMRGraphDataset, collate_nmr_graph
+from .dataset import NMRGraphDataset, TransformingCollator
 import time
 
 
@@ -19,12 +19,18 @@ class NMRGraphDataModule(pl.LightningDataModule):
             num_workers: int = 4,
             pin_memory: bool = True,
             transform: Optional[Any] = None,
+            batch_transform: Optional[Any] = None,
             val_generation_size: int = 1024,
             val_generation_seed: int = 0,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["transform"])
-        self.transform = transform
+        if transform is not None and batch_transform is not None:
+            raise ValueError("Specify batch_transform; transform is a legacy alias")
+        self.save_hyperparameters(ignore=["transform", "batch_transform"])
+        self.batch_transform = (
+            batch_transform if batch_transform is not None else transform
+        )
+        self.collator = TransformingCollator(self.batch_transform)
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage in [None, "fit"]:
@@ -32,7 +38,7 @@ class NMRGraphDataModule(pl.LightningDataModule):
             start_time = time.time()
             
             self.val_dataset = NMRGraphDataset(
-                self.hparams.val_path, transform=self.transform
+                self.hparams.val_path
             )
             print(f"Done loading val dataset: {len(self.val_dataset)} Time taken: {time.time() - start_time:.2f}s")
 
@@ -53,16 +59,17 @@ class NMRGraphDataModule(pl.LightningDataModule):
 
             start_time = time.time()
             self.train_dataset = NMRGraphDataset(
-                self.hparams.train_path, transform=self.transform
+                self.hparams.train_path
             )
             print(f"Done loading train dataset: {len(self.train_dataset)} Time taken: {time.time() - start_time:.2f}s")
         if stage in [None, "test"]:
             self.test_dataset = (
-                NMRGraphDataset(self.hparams.test_path, transform=self.transform)
+                NMRGraphDataset(self.hparams.test_path)
                 if self.hparams.test_path
                 else None
             )
-            print("Done loading test dataset: ", len(self.test_dataset))
+            if self.test_dataset is not None:
+                print("Done loading test dataset: ", len(self.test_dataset))
 
     def _loader(self, dataset, batch_size: int, shuffle: bool) -> DataLoader:
         return DataLoader(
@@ -71,7 +78,7 @@ class NMRGraphDataModule(pl.LightningDataModule):
             shuffle=shuffle,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
-            collate_fn=collate_nmr_graph,
+            collate_fn=self.collator,
         )
 
     def train_dataloader(self) -> DataLoader:
