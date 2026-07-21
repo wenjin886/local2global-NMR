@@ -75,10 +75,10 @@ SMILES decoder hidden states. Decoder logits remain available for cross-entropy,
 generation, and analysis; the graph branch consumes hidden states rather than
 the vocabulary-sized logits.
 
-Training always uses teacher forcing. Evaluation and inference use greedy
-self-conditioned generation by default, making the exposure gap visible in
-`smiles_token_accuracy`, `smiles_exact_match`, and downstream graph metrics.
-For an explicit teacher-forced upper-bound evaluation, set:
+Training and the full validation loader use teacher forcing. A separate fixed
+validation subset uses greedy self-conditioned generation, making the exposure
+gap visible without autoregressively decoding the entire validation set.
+For an explicit teacher-forced inference path, set:
 
 ```yaml
 lit_module.model.teacher_force_smiles_during_eval: true
@@ -97,6 +97,36 @@ produces chemical tokens such as `[C@H]`, `Cl`, `/`, and `\\`. The vocabulary
 is built from the training split during preprocessing and stored in
 `dataset_infos.json` together with BOS/EOS/PAD/UNK control tokens. Validation
 and test tokens absent from the training vocabulary map to `<unk>`.
+
+## Validation metrics
+
+Checkpoint selection is independent of all loss weights and monitors:
+
+```text
+val/heavy_fragment_score
+    = sqrt(
+        heavy_fragment_presence_macro_f1
+        * heavy_fragment_positive_count_accuracy
+      )
+```
+
+Fragment metrics are computed per molecule and then averaged. Validation also
+reports atom-level fragment exact accuracy, permutation-invariant H-parent type
+and environment accuracy, H-attachment multiset accuracy, and H-count MAE.
+
+The datamodule deterministically samples 1024 validation molecules for greedy
+SMILES generation:
+
+```yaml
+datamodule.val_generation_size: 1024
+datamodule.val_generation_seed: 0
+```
+
+The full loader reports teacher-forced token accuracy, exact match, and
+perplexity. The fixed subset reports greedy exact match, RDKit validity, and
+stereo-agnostic exact match under the `val_generation/` namespace. It also
+reports the same fragment and H metrics using generated SMILES conditioning,
+which directly measures the teacher-forcing exposure gap.
 
 ## H-to-heavy retrieval
 

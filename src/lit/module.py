@@ -2,7 +2,10 @@ from typing import Dict, Optional, Tuple
 
 import pytorch_lightning as pl
 import torch
+import torch.nn.functional as F
+from scipy.optimize import linear_sum_assignment
 
+from src.data.constants import SMILES_BOS_INDEX, SMILES_EOS_INDEX, SMILES_PAD_INDEX
 from src.data.dataset import GraphBatch
 from src.model.loss import NMRGraphLoss
 from src.model.nmr_to_graph import NMRToGraph
@@ -22,14 +25,22 @@ class LitNMRToGraph(pl.LightningModule):
         self.criterion = criterion
         self.save_hyperparameters(ignore=["model", "criterion"])
 
-    def forward(self, batch: GraphBatch) -> Dict[str, object]:
-        return self.model(**batch.model_inputs())
+    def forward(
+            self,
+            batch: GraphBatch,
+            teacher_force_smiles: Optional[bool] = None,
+    ) -> Dict[str, object]:
+        return self.model(
+            **batch.model_inputs(),
+            teacher_force_smiles=teacher_force_smiles,
+        )
 
     def basic_step(
             self,
             batch: GraphBatch,
+            teacher_force_smiles: Optional[bool] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, object]]:
-        outputs = self(batch)
+        outputs = self(batch, teacher_force_smiles=teacher_force_smiles)
         loss, losses = self.criterion(
             outputs=outputs,
             atom_types=batch.atom_types,
@@ -42,37 +53,70 @@ class LitNMRToGraph(pl.LightningModule):
         )
         return loss, losses, outputs
 
-    def _shared_step(self, batch: GraphBatch, stage: str) -> torch.Tensor:
-        loss, losses, outputs = self.basic_step(batch)
+    def _shared_step(
+            self,
+            batch: GraphBatch,
+            stage: str,
+            teacher_force_smiles: Optional[bool] = None,
+    ) -> torch.Tensor:
+        loss, losses, outputs = self.basic_step(
+            batch, teacher_force_smiles=teacher_force_smiles
+        )
         self.log_dict(
             {"%s/loss_%s" % (stage, key): value for key, value in losses.items()},
             on_step=stage == "train",
             on_epoch=True,
             batch_size=batch.atom_types.size(0),
+            add_dataloader_idx=False,
         )
-        metrics = self._batch_metrics(outputs, batch)
+        metrics = self._batch_metrics(
+            outputs,
+            batch,
+            smiles_mode="teacher" if teacher_force_smiles else "greedy",
+        )
         self.log_dict(
             {"%s/%s" % (stage, key): value for key, value in metrics.items()},
             on_step=False,
             on_epoch=True,
             batch_size=batch.atom_types.size(0),
+            add_dataloader_idx=False,
         )
         return loss
 
     def training_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
-        return self._shared_step(batch, "train")
+        return self._shared_step(batch, "train", teacher_force_smiles=True)
 
-    def validation_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
-        return self._shared_step(batch, "val")
+    def validation_step(
+            self,
+            batch: GraphBatch,
+            batch_idx: int,
+            dataloader_idx: int = 0,
+    ):
+        if dataloader_idx == 0:
+            return self._shared_step(
+                batch, "val", teacher_force_smiles=True
+            )
+        outputs = self(batch, teacher_force_smiles=False)
+        metrics = self._batch_metrics(outputs, batch, smiles_mode="greedy")
+        self.log_dict(
+            {"val_generation/%s" % key: value for key, value in metrics.items()},
+            on_step=False,
+            on_epoch=True,
+            batch_size=batch.atom_types.size(0),
+            add_dataloader_idx=False,
+        )
 
     def test_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
-        return self._shared_step(batch, "test")
+        return self._shared_step(batch, "test", teacher_force_smiles=False)
 
-    @staticmethod
     def _batch_metrics(
+            self,
             outputs: Dict[str, object],
             batch: GraphBatch,
+            smiles_mode: str,
     ) -> Dict[str, torch.Tensor]:
+        zero = outputs["fragment_logits"].sum() * 0.0
+
         edge_mask = outputs["heavy_edge_mask"] & torch.triu(
             torch.ones_like(outputs["heavy_edge_mask"], dtype=torch.bool),
             diagonal=1,
@@ -84,59 +128,205 @@ class LitNMRToGraph(pl.LightningModule):
                 edge_prediction[edge_mask] == batch.bond_types[edge_mask]
             ).float().mean()
         else:
-            edge_accuracy = outputs["heavy_edge_logits"].sum() * 0.0
+            edge_accuracy = zero
 
-        predicted_counts = outputs["h_attachment_probabilities"].sum(dim=1)
-        target_counts = torch.zeros_like(predicted_counts)
+        fragment_prediction = outputs["fragment_logits"].argmax(dim=-1)
+        fragment_scores = []
+        presence_macro_f1s = []
+        positive_count_accuracies = []
+        atom_exact_accuracies = []
+        h_parent_type_accuracies = []
+        h_parent_fragment_accuracies = []
+        h_parent_joint_accuracies = []
+        h_attachment_accuracies = []
+        h_count_maes = []
         for sample_index in range(batch.atom_types.size(0)):
-            valid = outputs["hydrogen_mask"][sample_index] & batch.h_attachment[
-                sample_index
-            ].ge(0)
-            targets = batch.h_attachment[sample_index, valid]
-            if targets.numel() > 0:
-                target_counts[sample_index].scatter_add_(
-                    0,
-                    targets,
-                    torch.ones_like(targets, dtype=target_counts.dtype),
+            heavy = outputs["heavy_mask"][sample_index]
+            target_fragment = batch.heavy_fragment_labels[sample_index, heavy]
+            predicted_fragment = fragment_prediction[sample_index, heavy]
+            valid_fragment = target_fragment.ge(0)
+            if target_fragment.numel() > 0:
+                target_presence = target_fragment.gt(0)
+                predicted_presence = predicted_fragment.gt(0)
+                tp = (
+                    valid_fragment & target_presence & predicted_presence
+                ).sum(dim=0).float()
+                fp = (
+                    valid_fragment & ~target_presence & predicted_presence
+                ).sum(dim=0).float()
+                fn = (
+                    valid_fragment & target_presence & ~predicted_presence
+                ).sum(dim=0).float()
+                denominator = 2 * tp + fp + fn
+                supported = denominator.gt(0)
+                presence_f1 = (
+                    (2 * tp[supported] / denominator[supported]).mean()
+                    if supported.any() else zero + 1.0
                 )
-        heavy_mask = outputs["heavy_mask"]
-        h_count_mae = (
-            (predicted_counts[heavy_mask] - target_counts[heavy_mask]).abs().mean()
-            if heavy_mask.any()
-            else predicted_counts.sum() * 0.0
-        )
-        fragment_targets = batch.heavy_fragment_labels
-        fragment_valid = heavy_mask.unsqueeze(-1) & fragment_targets.ge(0)
-        if fragment_valid.any():
-            fragment_prediction = outputs["fragment_logits"].argmax(dim=-1)
-            fragment_count_accuracy = (
-                fragment_prediction[fragment_valid]
-                == fragment_targets[fragment_valid]
-            ).float().mean()
-            fragment_presence_accuracy = (
-                fragment_prediction[fragment_valid].gt(0)
-                == fragment_targets[fragment_valid].gt(0)
-            ).float().mean()
-        else:
-            fragment_count_accuracy = outputs["fragment_logits"].sum() * 0.0
-            fragment_presence_accuracy = fragment_count_accuracy
+                positive = valid_fragment & target_fragment.gt(0)
+                positive_accuracy = (
+                    predicted_fragment[positive].eq(target_fragment[positive]).float().mean()
+                    if positive.any() else zero + 1.0
+                )
+                atom_exact = (
+                    predicted_fragment.eq(target_fragment) | ~valid_fragment
+                ).all(dim=-1).float().mean()
+                presence_macro_f1s.append(presence_f1)
+                positive_count_accuracies.append(positive_accuracy)
+                atom_exact_accuracies.append(atom_exact)
+                fragment_scores.append(
+                    torch.sqrt((presence_f1 * positive_accuracy).clamp_min(0.0))
+                )
+
+            hydrogen = outputs["hydrogen_mask"][sample_index]
+            target_hydrogen = hydrogen & batch.h_parent_types[sample_index].ge(0)
+            predicted_rows = hydrogen.nonzero(as_tuple=False).flatten()
+            target_rows = target_hydrogen.nonzero(as_tuple=False).flatten()
+            if predicted_rows.numel() and target_rows.numel():
+                predicted_type_index = outputs["h_parent_type_logits"][
+                    sample_index, predicted_rows
+                ].argmax(dim=-1)
+                predicted_types = outputs["parent_atom_types"][predicted_type_index]
+                target_types = batch.h_parent_types[sample_index, target_rows]
+                predicted_parent_fragments = outputs["h_parent_fragment_logits"][
+                    sample_index, predicted_rows
+                ].argmax(dim=-1)
+                target_parent_fragments = batch.h_parent_fragment_labels[
+                    sample_index, target_rows
+                ]
+                type_cost = predicted_types[:, None].ne(target_types[None, :]).float()
+                fragment_cost = predicted_parent_fragments[:, None].ne(
+                    target_parent_fragments[None, :]
+                ).float().mean(dim=-1)
+                row, column = linear_sum_assignment(
+                    (type_cost + fragment_cost).detach().cpu().numpy()
+                )
+                row = torch.as_tensor(row, device=predicted_types.device)
+                column = torch.as_tensor(column, device=predicted_types.device)
+                type_correct = predicted_types[row].eq(target_types[column])
+                fragment_correct = predicted_parent_fragments[row].eq(
+                    target_parent_fragments[column]
+                ).all(dim=-1)
+                h_parent_type_accuracies.append(type_correct.float().mean())
+                h_parent_fragment_accuracies.append(fragment_correct.float().mean())
+                h_parent_joint_accuracies.append(
+                    (type_correct & fragment_correct).float().mean()
+                )
+
+                predicted_attachment = outputs["h_attachment_logits"][
+                    sample_index, predicted_rows
+                ].argmax(dim=-1)
+                target_attachment = batch.h_attachment[sample_index, target_rows]
+                num_atoms = batch.atom_types.size(1)
+                predicted_histogram = torch.bincount(
+                    predicted_attachment, minlength=num_atoms
+                )
+                target_histogram = torch.bincount(
+                    target_attachment, minlength=num_atoms
+                )
+                h_attachment_accuracies.append(
+                    torch.minimum(predicted_histogram, target_histogram).sum().float()
+                    / target_attachment.numel()
+                )
+
+                soft_counts = outputs["h_attachment_probabilities"][
+                    sample_index
+                ].sum(dim=0)
+                h_count_maes.append(
+                    (soft_counts[heavy] - target_histogram[heavy]).abs().mean()
+                )
+
+        def mean(values):
+            return torch.stack(values).mean() if values else zero
+
         metrics = {
             "edge_accuracy": edge_accuracy,
-            "fragment_count_accuracy": fragment_count_accuracy,
-            "fragment_presence_accuracy": fragment_presence_accuracy,
-            "h_count_mae": h_count_mae,
+            "heavy_fragment_score": mean(fragment_scores),
+            "heavy_fragment_presence_macro_f1": mean(presence_macro_f1s),
+            "heavy_fragment_positive_count_accuracy": mean(
+                positive_count_accuracies
+            ),
+            "heavy_fragment_atom_exact_accuracy": mean(atom_exact_accuracies),
+            "h_parent_type_accuracy": mean(h_parent_type_accuracies),
+            "h_parent_fragment_exact_accuracy": mean(
+                h_parent_fragment_accuracies
+            ),
+            "h_parent_joint_accuracy": mean(h_parent_joint_accuracies),
+            "h_attachment_multiset_accuracy": mean(h_attachment_accuracies),
+            "h_count_mae": mean(h_count_maes),
         }
         if outputs.get("smiles_token_ids") is not None:
-            valid = batch.smiles_target_ids.ne(0)
+            valid = batch.smiles_target_ids.ne(SMILES_PAD_INDEX)
             predictions = outputs["smiles_token_ids"]
             correct = predictions.eq(batch.smiles_target_ids) & valid
-            metrics["smiles_token_accuracy"] = (
+            metrics[f"smiles_{smiles_mode}_token_accuracy"] = (
                 correct.sum().float() / valid.sum().clamp_min(1)
             )
-            metrics["smiles_exact_match"] = (
+            metrics[f"smiles_{smiles_mode}_exact_match"] = (
                 (correct | ~valid).all(dim=1).float().mean()
             )
+            logits = outputs.get("smiles_logits")
+            if smiles_mode == "teacher" and logits is not None:
+                token_loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    batch.smiles_target_ids.reshape(-1),
+                    ignore_index=SMILES_PAD_INDEX,
+                )
+                metrics["smiles_teacher_perplexity"] = token_loss.clamp_max(20).exp()
+            if smiles_mode == "greedy" and self.model.smiles_vocab is not None:
+                validity, stereo_agnostic = self._greedy_smiles_metrics(
+                    predictions, batch.smiles_target_ids
+                )
+                metrics["smiles_greedy_validity"] = validity
+                metrics["smiles_greedy_stereo_agnostic_exact_match"] = (
+                    stereo_agnostic
+                )
         return metrics
+
+    def _decode_smiles(self, token_ids: torch.Tensor) -> str:
+        tokens = []
+        for token_id in token_ids.detach().cpu().tolist():
+            if token_id == SMILES_EOS_INDEX:
+                break
+            if token_id in (SMILES_PAD_INDEX, SMILES_BOS_INDEX):
+                continue
+            if token_id >= len(self.model.smiles_vocab):
+                return "<unk>"
+            token = self.model.smiles_vocab[token_id]
+            if token == "<unk>":
+                return "<unk>"
+            tokens.append(token)
+        return "".join(tokens)
+
+    def _greedy_smiles_metrics(self, predictions, targets):
+        from rdkit import Chem, rdBase
+
+        valid_values = []
+        stereo_agnostic_values = []
+        device = predictions.device
+        for prediction, target in zip(predictions, targets):
+            predicted_smiles = self._decode_smiles(prediction)
+            target_smiles = self._decode_smiles(target)
+            with rdBase.BlockLogs():
+                predicted_molecule = Chem.MolFromSmiles(predicted_smiles)
+                target_molecule = Chem.MolFromSmiles(target_smiles)
+            valid_values.append(float(predicted_molecule is not None))
+            if predicted_molecule is None or target_molecule is None:
+                stereo_agnostic_values.append(0.0)
+            else:
+                predicted_canonical = Chem.MolToSmiles(
+                    predicted_molecule, canonical=True, isomericSmiles=False
+                )
+                target_canonical = Chem.MolToSmiles(
+                    target_molecule, canonical=True, isomericSmiles=False
+                )
+                stereo_agnostic_values.append(
+                    float(predicted_canonical == target_canonical)
+                )
+        return (
+            torch.tensor(valid_values, device=device).mean(),
+            torch.tensor(stereo_agnostic_values, device=device).mean(),
+        )
 
     def transfer_batch_to_device(
             self,

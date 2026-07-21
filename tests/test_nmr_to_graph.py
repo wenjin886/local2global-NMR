@@ -167,7 +167,6 @@ def test_smiles_teacher_forcing_loss_and_greedy_conditioning():
     loss.backward()
     assert torch.isfinite(losses["smiles"])
     assert model.smiles_decoder.output_projection.weight.grad is not None
-
     model.eval()
     with torch.no_grad():
         generated = model(**batch.model_inputs())

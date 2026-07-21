@@ -26,6 +26,8 @@ datamodule:
   val_batch_size: 64
   num_workers: 4
   pin_memory: true
+  val_generation_size: 1024
+  val_generation_seed: 0
   transform:
     _target_: src.data.transforms.NormalizeNMR
     stats_path: ${data_path}/dataset_infos_train.json
@@ -86,8 +88,8 @@ callbacks:
     _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints
     filename: "{epoch:03d}"
-    monitor: val/loss_weighted
-    mode: min
+    monitor: val/heavy_fragment_score
+    mode: max
     save_last: true
     save_top_k: 3
 
@@ -109,7 +111,7 @@ trainer:
   check_val_every_n_epoch: 1
   num_sanity_val_steps: 2
 
-optimized_metric: val/loss_weighted
+optimized_metric: val/heavy_fragment_score
 ckpt_path: null
 
 hydra:

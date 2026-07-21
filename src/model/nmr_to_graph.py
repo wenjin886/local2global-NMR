@@ -86,10 +86,12 @@ class NMRToGraph(nn.Module):
         self.use_smiles_conditioning = use_smiles_conditioning
         self.teacher_force_smiles_during_eval = teacher_force_smiles_during_eval
         self.max_smiles_length = max_smiles_length
+        self.smiles_vocab = None
         if use_smiles_loss or use_smiles_conditioning:
             if smiles_vocab_path is not None:
                 with open(smiles_vocab_path, encoding="utf-8") as handle:
-                    smiles_vocab_size = len(json.load(handle)["smiles_vocab"])
+                    self.smiles_vocab = json.load(handle)["smiles_vocab"]
+                    smiles_vocab_size = len(self.smiles_vocab)
             if smiles_vocab_size is None:
                 raise ValueError(
                     "SMILES decoder requires smiles_vocab_path or smiles_vocab_size"

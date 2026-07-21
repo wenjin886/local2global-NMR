@@ -352,6 +352,7 @@ class NMRGraphDataset(Dataset):
             smiles=smiles,
             canonical_smiles=canonical_smiles,
             isomeric_smiles=isomeric_smiles,
+            smiles_token_ids=_get_value(item, "smiles_token_ids"),
         )
         return self.transform(sample) if self.transform is not None else sample
 
