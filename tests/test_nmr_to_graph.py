@@ -1,6 +1,7 @@
 import json
 
 import torch
+import torch.nn.functional as F
 
 from src.data.constants import BOND_TYPE_CANDIDATES, SMILES_PAD_INDEX
 from src.data.dataset import GraphSample, TransformingCollator, collate_nmr_graph
@@ -180,6 +181,60 @@ def test_fragment_only_stage_has_no_edge_or_attachment_gradient():
     assert model.fragment_readout.readout[-1].weight.grad is not None
     edge_gradient = model.edge_readout.mlp[-1].weight.grad
     assert edge_gradient is None or torch.count_nonzero(edge_gradient) == 0
+
+
+def test_heavy_degree_loss_penalizes_only_coordination_overflow():
+    criterion = NMRGraphLoss(
+        heavy_degree_weight=1.0,
+        max_heavy_degrees={6: 4, 7: 4},
+    )
+    atom_types = torch.tensor([[6, 7]])
+    heavy_mask = torch.tensor([[True, True]])
+    logits = torch.full((1, 2, len(BOND_TYPE_CANDIDATES), 5), -20.0)
+    logits[..., 0] = 20.0
+    assert criterion.heavy_degree_loss(
+        logits, atom_types, heavy_mask
+    ).item() < 1e-8
+
+    # Carbon predicts count=4 for two independent neighbor/bond categories:
+    # coordination degree 8 exceeds its broad cap of 4.
+    logits[0, 0, 0, 0] = -20.0
+    logits[0, 0, 0, 4] = 20.0
+    logits[0, 0, 1, 0] = -20.0
+    logits[0, 0, 1, 4] = 20.0
+    assert criterion.heavy_degree_loss(
+        logits, atom_types, heavy_mask
+    ).item() > 0
+
+
+def test_refined_smiles_memory_backpropagates_into_atomic_refinement():
+    batch = collate_nmr_graph([make_sample(), make_sample()])
+    model = make_model(
+        use_smiles_loss=True,
+        use_smiles_conditioning=False,
+        smiles_memory="refined_atom_nmr",
+        num_smiles_layers=1,
+        max_smiles_length=32,
+        smiles_vocab_size=6,
+        predict_attachments=False,
+        predict_edges=False,
+    )
+    outputs = model(**batch.model_inputs())
+    smiles_loss = F.cross_entropy(
+        outputs["smiles_logits"].reshape(-1, 6),
+        batch.smiles_target_ids.reshape(-1),
+        ignore_index=SMILES_PAD_INDEX,
+    )
+    smiles_loss.backward()
+
+    assert outputs["smiles_memory"] == "refined_atom_nmr"
+    assert model.heavy_query_decoder.q_projection.weight.grad is not None
+    interaction_gradient = (
+        model.atom_interaction_layers[0]
+        .hydrogen_reads_heavy.q_projection.weight.grad
+    )
+    assert interaction_gradient is not None
+    assert torch.count_nonzero(interaction_gradient) > 0
 
 
 def test_smiles_teacher_forcing_loss_and_greedy_generation():

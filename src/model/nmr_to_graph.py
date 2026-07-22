@@ -61,6 +61,7 @@ class NMRToGraph(nn.Module):
             max_multiplicity_classes: int = 512,
             use_smiles_loss: bool = False,
             use_smiles_conditioning: bool = False,
+            smiles_memory: str = "joint",
             num_smiles_layers: int = 3,
             max_smiles_length: int = 256,
             smiles_vocab_path: Optional[str] = None,
@@ -100,6 +101,15 @@ class NMRToGraph(nn.Module):
         _xavier_initialize_matrices(self.joint_encoder)
         self.use_smiles_loss = use_smiles_loss
         self.use_smiles_conditioning = use_smiles_conditioning
+        if smiles_memory not in {"joint", "refined_atom_nmr"}:
+            raise ValueError(
+                "smiles_memory must be 'joint' or 'refined_atom_nmr'"
+            )
+        if smiles_memory == "refined_atom_nmr" and use_smiles_conditioning:
+            raise ValueError(
+                "refined_atom_nmr memory cannot use decoder-to-atom conditioning"
+            )
+        self.smiles_memory = smiles_memory
         self.predict_attachments = predict_attachments
         self.predict_edges = predict_edges
         if predict_edges and not predict_attachments:
@@ -196,6 +206,40 @@ class NMRToGraph(nn.Module):
         peak_mask = torch.cat([h_nmr_mask, c_nmr_mask], dim=1)
         return features, peak_mask
 
+    def _run_smiles_decoder(
+            self,
+            memory: torch.Tensor,
+            memory_mask: torch.Tensor,
+            smiles_input_ids: Optional[torch.Tensor],
+            smiles_input_mask: Optional[torch.Tensor],
+            teacher_force_smiles: Optional[bool],
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        if self.smiles_decoder is None:
+            return None
+        if teacher_force_smiles is None:
+            teacher_force_smiles = (
+                self.training or self.teacher_force_smiles_during_eval
+            )
+        if teacher_force_smiles:
+            if smiles_input_ids is None or smiles_input_mask is None:
+                raise ValueError("Teacher forcing requires SMILES input tensors")
+            return self.smiles_decoder.teacher_force(
+                input_ids=smiles_input_ids,
+                input_mask=smiles_input_mask,
+                memory=memory,
+                memory_mask=memory_mask,
+            )
+        max_steps = (
+            smiles_input_ids.size(1)
+            if smiles_input_ids is not None
+            else self.max_smiles_length
+        )
+        return self.smiles_decoder.generate(
+            memory=memory,
+            memory_mask=memory_mask,
+            max_steps=max_steps,
+        )
+
     def forward(
             self,
             atom_types: torch.Tensor,
@@ -259,31 +303,14 @@ class NMRToGraph(nn.Module):
         )
 
         smiles_outputs = None
-        if self.smiles_decoder is not None:
-            if teacher_force_smiles is None:
-                teacher_force_smiles = (
-                    self.training or self.teacher_force_smiles_during_eval
-                )
-            if teacher_force_smiles:
-                if smiles_input_ids is None or smiles_input_mask is None:
-                    raise ValueError("Teacher forcing requires SMILES input tensors")
-                smiles_outputs = self.smiles_decoder.teacher_force(
-                    input_ids=smiles_input_ids,
-                    input_mask=smiles_input_mask,
-                    memory=joint_features,
-                    memory_mask=joint_mask,
-                )
-            else:
-                max_steps = (
-                    smiles_input_ids.size(1)
-                    if smiles_input_ids is not None
-                    else self.max_smiles_length
-                )
-                smiles_outputs = self.smiles_decoder.generate(
-                    memory=joint_features,
-                    memory_mask=joint_mask,
-                    max_steps=max_steps,
-                )
+        if self.smiles_memory == "joint":
+            smiles_outputs = self._run_smiles_decoder(
+                memory=joint_features,
+                memory_mask=joint_mask,
+                smiles_input_ids=smiles_input_ids,
+                smiles_input_mask=smiles_input_mask,
+                teacher_force_smiles=teacher_force_smiles,
+            )
 
         atom_smiles_attention = None
         if self.atom_smiles_layer is not None:
@@ -318,6 +345,15 @@ class NMRToGraph(nn.Module):
                 hydrogen_mask=hydrogen_mask,
             )
             interaction_attention.append(attention)
+
+        if self.smiles_memory == "refined_atom_nmr":
+            smiles_outputs = self._run_smiles_decoder(
+                memory=torch.cat([atom_features, peak_features], dim=1),
+                memory_mask=torch.cat([atom_mask, peak_mask], dim=1),
+                smiles_input_ids=smiles_input_ids,
+                smiles_input_mask=smiles_input_mask,
+                teacher_force_smiles=teacher_force_smiles,
+            )
 
         fragment_logits = self.fragment_readout(atom_features)
         h_parent_type_logits, h_parent_fragment_logits = (
@@ -394,6 +430,7 @@ class NMRToGraph(nn.Module):
                 if smiles_outputs is not None else None
             ),
             "use_smiles_loss": self.use_smiles_loss,
+            "smiles_memory": self.smiles_memory,
             "heavy_mask": heavy_mask,
             "hydrogen_mask": hydrogen_mask,
             "heavy_edge_logits": edge_logits,

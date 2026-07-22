@@ -53,6 +53,7 @@ lit_module:
     max_multiplicity_classes: 512
     use_smiles_loss: true
     use_smiles_conditioning: false
+    smiles_memory: refined_atom_nmr
     num_smiles_layers: 3
     max_smiles_length: 256
     smiles_vocab_path: ${data_path}/dataset_infos_train.json
@@ -64,6 +65,18 @@ lit_module:
     _target_: src.model.loss.NMRGraphLoss
     heavy_fragment_weight: 1.0
     heavy_fragment_presence_weight: 0.25
+    heavy_degree_weight: 0.01
+    max_heavy_degrees:
+      6: 4
+      7: 4
+      8: 3
+      9: 1
+      14: 4
+      15: 5
+      16: 6
+      17: 1
+      35: 1
+      53: 1
     h_parent_fragment_weight: 1.0
     h_parent_presence_weight: 0.25
     h_parent_type_weight: 0.25

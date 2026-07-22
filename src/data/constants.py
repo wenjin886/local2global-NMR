@@ -15,6 +15,21 @@ BOND_TYPE_CANDIDATES = [
 ]
 
 HEAVY_ATOM_TYPES = [6, 7, 8, 9, 14, 15, 16, 17, 35, 53]
+# Broad maximum coordination numbers. This constrains neighbor count rather
+# than bond-order-weighted valence and is intentionally permissive for charged
+# N/O and hypervalent P/S chemistry.
+DEFAULT_MAX_HEAVY_DEGREES = {
+    6: 4,
+    7: 4,
+    8: 3,
+    9: 1,
+    14: 4,
+    15: 5,
+    16: 6,
+    17: 1,
+    35: 1,
+    53: 1,
+}
 NUM_BOND_TYPES = 5  # none, single, double, triple, aromatic
 
 # Actual labels are collected without frequency filtering by the training-set

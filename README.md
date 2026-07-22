@@ -8,8 +8,9 @@ local-to-global curriculum:
 element-sorted explicit atom slots + separately embedded 1H/13C peak sets
     (1H shift + optional integration/multiplicity/J metadata)
     -> concatenated joint atom/1H/13C self-attention
-    -> optional canonical-SMILES auxiliary decoding from joint memory
     -> element-grouped ordered heavy-atom queries
+    -> H/heavy atom interaction and refined atom features
+    -> optional canonical-SMILES auxiliary decoding
     -> factorized local-fragment prediction
     -> molecule-local H-to-heavy retrieval
     -> H-context aggregation into heavy queries
@@ -17,8 +18,9 @@ element-sorted explicit atom slots + separately embedded 1H/13C peak sets
 ```
 
 No molecular formula is used. `data.h` supplies the exact explicit atom
-inventory, including H. The current objective intentionally contains no valence
-loss.
+inventory, including H. The objective contains a coarse heavy-atom coordination
+constraint, but intentionally does not impose a formal-valence or
+bond-order-weighted valence loss.
 
 Matrix parameters inside the joint encoder and SMILES decoder use Xavier
 uniform initialization. Other graph heads retain their module-specific PyTorch
@@ -65,20 +67,31 @@ can still be canonicalized after connectivity is predicted.
 
 ## Optional SMILES auxiliary task
 
-The complete joint atom/NMR memory conditions a causal canonical-SMILES decoder.
-Two independent switches control its use:
+A causal canonical-SMILES decoder can read either the original joint memory or
+the refined atom features together with the encoded NMR peaks. Three independent
+switches control its use:
 
 ```yaml
 lit_module.model.use_smiles_loss: true
 lit_module.criterion.smiles_weight: 1.0
 lit_module.model.use_smiles_conditioning: false
+lit_module.model.smiles_memory: refined_atom_nmr
 ```
 
 `use_smiles_loss` enables the auxiliary sequence objective. With the default
 `use_smiles_conditioning: false`, the decoder is an independent training head:
-its loss updates the joint encoder, but its hidden states and logits never enter
-the graph branch. `use_smiles_conditioning` retains an experimental interface
-that additionally lets atom features read decoder hidden states.
+its hidden states and logits never enter the graph branch. `smiles_memory: joint`
+lets its loss update the joint encoder only. `smiles_memory: refined_atom_nmr`
+instead supplies the post-heavy-query/post-interaction atom features followed by
+the jointly encoded NMR peak features. The SMILES loss can then help distinguish
+ordered atom features and atom inventory while still leaving the graph forward
+path independent of generated SMILES.
+
+`use_smiles_conditioning` retains the earlier experimental interface that lets
+atom features read decoder hidden states. This creates the opposite dependency,
+so it is supported only with `smiles_memory: joint`; combining it with
+`refined_atom_nmr` would introduce a cycle and raises an explicit configuration
+error.
 
 Training and the full validation loader use teacher forcing. A separate fixed
 validation subset uses greedy self-conditioned generation, making the exposure
@@ -117,7 +130,10 @@ val/heavy_fragment_score
 
 Fragment metrics are computed per molecule and then averaged. Validation also
 reports atom-level fragment exact accuracy, permutation-invariant H-parent type
-and environment accuracy, H-attachment multiset accuracy, and H-count MAE.
+and environment accuracy, H-attachment multiset accuracy, and H-count MAE. The
+fragment argmax predictions additionally report their heavy-atom degree
+violation rate and mean overflow. Bond-order-weighted fragment sums and their
+proxy violation rate are diagnostics only and do not contribute to training.
 
 The datamodule deterministically samples 1024 validation molecules for greedy
 SMILES generation:
@@ -128,14 +144,34 @@ datamodule.val_generation_seed: 0
 ```
 
 The full loader reports teacher-forced token accuracy, exact match, and
-perplexity. The fixed subset reports greedy exact match, RDKit validity, and
-stereo-agnostic exact match under the `val_generation/` namespace. The first 10
-molecules of this deterministic subset are also logged once per epoch as a W&B
-table containing target/predicted SMILES, validity and exactness, plus readable
-target/predicted heavy-atom fragment counts. This reuses the existing greedy
-outputs and does not run an additional generation pass. A
+perplexity. The fixed subset reports greedy exact match, RDKit validity,
+stereo-agnostic exact match, heavy-atom-count exactness, explicit-H total-atom
+count exactness, and full element-composition exactness under the
+`val_generation/` namespace. The first 10 molecules of this deterministic
+subset are also logged once per epoch as a W&B table containing
+target/predicted SMILES, validity, exactness, element compositions, and readable
+target/predicted heavy-atom fragment counts with degree/bond-order summaries.
+This reuses the existing greedy outputs and does not run an additional
+generation pass. A
 `LearningRateMonitor` records the optimizer learning rate at every step,
 including warmup.
+
+## Coarse heavy-fragment degree constraint
+
+For each heavy atom, the model converts every fragment count distribution into
+an expected count and sums over the 22 neighbor-element/bond-type candidates:
+
+```text
+expected_degree = sum_candidate sum_count count * p(count)
+degree_loss = mean((relu(expected_degree - element_cap) / element_cap)^2)
+```
+
+This counts neighbors, so single, double, triple, and aromatic bonds each add
+one. The default broad caps are C 4, N 4, O 3, F/Cl/Br/I 1, Si 4, P 5, and S 6.
+They are deliberately permissive for charged and hypervalent examples and can
+be overridden with `criterion.max_heavy_degrees`. Both supplied training configs
+use `heavy_degree_weight: 0.01`. H-parent fragment predictions are not subject
+to this constraint yet.
 
 ## H-to-heavy retrieval
 
@@ -287,6 +323,7 @@ Optimized losses:
 
 ```text
 heavy fragment count + presence
++ coarse heavy-fragment degree overflow
 H parent fragment count + presence
 H parent element
 ```
@@ -321,6 +358,7 @@ The full loss is:
 
 ```text
 fragment supervision
++ coarse heavy-fragment degree overflow
 + H parent-environment supervision
 + H-to-heavy retrieval
 + per-heavy H-count consistency
@@ -346,7 +384,9 @@ attention
 These tensors can be used for pre/post-joint-encoder t-SNE, fragment linear
 probes, H-parent retrieval analysis, and joint atom-spectrum attention
 visualization. SMILES generation reads the joint memory as an auxiliary task;
-its decoder states do not condition the graph pipeline by default.
+with `smiles_memory: refined_atom_nmr`, it instead reads the refined atom/NMR
+memory so its loss also supervises ordered atom refinement. Its decoder states
+still do not condition the graph pipeline by default.
 
 ## Installation and tests
 
