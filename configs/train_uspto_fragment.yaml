@@ -6,13 +6,13 @@ test: false
 data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
-
-
 group: test
-exp_name: fragment_smiles_d256
+exp_name: fragment_smiles_d256_run2
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
+
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/test/fragment_smiles_d256_2026-07-21_16-31-09/checkpoints/last.ckpt
 
 hidden_dim: 256
 num_heads: 8
@@ -118,7 +118,7 @@ trainer:
   num_sanity_val_steps: 2
 
 optimized_metric: val/heavy_fragment_score
-ckpt_path: null
+
 
 hydra:
   run:

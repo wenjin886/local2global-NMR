@@ -16,14 +16,15 @@ SRC_DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/do
 export DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/uspto/preprocessed
 
 # Preprocesss Dataset
-python -m preprocess.uspto_nmr_preprocess \
-  --parquet_dir $SRC_DATA_PATH \
-  --save_dir $DATA_PATH \
-  --seed 0 \
-  --keep_duplicate_records
-  
+# python -m preprocess.uspto_nmr_preprocess \
+#   --parquet_dir $SRC_DATA_PATH \
+#   --save_dir $DATA_PATH \
+#   --seed 0 \
+#   --keep_duplicate_records
+
+# echo "Data Preprocessing Done. Starting Training..."
 # Train Model
-# python -m src.train -cn train_uspto_fragment
+python -m src.train -cn train_uspto_fragment
 
 
 
