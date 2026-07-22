@@ -110,7 +110,7 @@ class LitNMRToGraph(pl.LightningModule):
                 batch, "val", teacher_force_smiles=True
             )
         outputs = self(batch, teacher_force_smiles=False)
-        metrics = self._batch_metrics(outputs, batch, smiles_mode="greedy")
+        metrics = self._smiles_metrics(outputs, batch, smiles_mode="greedy")
         self.log_dict(
             {"val_generation/%s" % key: value for key, value in metrics.items()},
             on_step=False,
@@ -279,6 +279,16 @@ class LitNMRToGraph(pl.LightningModule):
         if outputs.get("h_attachment_logits") is None:
             metrics.pop("h_attachment_multiset_accuracy")
             metrics.pop("h_count_mae")
+        metrics.update(self._smiles_metrics(outputs, batch, smiles_mode))
+        return metrics
+
+    def _smiles_metrics(
+            self,
+            outputs: Dict[str, object],
+            batch: GraphBatch,
+            smiles_mode: str,
+    ) -> Dict[str, torch.Tensor]:
+        metrics = {}
         if outputs.get("smiles_token_ids") is not None:
             valid = batch.smiles_target_ids.ne(SMILES_PAD_INDEX)
             predictions = outputs["smiles_token_ids"]
