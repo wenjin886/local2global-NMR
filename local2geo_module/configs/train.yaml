@@ -1,0 +1,135 @@
+seed: 42
+project: local2geo-prior
+test: false
+
+data_path: ${oc.env:DATA_PATH,data/uspto/preprocessed}
+log_path: ${oc.env:LOG_PATH,logs}
+output_dir: ${hydra:runtime.output_dir}
+
+datamodule:
+  _target_: local2geo_module.data.Local2GeoDataModule
+  train_path: ${data_path}/train.pt
+  val_path: ${data_path}/val.pt
+  test_path: ${data_path}/test.pt
+  train_batch_size: 8
+  val_batch_size: 16
+  num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  max_heavy_atoms: 192
+  train_limit: null
+  val_limit: null
+
+lit_module:
+  _target_: local2geo_module.lit.LitLocal2Geo
+  model:
+    _target_: local2geo_module.model.Local2GeoModel
+    geometry_edge_temperature: 0.7
+    projector:
+      _target_: local2geo_module.model.SoftGraphProjector
+      hidden_dim: 128
+      pair_hidden_dim: 128
+      num_layers: 3
+      max_atomic_number: 118
+      geometry_temperature: 1.0
+      use_formal_charges: false
+    coordinate_seed:
+      _target_: local2geo_module.model.LearnedCoordinateSeed
+      hidden_dim: 128
+      max_num_atoms: 192
+      coordinate_scale: 3.0
+    relaxation:
+      _target_: local2geo_module.geometry.DifferentiableLocalRelaxation
+      num_steps: 8
+      step_size: 0.04
+      bond_weight: 40.0
+      angle_weight: 8.0
+      planar_weight: 1.0
+      clash_weight: 0.02
+      bond_probability_power: 4.0
+      angle_probability_power: 3.0
+      clash_distance_scale: 0.62
+      clash_softness: 0.12
+      gradient_clip: 10.0
+  criterion:
+    _target_: local2geo_module.loss.ProjectionGeometryLoss
+    edge_weight: 1.0
+    margin_weight: 0.1
+    margin: 1.5
+    sharpness_weight: 0.005
+    degree_weight: 0.1
+    valence_weight: 0.1
+    geometry_class_weight: 0.25
+    residual_weight: 0.0001
+    local_bond_weight: 1.0
+    local_angle_weight: 0.5
+    local_planar_weight: 0.1
+    local_clash_weight: 0.01
+  train_corruptor:
+    _target_: local2geo_module.corruption.SoftGraphCorruptor
+    clean_margin_min: 1.5
+    clean_margin_max: 4.0
+    corruption_boost_min: 2.0
+    corruption_boost_max: 4.5
+    bond_type_confusion_probability: 0.12
+    false_positive_probability: 0.015
+    false_negative_probability: 0.08
+    valence_conflict_probability: 0.02
+    logit_noise_std: 0.35
+  val_corruptor:
+    _target_: local2geo_module.corruption.SoftGraphCorruptor
+    clean_margin_min: 1.5
+    clean_margin_max: 3.0
+    corruption_boost_min: 2.0
+    corruption_boost_max: 4.0
+    bond_type_confusion_probability: 0.10
+    false_positive_probability: 0.01
+    false_negative_probability: 0.06
+    valence_conflict_probability: 0.01
+    logit_noise_std: 0.30
+  lr: 0.0002
+  weight_decay: 0.000001
+  warm_up_steps: 500
+  val_corruption_seed: 1729
+
+callbacks:
+  model_checkpoint:
+    _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    dirpath: ${output_dir}/checkpoints
+    filename: "{epoch:03d}"
+    monitor: val/score
+    mode: max
+    save_last: true
+    save_top_k: 3
+  learning_rate_monitor:
+    _target_: pytorch_lightning.callbacks.LearningRateMonitor
+    logging_interval: step
+
+logger:
+  wandb:
+    _target_: pytorch_lightning.loggers.wandb.WandbLogger
+    save_dir: ${output_dir}
+    project: ${project}
+    name: ${hydra:job.name}-${now:%Y%m%d-%H%M%S}
+    log_model: false
+    mode: ${oc.env:WANDB_MODE,online}
+
+trainer:
+  _target_: pytorch_lightning.Trainer
+  accelerator: auto
+  devices: 1
+  precision: 32-true
+  inference_mode: false
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  max_epochs: 100
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 2
+  log_every_n_steps: 10
+
+optimized_metric: val/score
+ckpt_path: null
+
+hydra:
+  run:
+    dir: ${log_path}/local2geo/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}
