@@ -7,12 +7,12 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: test
-exp_name: fragment_smiles_d256_run2
+exp_name: fragment_smiles_d256_run3
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
-ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/test/fragment_smiles_d256_2026-07-21_16-31-09/checkpoints/last.ckpt
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/test/fragment_smiles_d256_run2_2026-07-22_08-38-19/checkpoints/last.ckpt
 
 hidden_dim: 256
 num_heads: 8
@@ -60,7 +60,7 @@ lit_module:
     max_multiplicity_classes: 122
     use_smiles_loss: true
     use_smiles_conditioning: false
-    smiles_memory: refined_atom_nmr
+    smiles_memory: joint # [joint, refined_atom_nmr]
     num_smiles_layers: 6
     max_smiles_length: 75
     smiles_vocab_path: ${data_path}/dataset_infos_train.json
@@ -72,15 +72,14 @@ lit_module:
     _target_: src.model.loss.NMRGraphLoss
     heavy_fragment_weight: 1.0
     heavy_fragment_presence_weight: 0.25
-    heavy_degree_weight: 0.01
+    heavy_degree_weight: 0.00
     max_heavy_degrees:
       6: 4
       7: 4
-      8: 3
+      8: 2
       9: 1
-      14: 4
-      15: 5
-      16: 6
+      15: 4
+      16: 4
       17: 1
       35: 1
       53: 1
@@ -98,6 +97,7 @@ lit_module:
   weight_decay: 1e-12
   warm_up_steps: 100
   num_val_examples_to_log: 10
+  check_bond_order: false
 
 callbacks:
   model_checkpoint:

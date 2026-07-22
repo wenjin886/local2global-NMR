@@ -26,20 +26,23 @@ class LitNMRToGraph(pl.LightningModule):
             weight_decay: float = 1e-12,
             warm_up_steps: int = 100,
             num_val_examples_to_log: int = 10,
+            check_bond_order: bool = False,
     ):
         super().__init__()
         self.model = model
         self.criterion = criterion
         self.num_val_examples_to_log = num_val_examples_to_log
         self._validation_examples = []
-        bond_order_weights = [
-            1.5 if bond_type == 4 else float(bond_type)
-            for _, bond_type in parse_bond_type_candidates()
-        ]
-        self.register_buffer(
-            "fragment_bond_order_weights",
-            torch.tensor(bond_order_weights),
-        )
+        self.check_bond_order = check_bond_order
+        if self.check_bond_order:
+            bond_order_weights = [
+                1.5 if bond_type == 4 else float(bond_type)
+                for _, bond_type in parse_bond_type_candidates()
+            ]
+            self.register_buffer(
+                "fragment_bond_order_weights",
+                torch.tensor(bond_order_weights),
+            )
         self.save_hyperparameters(ignore=["model", "criterion"])
 
     def forward(
@@ -202,25 +205,26 @@ class LitNMRToGraph(pl.LightningModule):
                 fragment_scores.append(
                     torch.sqrt((presence_f1 * positive_accuracy).clamp_min(0.0))
                 )
-                degree_caps = self.criterion.heavy_degree_caps(
-                    batch.atom_types[sample_index]
-                )[heavy]
-                predicted_degree = predicted_fragment.sum(dim=-1).float()
-                degree_overflow = torch.relu(predicted_degree - degree_caps)
-                heavy_degree_violation_rates.append(
-                    degree_overflow.gt(0).float().mean()
-                )
-                heavy_degree_mean_overflows.append(degree_overflow.mean())
-                predicted_bond_order_sum = (
-                    predicted_fragment.float()
-                    * self.fragment_bond_order_weights
-                ).sum(dim=-1)
-                heavy_bond_order_sum_means.append(
-                    predicted_bond_order_sum.mean()
-                )
-                heavy_bond_order_budget_violation_rates.append(
-                    predicted_bond_order_sum.gt(degree_caps).float().mean()
-                )
+                # degree_caps = self.criterion.heavy_degree_caps(
+                #     batch.atom_types[sample_index]
+                # )[heavy]
+                # predicted_degree = predicted_fragment.sum(dim=-1).float()
+                # degree_overflow = torch.relu(predicted_degree - degree_caps)
+                # heavy_degree_violation_rates.append(
+                #     degree_overflow.gt(0).float().mean()
+                # )
+                # heavy_degree_mean_overflows.append(degree_overflow.mean())
+                if self.check_bond_order:
+                    predicted_bond_order_sum = (
+                        predicted_fragment.float()
+                        * self.fragment_bond_order_weights
+                    ).sum(dim=-1)
+                    heavy_bond_order_sum_means.append(
+                        predicted_bond_order_sum.mean()
+                    )
+                    heavy_bond_order_budget_violation_rates.append(
+                        predicted_bond_order_sum.gt(degree_caps).float().mean()
+                    )
 
             hydrogen = outputs["hydrogen_mask"][sample_index]
             target_hydrogen = hydrogen & batch.h_parent_types[sample_index].ge(0)
@@ -372,25 +376,38 @@ class LitNMRToGraph(pl.LightningModule):
         for atom_index in heavy_mask.nonzero(as_tuple=False).flatten().tolist():
             counts = fragment_counts[atom_index]
             degree = int(counts.clamp_min(0).sum())
-            max_degree = int(
-                self.criterion.heavy_degree_caps(atom_types)[atom_index]
-            )
-            bond_order_sum = float(
-                (
-                    counts.clamp_min(0).float()
-                    * self.fragment_bond_order_weights
-                ).sum()
-            )
+            # max_degree = int(
+            #     self.criterion.heavy_degree_caps(atom_types)[atom_index]
+            # )
+            # bond_order_sum = float(
+            #     (
+            #         counts.clamp_min(0).float()
+            #         * self.fragment_bond_order_weights
+            #     ).sum()
+            # )
             ports = [
                 f"{candidate}x{int(count)}"
                 for candidate, count in zip(BOND_TYPE_CANDIDATES, counts.tolist())
                 if count > 0
             ]
-            rows.append(
-                f"{atom_index}:Z{int(atom_types[atom_index])}"
-                f"(degree={degree}/{max_degree},bond_order={bond_order_sum:g})="
-                + (",".join(ports) if ports else "none")
-            )
+            if self.check_bond_order:
+                bond_order_sum = float(
+                    (
+                        counts.clamp_min(0).float()
+                        * self.fragment_bond_order_weights
+                    ).sum()
+                )
+                rows.append(
+                    f"{atom_index}:Z{int(atom_types[atom_index])}"
+                    f"(degree={degree}/{max_degree},bond_order={bond_order_sum:g})="
+                    + (",".join(ports) if ports else "none")
+                )
+            else:
+                rows.append(
+                    f"{atom_index}:Z{int(atom_types[atom_index])}"
+                    f"(degree={degree})="
+                    + (",".join(ports) if ports else "none")
+                )
         return "; ".join(rows)
 
     def _collect_validation_examples(

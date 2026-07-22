@@ -50,14 +50,15 @@ class NMRGraphLoss(nn.Module):
                 int(atomic_number): int(max_degree)
                 for atomic_number, max_degree in max_heavy_degrees.items()
             })
-        degree_lookup = torch.full((119,), -1.0)
-        for atomic_number, max_degree in degree_limits.items():
-            if atomic_number < 0 or atomic_number >= degree_lookup.numel():
-                raise ValueError(f"Unsupported atomic number: {atomic_number}")
-            if max_degree <= 0:
-                raise ValueError("Maximum heavy-atom degrees must be positive")
-            degree_lookup[atomic_number] = float(max_degree)
-        self.register_buffer("max_heavy_degree_lookup", degree_lookup)
+        # degree_lookup = torch.full((119,), -1.0)
+        # for atomic_number, max_degree in degree_limits.items():
+        #     if atomic_number < 0 or atomic_number >= degree_lookup.numel():
+        #         raise ValueError(f"Unsupported atomic number: {atomic_number}")
+        #     if max_degree <= 0:
+        #         raise ValueError("Maximum heavy-atom degrees must be positive")
+        #     degree_lookup[atomic_number] = float(max_degree)
+        # self.register_buffer("max_heavy_degree_lookup", degree_lookup)
+        self.max_heavy_degree_lookup = torch.full((119,), -1.0)
         if edge_class_weights is None:
             self.register_buffer("edge_class_weights", None)
         else:

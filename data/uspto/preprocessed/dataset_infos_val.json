@@ -124,5 +124,8 @@
         "s": 1
     },
     "smiles_vocab_size": 19,
-    "max_smiles_tokens": 58
+    "max_smiles_tokens": 58,
+    "categorical_mapping_version": 1,
+    "categorical_vocab_source": "dataset_infos_train.json",
+    "compact_storage_version": 1
 }
