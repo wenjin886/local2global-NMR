@@ -5,18 +5,18 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 
-from src.data.constants import DEFAULT_MAX_HEAVY_DEGREES, parse_bond_type_candidates
+from src.data.constants import DEFAULT_MAX_NEIGHBOR_COUNTS, parse_bond_type_candidates
 from src.data.constants import SMILES_PAD_INDEX
 
 
 class NMRGraphLoss(nn.Module):
-    """Stage-wise graph objective with a coarse heavy-atom degree constraint."""
+    """Stage-wise graph objective with a heavy-atom neighbor-count constraint."""
 
     def __init__(
             self,
             heavy_fragment_weight: float = 1.0,
             heavy_fragment_presence_weight: float = 0.25,
-            heavy_degree_weight: float = 0.0,
+            heavy_neighbor_count_weight: Optional[float] = None,
             h_parent_fragment_weight: float = 1.0,
             h_parent_presence_weight: float = 0.25,
             h_parent_type_weight: float = 0.25,
@@ -27,13 +27,36 @@ class NMRGraphLoss(nn.Module):
             fragment_edge_consistency_weight: float = 0.25,
             smiles_weight: float = 0.0,
             edge_class_weights: Optional[torch.Tensor] = None,
-            max_heavy_degrees: Optional[Mapping[int, int]] = None,
+            max_heavy_neighbor_counts: Optional[Mapping[int, int]] = None,
             permutation_invariant_hydrogens: bool = True,
+            # Deprecated aliases retained so existing Hydra configs continue
+            # to instantiate when resuming an older experiment.
+            heavy_degree_weight: Optional[float] = None,
+            max_heavy_degrees: Optional[Mapping[int, int]] = None,
     ):
         super().__init__()
+        if heavy_neighbor_count_weight is None:
+            heavy_neighbor_count_weight = (
+                0.0 if heavy_degree_weight is None else heavy_degree_weight
+            )
+        elif (
+                heavy_degree_weight is not None
+                and heavy_degree_weight != heavy_neighbor_count_weight
+        ):
+            raise ValueError(
+                "Conflicting heavy_neighbor_count_weight and deprecated "
+                "heavy_degree_weight"
+            )
+        if max_heavy_neighbor_counts is None:
+            max_heavy_neighbor_counts = max_heavy_degrees
+        elif max_heavy_degrees is not None:
+            raise ValueError(
+                "Specify max_heavy_neighbor_counts or deprecated "
+                "max_heavy_degrees, not both"
+            )
         self.heavy_fragment_weight = heavy_fragment_weight
         self.heavy_fragment_presence_weight = heavy_fragment_presence_weight
-        self.heavy_degree_weight = heavy_degree_weight
+        self.heavy_neighbor_count_weight = heavy_neighbor_count_weight
         self.h_parent_fragment_weight = h_parent_fragment_weight
         self.h_parent_presence_weight = h_parent_presence_weight
         self.h_parent_type_weight = h_parent_type_weight
@@ -44,21 +67,28 @@ class NMRGraphLoss(nn.Module):
         self.fragment_edge_consistency_weight = fragment_edge_consistency_weight
         self.smiles_weight = smiles_weight
         self.permutation_invariant_hydrogens = permutation_invariant_hydrogens
-        degree_limits = dict(DEFAULT_MAX_HEAVY_DEGREES)
-        if max_heavy_degrees is not None:
-            degree_limits.update({
-                int(atomic_number): int(max_degree)
-                for atomic_number, max_degree in max_heavy_degrees.items()
+        neighbor_count_limits = dict(DEFAULT_MAX_NEIGHBOR_COUNTS)
+        if max_heavy_neighbor_counts is not None:
+            neighbor_count_limits.update({
+                int(atomic_number): int(max_neighbors)
+                for atomic_number, max_neighbors
+                in max_heavy_neighbor_counts.items()
             })
-        # degree_lookup = torch.full((119,), -1.0)
-        # for atomic_number, max_degree in degree_limits.items():
-        #     if atomic_number < 0 or atomic_number >= degree_lookup.numel():
-        #         raise ValueError(f"Unsupported atomic number: {atomic_number}")
-        #     if max_degree <= 0:
-        #         raise ValueError("Maximum heavy-atom degrees must be positive")
-        #     degree_lookup[atomic_number] = float(max_degree)
-        # self.register_buffer("max_heavy_degree_lookup", degree_lookup)
-        self.max_heavy_degree_lookup = torch.full((119,), -1.0)
+        neighbor_count_lookup = torch.full((119,), -1.0)
+        for atomic_number, max_neighbors in neighbor_count_limits.items():
+            if atomic_number < 0 or atomic_number >= neighbor_count_lookup.numel():
+                raise ValueError(f"Unsupported atomic number: {atomic_number}")
+            if max_neighbors <= 0:
+                raise ValueError("Maximum neighbor counts must be positive")
+            neighbor_count_lookup[atomic_number] = float(max_neighbors)
+        # These dataset/config constants are not learned model state. Keeping
+        # them out of state_dict lets checkpoints created before this loss was
+        # introduced load strictly without a missing-buffer error.
+        self.register_buffer(
+            "max_neighbor_count_lookup",
+            neighbor_count_lookup,
+            persistent=False,
+        )
         if edge_class_weights is None:
             self.register_buffer("edge_class_weights", None)
         else:
@@ -98,7 +128,7 @@ class NMRGraphLoss(nn.Module):
         )
 
     @staticmethod
-    def expected_fragment_degree(logits: torch.Tensor) -> torch.Tensor:
+    def expected_heavy_neighbor_count(logits: torch.Tensor) -> torch.Tensor:
         count_values = torch.arange(
             logits.size(-1), dtype=logits.dtype, device=logits.device
         )
@@ -107,30 +137,36 @@ class NMRGraphLoss(nn.Module):
         ).sum(dim=-1)
         return expected_counts.sum(dim=-1)
 
-    def heavy_degree_caps(self, atom_types: torch.Tensor) -> torch.Tensor:
-        if atom_types.numel() and atom_types.max() >= self.max_heavy_degree_lookup.numel():
-            raise ValueError("Atomic number exceeds heavy-degree lookup size")
-        return self.max_heavy_degree_lookup[atom_types.long()]
+    def heavy_neighbor_count_caps(self, atom_types: torch.Tensor) -> torch.Tensor:
+        if (
+                atom_types.numel()
+                and atom_types.max() >= self.max_neighbor_count_lookup.numel()
+        ):
+            raise ValueError("Atomic number exceeds neighbor-count lookup size")
+        return self.max_neighbor_count_lookup[atom_types.long()]
 
-    def heavy_degree_loss(
+    def heavy_neighbor_count_overflow_loss(
             self,
             fragment_logits: torch.Tensor,
             atom_types: torch.Tensor,
             heavy_mask: torch.Tensor,
     ) -> torch.Tensor:
-        caps = self.heavy_degree_caps(atom_types)
+        caps = self.heavy_neighbor_count_caps(atom_types)
         unsupported = heavy_mask & caps.le(0)
         if unsupported.any():
             atomic_numbers = atom_types[unsupported].unique().tolist()
             raise ValueError(
-                f"Missing maximum-degree limits for heavy atoms: {atomic_numbers}"
+                "Missing maximum-neighbor-count limits for heavy atoms: "
+                f"{atomic_numbers}"
             )
         valid = heavy_mask & caps.gt(0)
         if not valid.any():
             return fragment_logits.sum() * 0.0
-        expected_degree = self.expected_fragment_degree(fragment_logits)
+        expected_neighbor_count = self.expected_heavy_neighbor_count(
+            fragment_logits
+        )
         normalized_overflow = (
-            torch.relu(expected_degree - caps) / caps.clamp_min(1.0)
+            torch.relu(expected_neighbor_count - caps) / caps.clamp_min(1.0)
         )
         return normalized_overflow[valid].square().mean()
 
@@ -390,11 +426,11 @@ class NMRGraphLoss(nn.Module):
             heavy_fragment_labels,
             outputs["heavy_mask"],
         )
-        losses["heavy_degree"] = (
-            self.heavy_degree_loss(
+        losses["heavy_neighbor_count_overflow"] = (
+            self.heavy_neighbor_count_overflow_loss(
                 outputs["fragment_logits"], atom_types, outputs["heavy_mask"]
             )
-            if self.heavy_degree_weight != 0
+            if self.heavy_neighbor_count_weight != 0
             else self._zero_like(outputs)
         )
         (
@@ -469,7 +505,8 @@ class NMRGraphLoss(nn.Module):
         total = (
             self.heavy_fragment_weight * losses["heavy_fragment"]
             + self.heavy_fragment_presence_weight * losses["heavy_fragment_presence"]
-            + self.heavy_degree_weight * losses["heavy_degree"]
+            + self.heavy_neighbor_count_weight
+            * losses["heavy_neighbor_count_overflow"]
             + self.h_parent_fragment_weight * losses["h_parent_fragment"]
             + self.h_parent_presence_weight * losses["h_parent_presence"]
             + self.h_parent_type_weight * losses["h_parent_type"]

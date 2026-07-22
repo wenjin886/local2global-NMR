@@ -183,28 +183,49 @@ def test_fragment_only_stage_has_no_edge_or_attachment_gradient():
     assert edge_gradient is None or torch.count_nonzero(edge_gradient) == 0
 
 
-def test_heavy_degree_loss_penalizes_only_coordination_overflow():
+def test_heavy_neighbor_count_loss_penalizes_only_neighbor_overflow():
     criterion = NMRGraphLoss(
-        heavy_degree_weight=1.0,
-        max_heavy_degrees={6: 4, 7: 4},
+        heavy_neighbor_count_weight=1.0,
+        max_heavy_neighbor_counts={6: 4, 7: 4},
     )
     atom_types = torch.tensor([[6, 7]])
     heavy_mask = torch.tensor([[True, True]])
     logits = torch.full((1, 2, len(BOND_TYPE_CANDIDATES), 5), -20.0)
     logits[..., 0] = 20.0
-    assert criterion.heavy_degree_loss(
+    assert criterion.heavy_neighbor_count_overflow_loss(
         logits, atom_types, heavy_mask
     ).item() < 1e-8
 
     # Carbon predicts count=4 for two independent neighbor/bond categories:
-    # coordination degree 8 exceeds its broad cap of 4.
+    # eight predicted neighbors exceed its dataset-observed cap of four.
     logits[0, 0, 0, 0] = -20.0
     logits[0, 0, 0, 4] = 20.0
     logits[0, 0, 1, 0] = -20.0
     logits[0, 0, 1, 4] = 20.0
-    assert criterion.heavy_degree_loss(
+    assert criterion.heavy_neighbor_count_overflow_loss(
         logits, atom_types, heavy_mask
     ).item() > 0
+
+
+def test_legacy_degree_aliases_are_checkpoint_safe():
+    legacy_config_criterion = NMRGraphLoss(
+        heavy_degree_weight=0.25,
+        max_heavy_degrees={6: 4, 8: 2},
+    )
+    assert legacy_config_criterion.heavy_neighbor_count_weight == 0.25
+    caps = legacy_config_criterion.heavy_neighbor_count_caps(
+        torch.tensor([6, 8])
+    )
+    assert caps.tolist() == [4.0, 2.0]
+    assert "max_neighbor_count_lookup" not in legacy_config_criterion.state_dict()
+
+    # A state dict created before the lookup existed can still load strictly.
+    resumed_criterion = NMRGraphLoss(
+        heavy_neighbor_count_weight=0.0,
+    )
+    resumed_criterion.load_state_dict(
+        legacy_config_criterion.state_dict(), strict=True
+    )
 
 
 def test_refined_smiles_memory_backpropagates_into_atomic_refinement():

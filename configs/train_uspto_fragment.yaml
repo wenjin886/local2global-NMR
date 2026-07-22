@@ -72,8 +72,8 @@ lit_module:
     _target_: src.model.loss.NMRGraphLoss
     heavy_fragment_weight: 1.0
     heavy_fragment_presence_weight: 0.25
-    heavy_degree_weight: 0.00
-    max_heavy_degrees:
+    heavy_neighbor_count_weight: 0.0
+    max_heavy_neighbor_counts:
       6: 4
       7: 4
       8: 2
@@ -97,7 +97,6 @@ lit_module:
   weight_decay: 1e-12
   warm_up_steps: 100
   num_val_examples_to_log: 10
-  check_bond_order: false
 
 callbacks:
   model_checkpoint:

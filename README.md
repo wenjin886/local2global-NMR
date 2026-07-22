@@ -18,8 +18,8 @@ element-sorted explicit atom slots + separately embedded 1H/13C peak sets
 ```
 
 No molecular formula is used. `data.h` supplies the exact explicit atom
-inventory, including H. The objective contains a coarse heavy-atom coordination
-constraint, but intentionally does not impose a formal-valence or
+inventory, including H. The objective contains a coarse heavy-atom
+neighbor-count constraint, but intentionally does not impose a formal-valence or
 bond-order-weighted valence loss.
 
 Matrix parameters inside the joint encoder and SMILES decoder use Xavier
@@ -131,9 +131,9 @@ val/heavy_fragment_score
 Fragment metrics are computed per molecule and then averaged. Validation also
 reports atom-level fragment exact accuracy, permutation-invariant H-parent type
 and environment accuracy, H-attachment multiset accuracy, and H-count MAE. The
-fragment argmax predictions additionally report their heavy-atom degree
-violation rate and mean overflow. Bond-order-weighted fragment sums and their
-proxy violation rate are diagnostics only and do not contribute to training.
+fragment argmax predictions additionally report the fraction of heavy atoms
+whose predicted number of directly bonded neighbors exceeds the
+dataset-observed element limit.
 
 The datamodule deterministically samples 1024 validation molecules for greedy
 SMILES generation:
@@ -143,35 +143,45 @@ datamodule.val_generation_size: 1024
 datamodule.val_generation_seed: 0
 ```
 
-The full loader reports teacher-forced token accuracy, exact match, and
-perplexity. The fixed subset reports greedy exact match, RDKit validity,
-stereo-agnostic exact match, heavy-atom-count exactness, explicit-H total-atom
-count exactness, and full element-composition exactness under the
+The full loader reports teacher-forced token accuracy and perplexity. The fixed
+subset reports greedy exact match, RDKit validity, stereo-agnostic exact match,
+and full element-composition exactness under the
 `val_generation/` namespace. The first 10 molecules of this deterministic
 subset are also logged once per epoch as a W&B table containing
 target/predicted SMILES, validity, exactness, element compositions, and readable
-target/predicted heavy-atom fragment counts with degree/bond-order summaries.
+target/predicted heavy-atom fragment counts with `neighbors=current/maximum`
+summaries.
 This reuses the existing greedy outputs and does not run an additional
 generation pass. A
 `LearningRateMonitor` records the optimizer learning rate at every step,
 including warmup.
 
-## Coarse heavy-fragment degree constraint
+## Heavy-fragment neighbor-count constraint
 
 For each heavy atom, the model converts every fragment count distribution into
 an expected count and sums over the 22 neighbor-element/bond-type candidates:
 
 ```text
-expected_degree = sum_candidate sum_count count * p(count)
-degree_loss = mean((relu(expected_degree - element_cap) / element_cap)^2)
+expected_neighbor_count = sum_candidate sum_count count * p(count)
+neighbor_count_overflow_loss
+    = mean((relu(expected_neighbor_count - element_cap) / element_cap)^2)
 ```
 
 This counts neighbors, so single, double, triple, and aromatic bonds each add
-one. The default broad caps are C 4, N 4, O 3, F/Cl/Br/I 1, Si 4, P 5, and S 6.
-They are deliberately permissive for charged and hypervalent examples and can
-be overridden with `criterion.max_heavy_degrees`. Both supplied training configs
-use `heavy_degree_weight: 0.01`. H-parent fragment predictions are not subject
-to this constraint yet.
+one; it never computes a bond-order sum or formal valence. A complete scan of
+the current train/validation/test splits gives H 1, C 4, N 4, O 2,
+F/Cl/Br/I 1, P 4, and S 4 in every split. These values are stored in
+`DEFAULT_MAX_NEIGHBOR_COUNTS` and can be overridden with
+`criterion.max_heavy_neighbor_counts`.
+
+`train_uspto_fragment.yaml` keeps
+`heavy_neighbor_count_weight: 0.0` and `smiles_memory: joint`, so checkpoints
+trained before this optional constraint and refined SMILES memory were added can
+continue training without changing their objective or parameter graph. The
+full-graph config enables the constraint with weight `0.01`. The lookup is a
+non-persistent buffer, and deprecated `heavy_degree_*` configuration names are
+accepted as aliases for checkpoint/config compatibility. H-parent fragment
+supervision is retained and is not subject to this overflow constraint.
 
 ## H-to-heavy retrieval
 
@@ -323,7 +333,6 @@ Optimized losses:
 
 ```text
 heavy fragment count + presence
-+ coarse heavy-fragment degree overflow
 H parent fragment count + presence
 H parent element
 ```
@@ -358,7 +367,7 @@ The full loss is:
 
 ```text
 fragment supervision
-+ coarse heavy-fragment degree overflow
++ heavy-fragment neighbor-count overflow
 + H parent-environment supervision
 + H-to-heavy retrieval
 + per-heavy H-count consistency

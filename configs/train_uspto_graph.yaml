@@ -65,15 +65,14 @@ lit_module:
     _target_: src.model.loss.NMRGraphLoss
     heavy_fragment_weight: 1.0
     heavy_fragment_presence_weight: 0.25
-    heavy_degree_weight: 0.01
-    max_heavy_degrees:
+    heavy_neighbor_count_weight: 0.01
+    max_heavy_neighbor_counts:
       6: 4
       7: 4
-      8: 3
+      8: 2
       9: 1
-      14: 4
-      15: 5
-      16: 6
+      15: 4
+      16: 4
       17: 1
       35: 1
       53: 1

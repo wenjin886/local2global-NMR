@@ -10,7 +10,6 @@ from src.data.constants import (
     SMILES_BOS_INDEX,
     SMILES_EOS_INDEX,
     SMILES_PAD_INDEX,
-    parse_bond_type_candidates,
 )
 from src.data.dataset import GraphBatch
 from src.model.loss import NMRGraphLoss
@@ -33,16 +32,9 @@ class LitNMRToGraph(pl.LightningModule):
         self.criterion = criterion
         self.num_val_examples_to_log = num_val_examples_to_log
         self._validation_examples = []
-        self.check_bond_order = check_bond_order
-        if self.check_bond_order:
-            bond_order_weights = [
-                1.5 if bond_type == 4 else float(bond_type)
-                for _, bond_type in parse_bond_type_candidates()
-            ]
-            self.register_buffer(
-                "fragment_bond_order_weights",
-                torch.tensor(bond_order_weights),
-            )
+        # Deprecated no-op accepted only so an existing experiment config can
+        # still instantiate this module while resuming its checkpoint.
+        _ = check_bond_order
         self.save_hyperparameters(ignore=["model", "criterion"])
 
     def forward(
@@ -158,16 +150,11 @@ class LitNMRToGraph(pl.LightningModule):
         fragment_scores = []
         presence_macro_f1s = []
         positive_count_accuracies = []
-        atom_exact_accuracies = []
         h_parent_type_accuracies = []
         h_parent_fragment_accuracies = []
-        h_parent_joint_accuracies = []
         h_attachment_accuracies = []
         h_count_maes = []
-        heavy_degree_violation_rates = []
-        heavy_degree_mean_overflows = []
-        heavy_bond_order_sum_means = []
-        heavy_bond_order_budget_violation_rates = []
+        heavy_neighbor_count_violation_rates = []
         for sample_index in range(batch.atom_types.size(0)):
             heavy = outputs["heavy_mask"][sample_index]
             target_fragment = batch.heavy_fragment_labels[sample_index, heavy]
@@ -196,35 +183,20 @@ class LitNMRToGraph(pl.LightningModule):
                     predicted_fragment[positive].eq(target_fragment[positive]).float().mean()
                     if positive.any() else zero + 1.0
                 )
-                atom_exact = (
-                    predicted_fragment.eq(target_fragment) | ~valid_fragment
-                ).all(dim=-1).float().mean()
                 presence_macro_f1s.append(presence_f1)
                 positive_count_accuracies.append(positive_accuracy)
-                atom_exact_accuracies.append(atom_exact)
                 fragment_scores.append(
                     torch.sqrt((presence_f1 * positive_accuracy).clamp_min(0.0))
                 )
-                # degree_caps = self.criterion.heavy_degree_caps(
-                #     batch.atom_types[sample_index]
-                # )[heavy]
-                # predicted_degree = predicted_fragment.sum(dim=-1).float()
-                # degree_overflow = torch.relu(predicted_degree - degree_caps)
-                # heavy_degree_violation_rates.append(
-                #     degree_overflow.gt(0).float().mean()
-                # )
-                # heavy_degree_mean_overflows.append(degree_overflow.mean())
-                if self.check_bond_order:
-                    predicted_bond_order_sum = (
-                        predicted_fragment.float()
-                        * self.fragment_bond_order_weights
-                    ).sum(dim=-1)
-                    heavy_bond_order_sum_means.append(
-                        predicted_bond_order_sum.mean()
-                    )
-                    heavy_bond_order_budget_violation_rates.append(
-                        predicted_bond_order_sum.gt(degree_caps).float().mean()
-                    )
+                neighbor_count_caps = (
+                    self.criterion.heavy_neighbor_count_caps(
+                        batch.atom_types[sample_index]
+                    )[heavy]
+                )
+                predicted_neighbor_counts = predicted_fragment.sum(dim=-1)
+                heavy_neighbor_count_violation_rates.append(
+                    predicted_neighbor_counts.gt(neighbor_count_caps).float().mean()
+                )
 
             hydrogen = outputs["hydrogen_mask"][sample_index]
             target_hydrogen = hydrogen & batch.h_parent_types[sample_index].ge(0)
@@ -257,9 +229,6 @@ class LitNMRToGraph(pl.LightningModule):
                 ).all(dim=-1)
                 h_parent_type_accuracies.append(type_correct.float().mean())
                 h_parent_fragment_accuracies.append(fragment_correct.float().mean())
-                h_parent_joint_accuracies.append(
-                    (type_correct & fragment_correct).float().mean()
-                )
 
                 if outputs.get("h_attachment_logits") is not None:
                     predicted_attachment = outputs["h_attachment_logits"][
@@ -295,21 +264,14 @@ class LitNMRToGraph(pl.LightningModule):
             "heavy_fragment_positive_count_accuracy": mean(
                 positive_count_accuracies
             ),
-            "heavy_fragment_atom_exact_accuracy": mean(atom_exact_accuracies),
             "h_parent_type_accuracy": mean(h_parent_type_accuracies),
             "h_parent_fragment_exact_accuracy": mean(
                 h_parent_fragment_accuracies
             ),
-            "h_parent_joint_accuracy": mean(h_parent_joint_accuracies),
             "h_attachment_multiset_accuracy": mean(h_attachment_accuracies),
             "h_count_mae": mean(h_count_maes),
-            "heavy_degree_violation_rate": mean(
-                heavy_degree_violation_rates
-            ),
-            "heavy_degree_mean_overflow": mean(heavy_degree_mean_overflows),
-            "heavy_bond_order_sum_mean": mean(heavy_bond_order_sum_means),
-            "heavy_bond_order_budget_violation_rate": mean(
-                heavy_bond_order_budget_violation_rates
+            "heavy_neighbor_count_violation_rate": mean(
+                heavy_neighbor_count_violation_rates
             ),
         }
         if edge_accuracy is not None:
@@ -321,14 +283,11 @@ class LitNMRToGraph(pl.LightningModule):
             valid = batch.smiles_target_ids.ne(SMILES_PAD_INDEX)
             predictions = outputs["smiles_token_ids"]
             correct = predictions.eq(batch.smiles_target_ids) & valid
-            metrics[f"smiles_{smiles_mode}_token_accuracy"] = (
-                correct.sum().float() / valid.sum().clamp_min(1)
-            )
-            metrics[f"smiles_{smiles_mode}_exact_match"] = (
-                (correct | ~valid).all(dim=1).float().mean()
-            )
             logits = outputs.get("smiles_logits")
             if smiles_mode == "teacher" and logits is not None:
+                metrics["smiles_teacher_token_accuracy"] = (
+                    correct.sum().float() / valid.sum().clamp_min(1)
+                )
                 token_loss = F.cross_entropy(
                     logits.reshape(-1, logits.size(-1)),
                     batch.smiles_target_ids.reshape(-1),
@@ -336,11 +295,12 @@ class LitNMRToGraph(pl.LightningModule):
                 )
                 metrics["smiles_teacher_perplexity"] = token_loss.clamp_max(20).exp()
             if smiles_mode == "greedy" and self.model.smiles_vocab is not None:
+                metrics["smiles_greedy_exact_match"] = (
+                    (correct | ~valid).all(dim=1).float().mean()
+                )
                 (
                     validity,
                     stereo_agnostic,
-                    heavy_count_exact,
-                    total_count_exact,
                     composition_exact,
                 ) = self._greedy_smiles_metrics(
                     predictions,
@@ -351,12 +311,6 @@ class LitNMRToGraph(pl.LightningModule):
                 metrics["smiles_greedy_validity"] = validity
                 metrics["smiles_greedy_stereo_agnostic_exact_match"] = (
                     stereo_agnostic
-                )
-                metrics["smiles_greedy_heavy_atom_count_exact"] = (
-                    heavy_count_exact
-                )
-                metrics["smiles_greedy_total_atom_count_exact"] = (
-                    total_count_exact
                 )
                 metrics["smiles_greedy_element_composition_exact"] = (
                     composition_exact
@@ -373,41 +327,21 @@ class LitNMRToGraph(pl.LightningModule):
             heavy_mask: torch.Tensor,
     ) -> str:
         rows = []
+        neighbor_count_caps = self.criterion.heavy_neighbor_count_caps(atom_types)
         for atom_index in heavy_mask.nonzero(as_tuple=False).flatten().tolist():
             counts = fragment_counts[atom_index]
-            degree = int(counts.clamp_min(0).sum())
-            # max_degree = int(
-            #     self.criterion.heavy_degree_caps(atom_types)[atom_index]
-            # )
-            # bond_order_sum = float(
-            #     (
-            #         counts.clamp_min(0).float()
-            #         * self.fragment_bond_order_weights
-            #     ).sum()
-            # )
+            neighbor_count = int(counts.clamp_min(0).sum())
+            max_neighbors = int(neighbor_count_caps[atom_index])
             ports = [
                 f"{candidate}x{int(count)}"
                 for candidate, count in zip(BOND_TYPE_CANDIDATES, counts.tolist())
                 if count > 0
             ]
-            if self.check_bond_order:
-                bond_order_sum = float(
-                    (
-                        counts.clamp_min(0).float()
-                        * self.fragment_bond_order_weights
-                    ).sum()
-                )
-                rows.append(
-                    f"{atom_index}:Z{int(atom_types[atom_index])}"
-                    f"(degree={degree}/{max_degree},bond_order={bond_order_sum:g})="
-                    + (",".join(ports) if ports else "none")
-                )
-            else:
-                rows.append(
-                    f"{atom_index}:Z{int(atom_types[atom_index])}"
-                    f"(degree={degree})="
-                    + (",".join(ports) if ports else "none")
-                )
+            rows.append(
+                f"{atom_index}:Z{int(atom_types[atom_index])}"
+                f"(neighbors={neighbor_count}/{max_neighbors})="
+                + (",".join(ports) if ports else "none")
+            )
         return "; ".join(rows)
 
     def _collect_validation_examples(
@@ -559,8 +493,6 @@ class LitNMRToGraph(pl.LightningModule):
 
         valid_values = []
         stereo_agnostic_values = []
-        heavy_count_exact_values = []
-        total_count_exact_values = []
         composition_exact_values = []
         device = predictions.device
         for sample_index, (prediction, target) in enumerate(
@@ -591,32 +523,17 @@ class LitNMRToGraph(pl.LightningModule):
                     float(predicted_canonical == target_canonical)
                 )
             if predicted_molecule is None:
-                heavy_count_exact_values.append(0.0)
-                total_count_exact_values.append(0.0)
                 composition_exact_values.append(0.0)
                 continue
             predicted_composition = self._molecule_composition(
                 predicted_molecule
             )
-            predicted_total = sum(count for _, count in predicted_composition)
-            predicted_heavy = sum(
-                count for atomic_number, count in predicted_composition
-                if atomic_number != 1
-            )
-            target_total = len(target_atomic_numbers)
-            target_heavy = sum(
-                atomic_number != 1 for atomic_number in target_atomic_numbers
-            )
-            heavy_count_exact_values.append(float(predicted_heavy == target_heavy))
-            total_count_exact_values.append(float(predicted_total == target_total))
             composition_exact_values.append(
                 float(predicted_composition == target_composition)
             )
         return (
             torch.tensor(valid_values, device=device).mean(),
             torch.tensor(stereo_agnostic_values, device=device).mean(),
-            torch.tensor(heavy_count_exact_values, device=device).mean(),
-            torch.tensor(total_count_exact_values, device=device).mean(),
             torch.tensor(composition_exact_values, device=device).mean(),
         )
 
