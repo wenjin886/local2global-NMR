@@ -8,7 +8,7 @@ data_path: ${oc.env:DATA_PATH,data/uspto/preprocessed}
 data_name: uspto
 
 group: local2geo
-exp_name: bs512d-dim512
+exp_name: relax16-dim512-explicitH-bs128
 
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
@@ -22,8 +22,8 @@ datamodule:
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
   # Explicit H increases both N and the O(N^2) pair tensors substantially.
-  train_batch_size: 16
-  val_batch_size: 16
+  train_batch_size: 128
+  val_batch_size: 128
   num_workers: 2
   pin_memory: true
   persistent_workers: true
@@ -143,7 +143,7 @@ trainer:
   _target_: pytorch_lightning.Trainer
   accelerator: auto
   devices: 1
-  precision: 16-mixed
+  precision: 16
   inference_mode: false
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
