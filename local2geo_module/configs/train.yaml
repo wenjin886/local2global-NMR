@@ -142,4 +142,4 @@ ckpt_path: null
 
 hydra:
   run:
-    dir: ${log_path}/local2geo/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}
+    dir: ${log_path}/${now:%Y-%m-%d}_${now:%H-%M-%S}

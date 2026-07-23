@@ -85,6 +85,7 @@ def load_module(
     checkpoint_path: Path,
     config_path: Optional[Path] = None,
     device: torch.device = torch.device("cpu"),
+    relax_steps: int = -1
 ):
     checkpoint_path = checkpoint_path.expanduser().resolve()
     if not checkpoint_path.is_file():
@@ -127,6 +128,9 @@ def load_module(
         )
     module.eval()
     module.to(device)
+    if relax_steps >= 0:
+        module.model.relaxation.num_steps = relax_steps
+        print(f"Set relaxation.num_steps = {relax_steps} for evaluation")
     return module, config_path
 
 
@@ -283,6 +287,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="PyTorch device such as auto, cpu, cuda, cuda:0, or mps.",
     )
+    parser.add_argument(
+        "--relax-steps",
+        default=-1,
+        type=int,)
     return parser
 
 
@@ -298,6 +306,7 @@ def main() -> None:
         args.checkpoint,
         config_path=args.config,
         device=device,
+        relax_steps=args.relax_steps
     )
     paths = evaluate_smiles(
         module=module,
