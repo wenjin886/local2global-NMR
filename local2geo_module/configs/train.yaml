@@ -2,21 +2,31 @@ seed: 42
 project: local2geo-prior
 test: false
 
+
+
 data_path: ${oc.env:DATA_PATH,data/uspto/preprocessed}
-log_path: ${oc.env:LOG_PATH,logs}
-output_dir: ${hydra:runtime.output_dir}
+data_name: uspto
+
+group: local2geo
+exp_name: bs512d-dim512
+
+exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
+log_path: ${output_dir}/logs
+
+relaxation_steps: 8
 
 datamodule:
   _target_: local2geo_module.data.Local2GeoDataModule
   train_path: ${data_path}/train.pt
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
-  train_batch_size: 8
-  val_batch_size: 16
+  train_batch_size: 512
+  val_batch_size: 256
   num_workers: 2
   pin_memory: true
   persistent_workers: true
-  max_heavy_atoms: 192
+  max_heavy_atoms: 101
   train_limit: null
   val_limit: null
 
@@ -27,20 +37,20 @@ lit_module:
     geometry_edge_temperature: 0.7
     projector:
       _target_: local2geo_module.model.SoftGraphProjector
-      hidden_dim: 128
-      pair_hidden_dim: 128
+      hidden_dim: 512
+      pair_hidden_dim: 256
       num_layers: 3
       max_atomic_number: 118
       geometry_temperature: 1.0
       use_formal_charges: false
     coordinate_seed:
       _target_: local2geo_module.model.LearnedCoordinateSeed
-      hidden_dim: 128
-      max_num_atoms: 192
+      hidden_dim: 512
+      max_num_atoms: 101
       coordinate_scale: 3.0
     relaxation:
       _target_: local2geo_module.geometry.DifferentiableLocalRelaxation
-      num_steps: 8
+      num_steps: ${relaxation_steps}
       step_size: 0.04
       bond_weight: 40.0
       angle_weight: 8.0
@@ -118,7 +128,7 @@ trainer:
   _target_: pytorch_lightning.Trainer
   accelerator: auto
   devices: 1
-  precision: 32-true
+  precision: 16
   inference_mode: false
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
