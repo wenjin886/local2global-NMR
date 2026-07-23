@@ -81,6 +81,36 @@ def clean_edge_logits(
     return logits
 
 
+def clean_attachment_logits(
+    h_attachment: torch.Tensor,
+    attachment_mask: torch.Tensor,
+    margin: float = 4.0,
+) -> torch.Tensor:
+    logits = torch.full(
+        attachment_mask.shape,
+        -20.0,
+        dtype=torch.get_default_dtype(),
+        device=h_attachment.device,
+    )
+    valid = h_attachment.ge(0)
+    update = torch.zeros_like(logits)
+    update.scatter_(
+        -1,
+        h_attachment.clamp_min(0).unsqueeze(-1),
+        torch.full(
+            (*h_attachment.shape, 1),
+            margin,
+            dtype=logits.dtype,
+            device=logits.device,
+        ),
+    )
+    return torch.where(
+        attachment_mask,
+        update * valid.unsqueeze(-1),
+        logits,
+    )
+
+
 def load_module(
     checkpoint_path: Path,
     config_path: Optional[Path] = None,
@@ -173,24 +203,36 @@ def evaluate_smiles(
     batch = _move_batch(cpu_batch, device)
 
     if input_mode == "clean":
-        edge_logits = clean_edge_logits(
-            batch["bond_types"], batch["pair_mask"], margin=clean_margin
-        )
+        noisy_graph = {
+            "heavy_edge_logits": clean_edge_logits(
+                batch["bond_types"],
+                batch["heavy_pair_mask"],
+                margin=clean_margin,
+            ),
+            "h_attachment_logits": clean_attachment_logits(
+                batch["h_attachment"],
+                batch["attachment_mask"],
+                margin=clean_margin,
+            ),
+        }
     else:
         devices = [device] if device.type == "cuda" else []
         with torch.random.fork_rng(devices=devices):
             torch.manual_seed(seed)
             if device.type == "cuda":
                 torch.cuda.manual_seed_all(seed)
-            edge_logits = module.val_corruptor(
-                batch["bond_types"], batch["pair_mask"]
+            noisy_graph = module.val_corruptor(
+                batch["bond_types"],
+                batch["heavy_pair_mask"],
+                batch["h_attachment"],
+                batch["attachment_mask"],
             )
 
     # Do not use torch.inference_mode(): the coordinate relaxation computes
     # forces with autograd even though inference does not retain the graph.
     outputs = module(
         batch,
-        edge_logits,
+        noisy_graph,
         differentiable_relaxation=False,
     )
     coordinates = outputs["coordinates"].detach().cpu()
@@ -209,7 +251,7 @@ def evaluate_smiles(
         mean_confidence = float(confidence[upper].mean()) if upper.any() else 1.0
         comment = (
             f"SMILES={sample['smiles']} local2geo input={input_mode} "
-            f"mean_edge_confidence={mean_confidence:.6f}; heavy atoms only"
+            f"mean_edge_confidence={mean_confidence:.6f}; explicit hydrogens"
         )
         write_xyz(
             output_path,
@@ -224,7 +266,7 @@ def evaluate_smiles(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Load a trained local2geo checkpoint and export heavy-atom XYZ "
+            "Load a trained local2geo checkpoint and export explicit-H XYZ "
             "coordinates for one or more SMILES."
         )
     )

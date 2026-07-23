@@ -14,19 +14,21 @@ exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
-relaxation_steps: 8
+relaxation_steps: 16
 
 datamodule:
   _target_: local2geo_module.data.Local2GeoDataModule
   train_path: ${data_path}/train.pt
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
-  train_batch_size: 512
-  val_batch_size: 256
+  # Explicit H increases both N and the O(N^2) pair tensors substantially.
+  train_batch_size: 16
+  val_batch_size: 16
   num_workers: 2
   pin_memory: true
   persistent_workers: true
   max_heavy_atoms: 101
+  max_total_atoms: 256
   train_limit: null
   val_limit: null
 
@@ -46,7 +48,7 @@ lit_module:
     coordinate_seed:
       _target_: local2geo_module.model.LearnedCoordinateSeed
       hidden_dim: 512
-      max_num_atoms: 101
+      max_num_atoms: 256
       coordinate_scale: 3.0
     relaxation:
       _target_: local2geo_module.geometry.DifferentiableLocalRelaxation
@@ -55,11 +57,15 @@ lit_module:
       bond_weight: 40.0
       angle_weight: 8.0
       planar_weight: 1.0
-      clash_weight: 0.02
+      clash_weight: 1.0
       bond_probability_power: 4.0
       angle_probability_power: 3.0
-      clash_distance_scale: 0.62
+      one_three_distance_scale: 0.62
+      clash_distance_scale: 0.80
       clash_softness: 0.12
+      clash_power: 4.0
+      initial_angle_scale: 0.5
+      initial_clash_scale: 0.25
       gradient_clip: 10.0
   criterion:
     _target_: local2geo_module.loss.ProjectionGeometryLoss
@@ -71,10 +77,13 @@ lit_module:
     valence_weight: 0.1
     geometry_class_weight: 0.25
     residual_weight: 0.0001
+    attachment_count_weight: 0.5
+    attachment_entropy_weight: 0.01
+    attachment_residual_weight: 0.0001
     local_bond_weight: 1.0
     local_angle_weight: 0.5
     local_planar_weight: 0.1
-    local_clash_weight: 0.01
+    local_clash_weight: 0.5
   train_corruptor:
     _target_: local2geo_module.corruption.SoftGraphCorruptor
     clean_margin_min: 1.5
@@ -85,6 +94,8 @@ lit_module:
     false_positive_probability: 0.015
     false_negative_probability: 0.08
     valence_conflict_probability: 0.02
+    attachment_confusion_probability: 0.12
+    attachment_logit_noise_std: 0.35
     logit_noise_std: 0.35
   val_corruptor:
     _target_: local2geo_module.corruption.SoftGraphCorruptor
@@ -96,11 +107,15 @@ lit_module:
     false_positive_probability: 0.01
     false_negative_probability: 0.06
     valence_conflict_probability: 0.01
+    attachment_confusion_probability: 0.10
+    attachment_logit_noise_std: 0.30
     logit_noise_std: 0.30
   lr: 0.0002
   weight_decay: 0.000001
   warm_up_steps: 500
   val_corruption_seed: 1729
+  num_val_structures_to_log: 10
+  visualize_every_n_epochs: 5
 
 callbacks:
   model_checkpoint:
@@ -128,7 +143,7 @@ trainer:
   _target_: pytorch_lightning.Trainer
   accelerator: auto
   devices: 1
-  precision: 16
+  precision: 16-mixed
   inference_mode: false
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm

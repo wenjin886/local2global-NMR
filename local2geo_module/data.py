@@ -67,6 +67,11 @@ def _geometry_class(atom: rdchem.Atom) -> int:
 
 @lru_cache(maxsize=4096)
 def graph_from_smiles(smiles: str) -> Dict[str, Any]:
+    """Build an explicit-H graph in the same slot order as NMRToGraph.
+
+    Hydrogen slots come first and are exchangeable. Heavy slots are grouped by
+    element, with canonical rank breaking ties within an element.
+    """
     molecule = Chem.MolFromSmiles(smiles)
     if molecule is None:
         raise ValueError(f"Invalid SMILES: {smiles!r}")
@@ -74,35 +79,53 @@ def graph_from_smiles(smiles: str) -> Dict[str, Any]:
     canonical = Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=False)
     molecule = Chem.AddHs(Chem.MolFromSmiles(canonical))
     canonical_ranks = list(Chem.CanonicalRankAtoms(molecule, breakTies=True))
+
+    hydrogen = [
+        atom.GetIdx() for atom in molecule.GetAtoms() if atom.GetAtomicNum() == 1
+    ]
     heavy = [
         atom.GetIdx() for atom in molecule.GetAtoms() if atom.GetAtomicNum() != 1
     ]
+    hydrogen.sort(key=lambda index: canonical_ranks[index])
     heavy.sort(key=lambda index: (
         molecule.GetAtomWithIdx(index).GetAtomicNum(), canonical_ranks[index]
     ))
-    old_to_new = {old: new for new, old in enumerate(heavy)}
-    num_atoms = len(heavy)
+    ordered = hydrogen + heavy
+    old_to_new = {old: new for new, old in enumerate(ordered)}
+    num_hydrogens = len(hydrogen)
+    num_atoms = len(ordered)
+
     atomic_numbers = torch.tensor([
-        molecule.GetAtomWithIdx(index).GetAtomicNum() for index in heavy
+        molecule.GetAtomWithIdx(index).GetAtomicNum() for index in ordered
     ], dtype=torch.long)
     formal_charges = torch.tensor([
-        molecule.GetAtomWithIdx(index).GetFormalCharge() for index in heavy
+        molecule.GetAtomWithIdx(index).GetFormalCharge() for index in ordered
     ], dtype=torch.float)
     hydrogen_counts = torch.tensor([
-        sum(neighbor.GetAtomicNum() == 1
-            for neighbor in molecule.GetAtomWithIdx(index).GetNeighbors())
-        for index in heavy
+        (
+            sum(
+                neighbor.GetAtomicNum() == 1
+                for neighbor in molecule.GetAtomWithIdx(index).GetNeighbors()
+            )
+            if molecule.GetAtomWithIdx(index).GetAtomicNum() != 1 else 0
+        )
+        for index in ordered
     ], dtype=torch.float)
     geometry_classes = torch.tensor([
-        _geometry_class(molecule.GetAtomWithIdx(index)) for index in heavy
+        _geometry_class(molecule.GetAtomWithIdx(index)) for index in ordered
     ], dtype=torch.long)
+
     bond_types = torch.zeros((num_atoms, num_atoms), dtype=torch.long)
+    h_attachment = torch.full((num_atoms,), -100, dtype=torch.long)
     for bond in molecule.GetBonds():
-        left, right = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-        if left not in old_to_new or right not in old_to_new:
-            continue
-        i, j = old_to_new[left], old_to_new[right]
-        bond_types[i, j] = bond_types[j, i] = _bond_type_index(bond)
+        left = old_to_new[bond.GetBeginAtomIdx()]
+        right = old_to_new[bond.GetEndAtomIdx()]
+        bond_type = _bond_type_index(bond)
+        bond_types[left, right] = bond_types[right, left] = bond_type
+        if left < num_hydrogens:
+            h_attachment[left] = right
+        if right < num_hydrogens:
+            h_attachment[right] = left
 
     table = Chem.GetPeriodicTable()
     covalent_radii = torch.tensor([
@@ -118,6 +141,9 @@ def graph_from_smiles(smiles: str) -> Dict[str, Any]:
         "hydrogen_counts": hydrogen_counts,
         "geometry_classes": geometry_classes,
         "bond_types": bond_types,
+        "h_attachment": h_attachment,
+        "num_hydrogens": num_hydrogens,
+        "num_heavy_atoms": len(heavy),
         "covalent_radii": covalent_radii,
         "vdw_radii": vdw_radii,
     }
@@ -130,22 +156,43 @@ class Local2GeoDataset(Dataset):
         self,
         path: str,
         max_heavy_atoms: Optional[int] = None,
+        max_total_atoms: Optional[int] = None,
         limit: Optional[int] = None,
+        permute_hydrogens: bool = False,
     ):
         items = _load_torch(path)
         if not isinstance(items, Sequence):
             raise TypeError(f"Expected a sequence in {path}, got {type(items)!r}")
         self.smiles = []
+        self.permute_hydrogens = permute_hydrogens
         for item in items:
             value = _get(item, "isomeric_smiles", _get(item, "smiles"))
             if not value:
                 continue
-            if max_heavy_atoms is not None:
-                stored_atoms = _get(item, "h")
-                if stored_atoms is not None:
-                    heavy_count = int(torch.as_tensor(stored_atoms).ne(1).sum())
-                    if heavy_count > max_heavy_atoms:
-                        continue
+            stored_atoms = _get(item, "h")
+            if max_heavy_atoms is not None and stored_atoms is not None:
+                heavy_count = int(torch.as_tensor(stored_atoms).ne(1).sum())
+                if heavy_count > max_heavy_atoms:
+                    continue
+            if max_total_atoms is not None and stored_atoms is not None:
+                if int(torch.as_tensor(stored_atoms).numel()) > max_total_atoms:
+                    continue
+            # Stored atom counts are preferred for filtering because this keeps
+            # dataset initialization cheap on the full USPTO split.
+            if stored_atoms is None and (
+                max_heavy_atoms is not None or max_total_atoms is not None
+            ):
+                graph = graph_from_smiles(str(value))
+                if (
+                    max_heavy_atoms is not None
+                    and graph["num_heavy_atoms"] > max_heavy_atoms
+                ):
+                    continue
+                if (
+                    max_total_atoms is not None
+                    and graph["atomic_numbers"].numel() > max_total_atoms
+                ):
+                    continue
             self.smiles.append(str(value))
             if limit is not None and len(self.smiles) >= limit:
                 break
@@ -156,7 +203,30 @@ class Local2GeoDataset(Dataset):
         return len(self.smiles)
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
-        return graph_from_smiles(self.smiles[index])
+        graph = graph_from_smiles(self.smiles[index])
+        if not self.permute_hydrogens or graph["num_hydrogens"] < 2:
+            return graph
+        num_hydrogens = graph["num_hydrogens"]
+        num_atoms = graph["atomic_numbers"].numel()
+        permutation = torch.cat([
+            torch.randperm(num_hydrogens),
+            torch.arange(num_hydrogens, num_atoms),
+        ])
+        permuted = dict(graph)
+        for key in (
+            "atomic_numbers",
+            "formal_charges",
+            "hydrogen_counts",
+            "geometry_classes",
+            "h_attachment",
+            "covalent_radii",
+            "vdw_radii",
+        ):
+            permuted[key] = graph[key][permutation]
+        permuted["bond_types"] = graph["bond_types"][
+            permutation[:, None], permutation[None, :]
+        ]
+        return permuted
 
 
 def collate_local2geo(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -169,6 +239,7 @@ def collate_local2geo(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     geometry_classes = torch.full((batch_size, max_atoms), -100, dtype=torch.long)
     covalent_radii = torch.zeros((batch_size, max_atoms), dtype=torch.float)
     vdw_radii = torch.zeros((batch_size, max_atoms), dtype=torch.float)
+    h_attachment = torch.full((batch_size, max_atoms), -100, dtype=torch.long)
     bond_types = torch.full(
         (batch_size, max_atoms, max_atoms), -100, dtype=torch.long
     )
@@ -181,21 +252,34 @@ def collate_local2geo(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         geometry_classes[batch_index, :size] = sample["geometry_classes"]
         covalent_radii[batch_index, :size] = sample["covalent_radii"]
         vdw_radii[batch_index, :size] = sample["vdw_radii"]
+        h_attachment[batch_index, :size] = sample["h_attachment"]
         bond_types[batch_index, :size, :size] = sample["bond_types"]
+
+    hydrogen_mask = atom_mask & atomic_numbers.eq(1)
+    heavy_mask = atom_mask & atomic_numbers.ne(1)
     pair_mask = atom_mask[:, :, None] & atom_mask[:, None, :]
     diagonal = torch.eye(max_atoms, dtype=torch.bool)[None]
     pair_mask &= ~diagonal
+    heavy_pair_mask = (
+        heavy_mask[:, :, None] & heavy_mask[:, None, :] & ~diagonal
+    )
+    attachment_mask = hydrogen_mask[:, :, None] & heavy_mask[:, None, :]
     return {
         "smiles": [sample["smiles"] for sample in samples],
         "atomic_numbers": atomic_numbers,
         "atom_mask": atom_mask,
+        "hydrogen_mask": hydrogen_mask,
+        "heavy_mask": heavy_mask,
         "pair_mask": pair_mask,
+        "heavy_pair_mask": heavy_pair_mask,
+        "attachment_mask": attachment_mask,
         "formal_charges": formal_charges,
         "hydrogen_counts": hydrogen_counts,
         "geometry_classes": geometry_classes,
         "covalent_radii": covalent_radii,
         "vdw_radii": vdw_radii,
         "bond_types": bond_types,
+        "h_attachment": h_attachment,
     }
 
 
@@ -211,6 +295,7 @@ class Local2GeoDataModule(pl.LightningDataModule):
         pin_memory: bool = True,
         persistent_workers: bool = True,
         max_heavy_atoms: Optional[int] = 192,
+        max_total_atoms: Optional[int] = 256,
         train_limit: Optional[int] = None,
         val_limit: Optional[int] = None,
     ):
@@ -218,20 +303,23 @@ class Local2GeoDataModule(pl.LightningDataModule):
         self.save_hyperparameters()
 
     def setup(self, stage: Optional[str] = None) -> None:
+        arguments = (
+            self.hparams.max_heavy_atoms,
+            self.hparams.max_total_atoms,
+        )
         if stage in (None, "fit"):
             self.train_dataset = Local2GeoDataset(
                 self.hparams.train_path,
-                self.hparams.max_heavy_atoms,
+                *arguments,
                 self.hparams.train_limit,
+                permute_hydrogens=True,
             )
             self.val_dataset = Local2GeoDataset(
-                self.hparams.val_path,
-                self.hparams.max_heavy_atoms,
-                self.hparams.val_limit,
+                self.hparams.val_path, *arguments, self.hparams.val_limit
             )
         if stage in (None, "test") and self.hparams.test_path:
             self.test_dataset = Local2GeoDataset(
-                self.hparams.test_path, self.hparams.max_heavy_atoms
+                self.hparams.test_path, *arguments
             )
 
     def _loader(self, dataset: Dataset, batch_size: int, shuffle: bool) -> DataLoader:
