@@ -32,7 +32,8 @@ The solver uses fixed chemistry priors:
   and soft single/double/triple/aromatic statistics without `argmax`;
 - angle constraints from fixed ideal geometry cosines;
 - trigonal-planar constraints;
-- soft one-three and nonlocal vdW repulsion.
+- a soft excluded-volume lower bound for every unbonded atom pair, including
+  one-three pairs such as H...H within a methyl group.
 
 The production solver embeds fixed radius entries for H, B, C, N, O, F, Si,
 P, S, Cl, Br, and I, covering the current dataset. It raises on an unsupported
@@ -88,9 +89,16 @@ python -m local2geo_module.eval \
   --smiles "CCO" "c1ccccc1" \
   --input-mode clean-soft \
   --num-steps 256 \
+  --unbonded-distance-scale 0.80 \
+  --unbonded-weight 2.0 \
   --output-dir local2geo_outputs \
   --write-sdf
 ```
+
+`--unbonded-distance-scale` multiplies the sum of the two vdW radii and
+therefore controls the soft lower bound for every unbonded pair. Values around
+`0.75`, `0.80`, and `0.85` are useful initial comparisons; overly large values
+can expand strained rings or other legitimate close contacts.
 
 To test robustness to NMRToGraph-like mistakes:
 

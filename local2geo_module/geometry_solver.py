@@ -32,7 +32,6 @@ class DifferentiableGeometrySolver(nn.Module):
         clash_weight: float = 2.0,
         bond_probability_power: float = 3.0,
         angle_probability_power: float = 2.0,
-        one_three_distance_scale: float = 0.62,
         clash_distance_scale: float = 0.80,
         clash_softness: float = 0.10,
         clash_smoothmax_temperature: float = 0.02,
@@ -51,7 +50,6 @@ class DifferentiableGeometrySolver(nn.Module):
         self.clash_weight = clash_weight
         self.bond_probability_power = bond_probability_power
         self.angle_probability_power = angle_probability_power
-        self.one_three_distance_scale = one_three_distance_scale
         self.clash_distance_scale = clash_distance_scale
         self.clash_softness = clash_softness
         self.clash_smoothmax_temperature = clash_smoothmax_temperature
@@ -421,24 +419,18 @@ class DifferentiableGeometrySolver(nn.Module):
             )
         )
 
-        two_hop = 1.0 - torch.exp(-torch.bmm(q, q))
-        not_direct = (1.0 - q).pow(4) * pair_mask_f
-        one_three_weight = not_direct * two_hop
-        nonlocal_weight = not_direct * (1.0 - two_hop)
+        # Every pair which is not directly bonded receives the same soft
+        # excluded-volume lower bound. In particular, 1--3 pairs such as the
+        # H...H pairs in a methyl group remain active instead of being
+        # weakened or removed. Since q is a sharp-but-soft bond probability,
+        # (1 - q) keeps this constraint differentiable with respect to the
+        # incoming graph logits.
+        unbonded_weight = (1.0 - q) * pair_mask_f
         vdw_sum = vdw_radii[:, :, None] + vdw_radii[:, None, :]
-        penetration_13 = self.clash_softness * F.softplus(
-            (
-                self.one_three_distance_scale * vdw_sum - distance
-            ) / self.clash_softness
-        )
-        penetration_far = self.clash_softness * F.softplus(
+        penetration = self.clash_softness * F.softplus(
             (
                 self.clash_distance_scale * vdw_sum - distance
             ) / self.clash_softness
-        )
-        penetration = (
-            one_three_weight * penetration_13
-            + nonlocal_weight * penetration_far
         )
         eye = torch.eye(
             penetration.size(1),
@@ -446,7 +438,9 @@ class DifferentiableGeometrySolver(nn.Module):
             dtype=torch.bool,
         )[None]
         valid_neighbor = pair_mask & ~eye
-        squared_penetration = penetration.square()
+        # Apply the soft unbonded probability to the energy rather than to
+        # penetration before squaring, so it retains its probability meaning.
+        squared_penetration = unbonded_weight * penetration.square()
         temperature = self.clash_smoothmax_temperature
         logits = (
             squared_penetration / temperature

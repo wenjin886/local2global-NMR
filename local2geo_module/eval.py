@@ -183,6 +183,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=256,
     )
     parser.add_argument("--step-size", type=float, default=0.02)
+    parser.add_argument(
+        "--unbonded-distance-scale",
+        type=float,
+        default=0.80,
+        help=(
+            "Lower bound for every unbonded pair as a fraction of the "
+            "sum of its vdW radii."
+        ),
+    )
+    parser.add_argument(
+        "--unbonded-weight",
+        type=float,
+        default=2.0,
+        help="Weight of the soft unbonded-pair excluded-volume term.",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument(
         "--write-sdf",
@@ -196,8 +211,17 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.output is not None and len(args.smiles) != 1:
         raise ValueError("--output can only be used with one SMILES")
-    if args.margin <= 0 or args.num_steps < 0 or args.step_size <= 0:
-        raise ValueError("margin, num-steps, and step-size must be positive")
+    if (
+        args.margin <= 0
+        or args.num_steps < 0
+        or args.step_size <= 0
+        or args.unbonded_distance_scale <= 0
+        or args.unbonded_weight < 0
+    ):
+        raise ValueError(
+            "margin, step-size, and unbonded-distance-scale must be "
+            "positive; num-steps and unbonded-weight must be non-negative"
+        )
     # device = _resolve_device(args.device)
     device = torch.device("cpu")
     print(f"Evaluating {len(args.smiles)} SMILES on {device}...")
@@ -208,6 +232,8 @@ def main() -> None:
     solver = DifferentiableGeometrySolver(
         num_steps=args.num_steps,
         step_size=args.step_size,
+        clash_distance_scale=args.unbonded_distance_scale,
+        clash_weight=args.unbonded_weight,
     ).to(device)
     paths = evaluate_smiles(
         smiles=args.smiles,

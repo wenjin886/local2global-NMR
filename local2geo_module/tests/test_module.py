@@ -145,6 +145,43 @@ class ParameterFreeGeometrySolverTest(unittest.TestCase):
             float(seed_terms["angle"]),
         )
 
+    def test_one_three_pairs_receive_full_unbonded_repulsion(self):
+        solver = DifferentiableGeometrySolver(num_steps=0)
+        # H(0)-C(1)-H(2): both C-H pairs are bonded, while H...H is a
+        # one-three pair. At 1.60 A it is above the old weakened 1-3 cutoff
+        # (0.62 * 2.40 A) but below the unified cutoff (0.80 * 2.40 A).
+        positions = torch.tensor(
+            [[[-0.80, 0.0, 0.0], [0.0, 0.0, 0.0], [0.80, 0.0, 0.0]]],
+            dtype=torch.float32,
+        )
+        probabilities = torch.zeros((1, 3, 3, 5), dtype=torch.float32)
+        probabilities[..., 0] = 1.0
+        probabilities[:, 0, 1, 0] = 0.0
+        probabilities[:, 1, 0, 0] = 0.0
+        probabilities[:, 1, 2, 0] = 0.0
+        probabilities[:, 2, 1, 0] = 0.0
+        probabilities[:, 0, 1, 1] = 1.0
+        probabilities[:, 1, 0, 1] = 1.0
+        probabilities[:, 1, 2, 1] = 1.0
+        probabilities[:, 2, 1, 1] = 1.0
+        atom_mask = torch.ones((1, 3), dtype=torch.bool)
+        pair_mask = ~torch.eye(3, dtype=torch.bool)[None]
+        geometry_probabilities = torch.zeros((1, 3, 7))
+        geometry_probabilities[..., 0] = 1.0
+        covalent_radii = torch.tensor([[0.31, 0.76, 0.31]])
+        vdw_radii = torch.tensor([[1.20, 1.70, 1.20]])
+
+        terms = solver.terms(
+            positions,
+            probabilities,
+            geometry_probabilities,
+            atom_mask,
+            pair_mask,
+            covalent_radii,
+            vdw_radii,
+        )
+        self.assertGreater(float(terms["clash"]), 1e-3)
+
     def test_batch_members_do_not_change_each_others_coordinates(self):
         one = collate_local2geo([self.samples[0]])
         two = collate_local2geo([self.samples[0], self.samples[0]])
