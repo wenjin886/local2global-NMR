@@ -198,7 +198,9 @@ def main() -> None:
         raise ValueError("--output can only be used with one SMILES")
     if args.margin <= 0 or args.num_steps < 0 or args.step_size <= 0:
         raise ValueError("margin, num-steps, and step-size must be positive")
-    device = _resolve_device(args.device)
+    # device = _resolve_device(args.device)
+    device = torch.device("cpu")
+    print(f"Evaluating {len(args.smiles)} SMILES on {device}...")
     simulator = SoftGraphSimulator(
         clean_margin=args.margin,
         logit_noise_std=args.noise_std,
