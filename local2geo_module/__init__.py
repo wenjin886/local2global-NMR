@@ -1,13 +1,9 @@
-"""Standalone, 2D-supervised soft-graph to local-geometry pretraining."""
+"""Parameter-free differentiable soft-graph to local-geometry initialization."""
 
-from .data import Local2GeoDataModule, Local2GeoDataset, collate_local2geo
-from .model import LearnedCoordinateSeed, Local2GeoModel, SoftGraphProjector
+from .geometry_solver import DifferentiableGeometrySolver
+from .soft_graph_simulator import SoftGraphSimulator
 
 __all__ = [
-    "Local2GeoDataModule",
-    "Local2GeoDataset",
-    "Local2GeoModel",
-    "LearnedCoordinateSeed",
-    "SoftGraphProjector",
-    "collate_local2geo",
+    "DifferentiableGeometrySolver",
+    "SoftGraphSimulator",
 ]

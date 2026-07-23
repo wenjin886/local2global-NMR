@@ -1,140 +1,134 @@
 # local2geo_module
 
-This is a standalone pretraining project for a sharp-but-soft all-atom graph
-projector and a differentiable local-geometry initializer. It uses only SMILES
-and clean 2D graph supervision. No conformer coordinates, RDKit 3D embedding,
-or force-field targets are read.
+`local2geo_module` is a parameter-free, differentiable all-atom geometry
+initializer. It consumes the soft heavy-edge and H-attachment logits produced
+by `NMRToGraph` and returns explicit-H coordinates in the same atom-slot order.
 
-## Data flow
+It does not use conformers, 3D labels, RDKit embedding, force fields, a learned
+coordinate MLP, or a graph projection network.
+
+## Components
+
+The soft-graph test-input simulator and production geometry solver are separate:
+
+```python
+from local2geo_module import (
+    DifferentiableGeometrySolver,
+    SoftGraphSimulator,
+)
+```
+
+- `SoftGraphSimulator` converts a clean SMILES graph into finite,
+  NMRToGraph-shaped `heavy_edge_logits` and `h_attachment_logits`. It supports
+  clean-soft and corrupted-soft modes and is used only for tests and demos.
+- `DifferentiableGeometrySolver` consumes atom types, masks, and those two
+  logits. It has zero trainable parameters and always performs geometry
+  operations in FP32 with autocast disabled.
+
+The solver uses fixed chemistry priors:
+
+- bond targets from covalent-radius sums and fixed bond-type scale factors;
+- soft VSEPR-like geometry probabilities derived from atom type, soft degree,
+  and soft single/double/triple/aromatic statistics without `argmax`;
+- angle constraints from fixed ideal geometry cosines;
+- trigonal-planar constraints;
+- soft one-three and nonlocal vdW repulsion.
+
+The production solver embeds fixed radius entries for H, B, C, N, O, F, Si,
+P, S, Cl, Br, and I, covering the current dataset. It raises on an unsupported
+element so extending the table is explicit rather than silently using an
+incorrect fallback.
+
+Coordinates are obtained by unrolled stress minimization from a deterministic
+graph-smoothed seed. With `differentiable=True`, every update uses
+`create_graph=True`, so downstream coordinate losses reach both heavy-edge and
+H-attachment logits.
+
+## Atom order and integration
+
+The SMILES data helper and `NMRToGraph` use the same order:
 
 ```text
-SMILES from data/uspto/preprocessed/{train,val,test}.pt
-  -> explicit-H graph: H slots first, element-sorted heavy slots second
-  -> synthetic noisy heavy-edge logits and H-to-heavy attachment logits
-  -> residual heavy-edge and attachment projection
-  -> unified sharp-but-soft all-atom edge probabilities
-  -> learned canonical coordinate seed (trained only by 2D-derived priors)
-  -> topology-aware differentiable local relaxation
-  -> locally constrained explicit-H coordinates
+[all exchangeable H slots] + [element-grouped canonical heavy slots]
 ```
 
-The complete atom ordering matches `src.data.dataset.graph_targets_from_smiles`:
-exchangeable hydrogen slots first, followed by heavy atoms grouped by element
-and canonical rank. H attachment rows use a softmax over heavy parents. Their
-column sums are supervised by per-heavy H counts, and a small entropy objective
-encourages sharp rows without assigning physical meaning to equivalent H IDs.
+`NMRToGraph` updates features but does not permute atom slots. Production use:
 
-The relaxation never selects a hard neighbor list. Bond forces are weighted by
-soft edge probabilities, while the all-neighbor angle loss is evaluated from
-weighted direction moments in `O(B*N^2)` rather than materializing all
-`O(B*N^3)` triples. Coordinate forces use interaction sums rather than a
-batch-wide mean, so an update does not shrink with batch size or molecule size.
-Soft `Q @ Q` path mass distinguishes 1-3 contacts from more distant nonbonded
-pairs, and a per-atom p-norm prevents severe clashes from being diluted by all
-other pairs. Functional gradient steps use `create_graph=True` during training,
-so local losses reach both heavy-edge and H-attachment input logits.
+```python
+solver = DifferentiableGeometrySolver(num_steps=32)
 
-## Local run
+geometry = solver(
+    atomic_numbers=atom_types,
+    atom_mask=atom_mask,
+    heavy_mask=nmr_graph_outputs["heavy_mask"],
+    hydrogen_mask=nmr_graph_outputs["hydrogen_mask"],
+    heavy_edge_logits=nmr_graph_outputs["heavy_edge_logits"],
+    h_attachment_logits=nmr_graph_outputs["h_attachment_logits"],
+    differentiable=True,
+)
 
-Use an environment with the root project's dependencies:
+coordinates = geometry["coordinates"]  # FP32, [B, N, 3]
+```
+
+`graph_atom_features` and NMR peak features bypass this parameter-free solver
+and condition the later SE(3) refiner directly.
+
+The outer NMR model may use `bf16-mixed` or `16-mixed`. The solver casts its
+logits to FP32 inside an autocast-disabled region. The cast remains
+differentiable. Coordinates and later SE(3) distance/direction calculations
+should preferably remain FP32, while scalar feature MLPs may use mixed
+precision.
+
+## SMILES demo
+
+No checkpoint is required:
 
 ```bash
-conda activate spec2struc
-WANDB_MODE=offline python -m local2geo_module.train
+python -m local2geo_module.eval \
+  --smiles "CCO" "c1ccccc1" \
+  --input-mode clean-soft \
+  --num-steps 256 \
+  --output-dir local2geo_outputs \
+  --write-sdf
 ```
 
-Small smoke run:
+To test robustness to NMRToGraph-like mistakes:
 
 ```bash
-WANDB_MODE=offline python -m local2geo_module.train \
-  datamodule.train_limit=32 \
-  datamodule.val_limit=8 \
-  datamodule.train_batch_size=2 \
-  datamodule.max_total_atoms=64 \
-  lit_module.model.relaxation.num_steps=2 \
-  lit_module.num_val_structures_to_log=0 \
-  trainer.max_epochs=1 \
-  +trainer.limit_train_batches=2 \
-  +trainer.limit_val_batches=1
+python -m local2geo_module.eval \
+  --smiles "CCO" \
+  --input-mode corrupted-soft \
+  --seed 1729 \
+  --output ethanol.xyz
 ```
 
-Useful Hydra overrides:
+The XYZ contains explicit H. The optional SDF uses clean connectivity so a
+viewer does not infer false bonds from distance alone.
 
-```bash
-python -m local2geo_module.train \
-  data_path=/path/to/full/preprocessed \
-  log_path=/scratch/$USER/local2geo_logs \
-  datamodule.train_batch_size=16 \
-  lit_module.model.relaxation.num_steps=16
+## Tests
+
+The regression suite includes three complex molecules taken from the dataset:
+
+```text
+COC(=O)Cc1c(C)oc2cc(N)ccc2c1=O
+C=C(CSCCCSc1ccc(C(=O)C(C)(C)N2CCOCC2)cc1)C(=O)OC
+O=C(CC(F)(F)F)NC[C@H]1CN(c2ccc3c(c2)CCCc2cn[nH]c2-3)C(=O)O1
 ```
 
-`DATA_PATH` and `LOG_PATH` environment variables provide the same overrides.
-
-## Logged objectives and metrics
-
-The main graph losses are balanced heavy-edge CE, supervised logit margin,
-presence/type entropy, expected degree and valence, H-count and H-attachment
-entropy objectives, geometry-class CE, and small projection-residual penalties.
-Coordinates are evaluated only against 2D-derived covalent-radius bond lengths,
-local angle classes, planarity, and topology-aware nonbond clash priors.
-
-Validation logs include edge precision/recall/F1, conditional bond-type
-accuracy, graph exact match, H-attachment multiset accuracy/count MAE,
-all-atom and heavy-only bond/angle/clash metrics, geometry scores, and a
-combined `val/score` used for checkpointing.
-
-Every `lit_module.visualize_every_n_epochs` validation epochs, reservoir
-sampling selects `lit_module.num_val_structures_to_log` random validation
-molecules. W&B logs a table containing their clean and projected 2D graphs,
-seed and relaxed 3D SDF structures, bond MAE, and minimum nonbonded vdW ratio.
-The sampling changes by epoch and is not restricted to the first validation
-batch.
-
-Run the self-contained unit tests with:
+Run:
 
 ```bash
 python -m unittest discover -s local2geo_module/tests -v
 ```
 
-## Export XYZ from a checkpoint
+Tests cover atom ordering, explicit H counts, clean/corrupted soft-graph
+simulation, zero trainable parameters, FP32 behavior inside BF16 autocast,
+finite nonzero gradients to both input logits, local-energy reduction, batch
+independence, and XYZ/SDF export.
 
-For a checkpoint left in its Hydra run directory, the evaluator automatically
-finds the saved `.hydra/config.yaml`:
+## W&B visualization
 
-```bash
-python -m local2geo_module.eval \
-  --checkpoint logs/local2geo/runs/RUN/checkpoints/last.ckpt \
-  --smiles "CCO" \
-  --output ethanol.xyz
-```
-
-The default `clean` input mode constructs deterministic sharp logits from the
-SMILES 2D graph. To inspect the projector under a reproducible validation-style
-corruption, add `--input-mode val-corrupted --seed 1729`.
-
-Multiple SMILES are evaluated as one batch and written to `local2geo_outputs/`
-unless another directory is selected:
-
-```bash
-python -m local2geo_module.eval \
-  --checkpoint /path/to/model.ckpt \
-  --config /path/to/training/config.yaml \
-  --smiles "CCO" "c1ccccc1" \
-  --output-dir xyz_results
-```
-
-New all-atom checkpoints export explicit hydrogens. Checkpoints trained with the
-old heavy-only architecture are not compatible with the all-atom model.
-
-## Integration contract
-
-At integration time, replace the synthetic `heavy_edge_logits` and
-`h_attachment_logits` with the identically named `NMRToGraph` outputs. The
-initializer assembles these into a unified all-atom soft adjacency and returns
-coordinates in the same H-first atom-slot order. Formal charge is parsed for
-future experiments but disabled by default because the current NMR path does
-not provide it. Later NMR-conditioned SE(3) blocks can additionally consume
-`graph_atom_features` and `peak_features`.
-
-The module deliberately outputs probabilities and never applies argmax in the
-training path.
+`visualization.py` retains the 2D graph and 3D SDF utilities. Because this
+initializer has no standalone training loop, random validation structure
+logging belongs in the main NMR Lightning module after integration rather than
+in a separate local2geo trainer.

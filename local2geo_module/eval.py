@@ -5,29 +5,13 @@ import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-import hydra
 import torch
-from omegaconf import OmegaConf
 from rdkit import Chem
 
-from .constants import NONE, NUM_BOND_TYPES
 from .data import collate_local2geo, graph_from_smiles
-
-
-def _load_torch(path: Path):
-    try:
-        return torch.load(path, map_location="cpu", weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location="cpu")
-
-
-def _find_training_config(checkpoint_path: Path) -> Optional[Path]:
-    """Find the Hydra config saved beside a training checkpoint."""
-    for directory in (checkpoint_path.parent, *checkpoint_path.parents):
-        candidate = directory / ".hydra" / "config.yaml"
-        if candidate.is_file():
-            return candidate
-    return None
+from .geometry_solver import DifferentiableGeometrySolver
+from .soft_graph_simulator import SoftGraphSimulator
+from .visualization import write_sdf
 
 
 def _resolve_device(requested: str) -> torch.device:
@@ -55,115 +39,6 @@ def _move_batch(
     }
 
 
-def clean_edge_logits(
-    bond_types: torch.Tensor,
-    pair_mask: torch.Tensor,
-    margin: float = 4.0,
-) -> torch.Tensor:
-    """Convert a categorical 2D graph to deterministic sharp, finite logits."""
-    targets = bond_types.clamp_min(NONE)
-    logits = torch.zeros(
-        (*targets.shape, NUM_BOND_TYPES),
-        device=targets.device,
-        dtype=torch.get_default_dtype(),
-    )
-    logits.scatter_(
-        -1,
-        targets.unsqueeze(-1),
-        torch.full((*targets.shape, 1), margin, device=targets.device),
-    )
-    logits = logits.masked_fill(~pair_mask.unsqueeze(-1), -20.0)
-    logits[..., NONE] = torch.where(
-        pair_mask,
-        logits[..., NONE],
-        torch.full_like(logits[..., NONE], 20.0),
-    )
-    return logits
-
-
-def clean_attachment_logits(
-    h_attachment: torch.Tensor,
-    attachment_mask: torch.Tensor,
-    margin: float = 4.0,
-) -> torch.Tensor:
-    logits = torch.full(
-        attachment_mask.shape,
-        -20.0,
-        dtype=torch.get_default_dtype(),
-        device=h_attachment.device,
-    )
-    valid = h_attachment.ge(0)
-    update = torch.zeros_like(logits)
-    update.scatter_(
-        -1,
-        h_attachment.clamp_min(0).unsqueeze(-1),
-        torch.full(
-            (*h_attachment.shape, 1),
-            margin,
-            dtype=logits.dtype,
-            device=logits.device,
-        ),
-    )
-    return torch.where(
-        attachment_mask,
-        update * valid.unsqueeze(-1),
-        logits,
-    )
-
-
-def load_module(
-    checkpoint_path: Path,
-    config_path: Optional[Path] = None,
-    device: torch.device = torch.device("cpu"),
-    relax_steps: int = -1
-):
-    checkpoint_path = checkpoint_path.expanduser().resolve()
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint_path}")
-    if config_path is None:
-        config_path = _find_training_config(checkpoint_path)
-    if config_path is None:
-        raise FileNotFoundError(
-            "Could not find .hydra/config.yaml above the checkpoint. "
-            "Pass the training config explicitly with --config."
-        )
-    config_path = config_path.expanduser().resolve()
-    if not config_path.is_file():
-        raise FileNotFoundError(f"Config does not exist: {config_path}")
-
-    cfg = OmegaConf.load(config_path)
-    module = hydra.utils.instantiate(cfg.lit_module)
-    checkpoint = _load_torch(checkpoint_path)
-    state_dict = checkpoint.get("state_dict", checkpoint)
-    incompatible = module.load_state_dict(state_dict, strict=False)
-    tolerated_unexpected = {
-        key for key in incompatible.unexpected_keys
-        if key.endswith(".bond_embedding")
-    }
-    unsupported_unexpected = (
-        set(incompatible.unexpected_keys) - tolerated_unexpected
-    )
-    if incompatible.missing_keys or unsupported_unexpected:
-        details = []
-        if incompatible.missing_keys:
-            details.append(f"missing keys: {sorted(incompatible.missing_keys)}")
-        if unsupported_unexpected:
-            details.append(
-                f"unexpected keys: {sorted(unsupported_unexpected)}"
-            )
-        raise RuntimeError(
-            "Checkpoint is incompatible with the configured model ("
-            + "; ".join(details)
-            + ")"
-        )
-    module.eval()
-    module.to(device)
-    if relax_steps >= 0:
-        module.model.relaxation.num_steps = relax_steps
-        print(f"Set relaxation.num_steps = {relax_steps} for evaluation")
-    return module, config_path
-
-
 def _element_symbols(atomic_numbers: Iterable[int]) -> List[str]:
     table = Chem.GetPeriodicTable()
     return [table.GetElementSymbol(int(number)) for number in atomic_numbers]
@@ -189,69 +64,64 @@ def _safe_stem(smiles: str, index: int) -> str:
 
 
 def evaluate_smiles(
-    module,
     smiles: List[str],
+    solver: DifferentiableGeometrySolver,
+    simulator: SoftGraphSimulator,
     output: Optional[Path],
     output_dir: Path,
-    input_mode: str,
-    clean_margin: float,
+    corrupted: bool,
     seed: int,
     device: torch.device,
+    write_sdf_files: bool,
 ) -> List[Path]:
     samples = [graph_from_smiles(value) for value in smiles]
     cpu_batch = collate_local2geo(samples)
     batch = _move_batch(cpu_batch, device)
-
-    if input_mode == "clean":
-        noisy_graph = {
-            "heavy_edge_logits": clean_edge_logits(
-                batch["bond_types"],
-                batch["heavy_pair_mask"],
-                margin=clean_margin,
-            ),
-            "h_attachment_logits": clean_attachment_logits(
-                batch["h_attachment"],
-                batch["attachment_mask"],
-                margin=clean_margin,
-            ),
-        }
-    else:
-        devices = [device] if device.type == "cuda" else []
-        with torch.random.fork_rng(devices=devices):
-            torch.manual_seed(seed)
-            if device.type == "cuda":
-                torch.cuda.manual_seed_all(seed)
-            noisy_graph = module.val_corruptor(
-                batch["bond_types"],
-                batch["heavy_pair_mask"],
-                batch["h_attachment"],
-                batch["attachment_mask"],
-            )
-
-    # Do not use torch.inference_mode(): the coordinate relaxation computes
-    # forces with autograd even though inference does not retain the graph.
-    outputs = module(
-        batch,
-        noisy_graph,
-        differentiable_relaxation=False,
+    soft_graph = simulator(batch, corrupted=corrupted, seed=seed)
+    outputs = solver(
+        atomic_numbers=batch["atomic_numbers"],
+        atom_mask=batch["atom_mask"],
+        heavy_mask=batch["heavy_mask"],
+        hydrogen_mask=batch["hydrogen_mask"],
+        heavy_edge_logits=soft_graph["heavy_edge_logits"],
+        h_attachment_logits=soft_graph["h_attachment_logits"],
+        differentiable=False,
     )
-    coordinates = outputs["coordinates"].detach().cpu()
-    probabilities = outputs["projected_edge_probabilities"].detach().cpu()
+    coordinates = outputs["coordinates"].cpu()
 
     paths = []
     for index, sample in enumerate(samples):
         atom_count = int(sample["atomic_numbers"].numel())
-        if output is not None:
-            output_path = output
-        else:
-            output_path = output_dir / f"{_safe_stem(sample['smiles'], index)}.xyz"
-        pair_mask = cpu_batch["pair_mask"][index, :atom_count, :atom_count]
-        upper = torch.triu(pair_mask, diagonal=1)
-        confidence = probabilities[index, :atom_count, :atom_count].amax(dim=-1)
-        mean_confidence = float(confidence[upper].mean()) if upper.any() else 1.0
+        output_path = (
+            output
+            if output is not None
+            else output_dir / f"{_safe_stem(sample['smiles'], index)}.xyz"
+        )
+        mode = "corrupted-soft" if corrupted else "clean-soft"
+        sample_mask = batch["atom_mask"][index:index + 1, :atom_count]
+        sample_pair_mask = outputs[
+            "pair_mask"
+        ][index:index + 1, :atom_count, :atom_count]
+        terms = solver.terms(
+            coordinates[index:index + 1, :atom_count],
+            outputs["edge_probabilities"][
+                index:index + 1, :atom_count, :atom_count
+            ],
+            outputs["geometry_probabilities"][
+                index:index + 1, :atom_count
+            ],
+            sample_mask,
+            sample_pair_mask,
+            outputs["covalent_radii"][
+                index:index + 1, :atom_count
+            ],
+            outputs["vdw_radii"][index:index + 1, :atom_count],
+        )
         comment = (
-            f"SMILES={sample['smiles']} local2geo input={input_mode} "
-            f"mean_edge_confidence={mean_confidence:.6f}; explicit hydrogens"
+            f"SMILES={sample['smiles']} local2geo input={mode}; "
+            f"bond={float(terms['bond']):.6f} "
+            f"angle={float(terms['angle']):.6f} "
+            f"clash={float(terms['clash']):.6f}; explicit hydrogens"
         )
         write_xyz(
             output_path,
@@ -260,30 +130,25 @@ def evaluate_smiles(
             comment,
         )
         paths.append(output_path.resolve())
+        if write_sdf_files:
+            sdf_path = output_path.with_suffix(".sdf")
+            write_sdf(
+                sdf_path,
+                sample["atomic_numbers"],
+                sample["formal_charges"],
+                sample["bond_types"],
+                coordinates[index, :atom_count],
+                sample["smiles"],
+            )
     return paths
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Load a trained local2geo checkpoint and export explicit-H XYZ "
-            "coordinates for one or more SMILES."
+            "Run the parameter-free FP32 geometry solver on SMILES-derived "
+            "NMRToGraph-shaped soft logits."
         )
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=Path,
-        required=True,
-        help="Path to a Lightning .ckpt file.",
-    )
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=None,
-        help=(
-            "Training config.yaml. By default, search for .hydra/config.yaml "
-            "above the checkpoint."
-        ),
     )
     parser.add_argument(
         "--smiles",
@@ -301,38 +166,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=Path,
         default=Path("local2geo_outputs"),
-        help="Directory used when --output is omitted.",
     )
     parser.add_argument(
         "--input-mode",
-        choices=("clean", "val-corrupted"),
-        default="clean",
-        help=(
-            "Use deterministic logits from the SMILES graph, or a seeded "
-            "validation-style corruption."
-        ),
+        choices=("clean-soft", "corrupted-soft"),
+        default="clean-soft",
     )
+    parser.add_argument("--margin", type=float, default=4.0)
+    parser.add_argument("--noise-std", type=float, default=0.10)
+    parser.add_argument("--seed", type=int, default=1729)
     parser.add_argument(
-        "--clean-margin",
-        type=float,
-        default=4.0,
-        help="Correct-class logit margin used by clean input mode.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=1729,
-        help="Random seed used by val-corrupted input mode.",
-    )
-    parser.add_argument(
-        "--device",
-        default="auto",
-        help="PyTorch device such as auto, cpu, cuda, cuda:0, or mps.",
-    )
-    parser.add_argument(
+        "--num-steps",
         "--relax-steps",
-        default=-1,
-        type=int,)
+        dest="num_steps",
+        type=int,
+        default=256,
+    )
+    parser.add_argument("--step-size", type=float, default=0.02)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--write-sdf",
+        action="store_true",
+        help="Also write an SDF with explicit clean connectivity.",
+    )
     return parser
 
 
@@ -340,31 +196,33 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.output is not None and len(args.smiles) != 1:
         raise ValueError("--output can only be used with one SMILES")
-    if args.clean_margin <= 0:
-        raise ValueError("--clean-margin must be positive")
-
+    if args.margin <= 0 or args.num_steps < 0 or args.step_size <= 0:
+        raise ValueError("margin, num-steps, and step-size must be positive")
     device = _resolve_device(args.device)
-    module, config_path = load_module(
-        args.checkpoint,
-        config_path=args.config,
-        device=device,
-        relax_steps=args.relax_steps
-    )
+    simulator = SoftGraphSimulator(
+        clean_margin=args.margin,
+        logit_noise_std=args.noise_std,
+    ).to(device)
+    solver = DifferentiableGeometrySolver(
+        num_steps=args.num_steps,
+        step_size=args.step_size,
+    ).to(device)
     paths = evaluate_smiles(
-        module=module,
         smiles=args.smiles,
+        solver=solver,
+        simulator=simulator,
         output=args.output,
         output_dir=args.output_dir,
-        input_mode=args.input_mode,
-        clean_margin=args.clean_margin,
+        corrupted=args.input_mode == "corrupted-soft",
         seed=args.seed,
         device=device,
+        write_sdf_files=args.write_sdf,
     )
-    print(f"Loaded checkpoint: {args.checkpoint.expanduser().resolve()}")
-    print(f"Loaded config:     {config_path}")
-    print(f"Device:            {device}")
+    print(f"Device:       {device}")
+    print(f"Solver dtype: {torch.float32}")
+    print(f"Parameters:   {sum(p.numel() for p in solver.parameters())}")
     for path in paths:
-        print(f"Wrote:             {path}")
+        print(f"Wrote:        {path}")
 
 
 if __name__ == "__main__":
