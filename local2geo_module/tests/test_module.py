@@ -6,6 +6,7 @@ import torch
 
 from local2geo_module.corruption import SoftGraphCorruptor
 from local2geo_module.data import Local2GeoDataset, collate_local2geo
+from local2geo_module.eval import clean_edge_logits
 from local2geo_module.geometry import DifferentiableLocalRelaxation
 from local2geo_module.loss import ProjectionGeometryLoss
 from local2geo_module.model import (
@@ -58,6 +59,22 @@ class Local2GeoModuleTest(unittest.TestCase):
         self.assertIsNotNone(noisy.grad)
         self.assertTrue(torch.isfinite(noisy.grad).all())
         self.assertGreater(float(noisy.grad.abs().sum()), 0.0)
+
+    def test_clean_eval_logits_follow_graph_and_masks(self):
+        batch = self._batch()
+        logits = clean_edge_logits(
+            batch["bond_types"], batch["pair_mask"], margin=4.0
+        )
+        predicted = logits.argmax(dim=-1)
+        self.assertTrue(torch.equal(
+            predicted[batch["pair_mask"]],
+            batch["bond_types"][batch["pair_mask"]],
+        ))
+        self.assertTrue(torch.equal(
+            predicted[~batch["pair_mask"]],
+            torch.zeros_like(predicted[~batch["pair_mask"]]),
+        ))
+        self.assertTrue(torch.allclose(logits, logits.transpose(1, 2)))
 
 
 if __name__ == "__main__":

@@ -82,6 +82,36 @@ Run the self-contained unit tests with:
 python -m unittest discover -s local2geo_module/tests -v
 ```
 
+## Export XYZ from a checkpoint
+
+For a checkpoint left in its Hydra run directory, the evaluator automatically
+finds the saved `.hydra/config.yaml`:
+
+```bash
+python -m local2geo_module.eval \
+  --checkpoint logs/local2geo/runs/RUN/checkpoints/last.ckpt \
+  --smiles "CCO" \
+  --output ethanol.xyz
+```
+
+The default `clean` input mode constructs deterministic sharp logits from the
+SMILES 2D graph. To inspect the projector under a reproducible validation-style
+corruption, add `--input-mode val-corrupted --seed 1729`.
+
+Multiple SMILES are evaluated as one batch and written to `local2geo_outputs/`
+unless another directory is selected:
+
+```bash
+python -m local2geo_module.eval \
+  --checkpoint /path/to/model.ckpt \
+  --config /path/to/training/config.yaml \
+  --smiles "CCO" "c1ccccc1" \
+  --output-dir xyz_results
+```
+
+The current pretrained module is heavy-atom only, so these XYZ files do not yet
+contain explicit hydrogens.
+
 ## Integration contract
 
 At integration time, replace synthetic `noisy_edge_logits` with
