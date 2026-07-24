@@ -22,13 +22,36 @@ export HYDRA_FULL_ERROR=1
 
 # # Evaluate Model
 
-python -m local2geo_module.eval \
-  --smiles \
-  "COC(=O)Cc1c(C)oc2cc(N)ccc2c1=O" \
-  "C=C(CSCCCSc1ccc(C(=O)C(C)(C)N2CCOCC2)cc1)C(=O)OC" \
-  "O=C(CC(F)(F)F)NC[C@H]1CN(c2ccc3c(c2)CCCc2cn[nH]c2-3)C(=O)O1" \
-  --input-mode clean-soft \
-  --num-steps 256 \
-  --output-dir xyz_out \
-  --write-sdf
+# python -m local2geo_module.eval \
+#   --smiles \
+#   "CCCCCCCCCCCCC" \
+#   --input-mode clean-soft \
+#   --num-steps 256 \
+#   --unbonded-distance-scale 0.85 \
+#   --unbonded-weight 3.0 \
+#   --anti-torsion-weight 10.0 \
+#   --output-dir xyz_out \
+#   --device cpu \
+#   --write-sdf
 
+# python -m local2geo_module.eval \
+#   --smiles "C=C(CSCCCSc1ccc(C(=O)C(C)(C)N2CCOCC2)cc1)C(=O)OC" \
+#   --input-mode clean-soft \
+#   --num-steps 256 \
+#   --unbonded-distance-scale 0.85 \
+#   --unbonded-weight 3.0 \
+#   --anti-torsion-weight 1.0 \
+#   --ring-bond-weight 2.0 \
+#   --conjugated-weight 2.0 \
+#   --chain-extension-weight 10.0 \
+#   --output-dir xyz_out \
+#   --device cpu \
+#   # --write-sdf
+
+python -m local2geo_module.eval \
+  --smiles "CCCCCCC" \
+  --seed-mode mds \
+  --num-steps 256 \
+  --output-dir xyz_out/mds \
+  --device cpu \
+  --write-sdf

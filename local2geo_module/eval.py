@@ -118,7 +118,8 @@ def evaluate_smiles(
             outputs["vdw_radii"][index:index + 1, :atom_count],
         )
         comment = (
-            f"SMILES={sample['smiles']} local2geo input={mode}; "
+            f"SMILES={sample['smiles']} local2geo input={mode} "
+            f"seed={solver.seed_mode}; "
             f"bond={float(terms['bond']):.6f} "
             f"angle={float(terms['angle']):.6f} "
             f"clash={float(terms['clash']):.6f}; explicit hydrogens"
@@ -184,6 +185,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--step-size", type=float, default=0.02)
     parser.add_argument(
+        "--seed-mode",
+        choices=("mds", "differentiable"),
+        default="mds",
+        help=(
+            "Coordinate seed. MDS uses detached hard shortest-path "
+            "distances; differentiable retains the original soft seed."
+        ),
+    )
+    parser.add_argument(
+        "--mds-inflation",
+        type=float,
+        default=1.15,
+        help="Scale applied to graph-distance MDS coordinates.",
+    )
+    parser.add_argument(
+        "--mds-jitter-scale",
+        type=float,
+        default=0.08,
+        help="Deterministic symmetry-breaking perturbation in angstrom.",
+    )
+    parser.add_argument(
+        "--mds-stress-steps",
+        type=int,
+        default=384,
+        help=(
+            "Detached post-MDS seed-only local geometry refinement steps; "
+            "zero keeps only the chemistry-aware MDS bounds."
+        ),
+    )
+    parser.add_argument(
+        "--mds-stress-step-size",
+        type=float,
+        default=0.03,
+        help="Step size for detached seed-only stress refinement.",
+    )
+    parser.add_argument(
         "--unbonded-distance-scale",
         type=float,
         default=0.80,
@@ -217,13 +254,18 @@ def main() -> None:
         or args.step_size <= 0
         or args.unbonded_distance_scale <= 0
         or args.unbonded_weight < 0
+        or args.mds_inflation <= 0
+        or args.mds_jitter_scale < 0
+        or args.mds_stress_steps < 0
+        or args.mds_stress_step_size <= 0
     ):
         raise ValueError(
             "margin, step-size, and unbonded-distance-scale must be "
-            "positive; num-steps and unbonded-weight must be non-negative"
+            "positive; num-steps, unbonded-weight, mds-jitter-scale, and "
+            "mds-stress-steps must be non-negative"
         )
-    # device = _resolve_device(args.device)
-    device = torch.device("cpu")
+    device = _resolve_device(args.device)
+    # device = torch.device("cpu")
     print(f"Evaluating {len(args.smiles)} SMILES on {device}...")
     simulator = SoftGraphSimulator(
         clean_margin=args.margin,
@@ -234,6 +276,11 @@ def main() -> None:
         step_size=args.step_size,
         clash_distance_scale=args.unbonded_distance_scale,
         clash_weight=args.unbonded_weight,
+        seed_mode=args.seed_mode,
+        mds_inflation=args.mds_inflation,
+        mds_jitter_scale=args.mds_jitter_scale,
+        mds_stress_steps=args.mds_stress_steps,
+        mds_stress_step_size=args.mds_stress_step_size,
     ).to(device)
     paths = evaluate_smiles(
         smiles=args.smiles,

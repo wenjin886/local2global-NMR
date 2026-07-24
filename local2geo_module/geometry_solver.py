@@ -17,6 +17,10 @@ from .constants import (
     SINGLE,
     TRIPLE,
 )
+from .seed_generator import (
+    detached_graph_distance_mds_seed,
+    graph_smoothed_seed,
+)
 
 
 class DifferentiableGeometrySolver(nn.Module):
@@ -37,6 +41,11 @@ class DifferentiableGeometrySolver(nn.Module):
         clash_smoothmax_temperature: float = 0.02,
         geometry_temperature: float = 0.15,
         graph_seed_smoothing: float = 0.5,
+        seed_mode: str = "differentiable",
+        mds_inflation: float = 1.15,
+        mds_jitter_scale: float = 0.08,
+        mds_stress_steps: int = 384,
+        mds_stress_step_size: float = 0.03,
         edge_temperature: float = 0.7,
         attachment_temperature: float = 0.7,
         gradient_clip: float = 5.0,
@@ -55,6 +64,15 @@ class DifferentiableGeometrySolver(nn.Module):
         self.clash_smoothmax_temperature = clash_smoothmax_temperature
         self.geometry_temperature = geometry_temperature
         self.graph_seed_smoothing = graph_seed_smoothing
+        if seed_mode not in {"differentiable", "mds"}:
+            raise ValueError(
+                "seed_mode must be 'differentiable' or 'mds'"
+            )
+        self.seed_mode = seed_mode
+        self.mds_inflation = mds_inflation
+        self.mds_jitter_scale = mds_jitter_scale
+        self.mds_stress_steps = mds_stress_steps
+        self.mds_stress_step_size = mds_stress_step_size
         self.edge_temperature = edge_temperature
         self.attachment_temperature = attachment_temperature
         self.gradient_clip = gradient_clip
@@ -275,34 +293,39 @@ class DifferentiableGeometrySolver(nn.Module):
         atom_mask: torch.Tensor,
         q: torch.Tensor,
     ) -> torch.Tensor:
-        batch, atoms = atom_mask.shape
-        dtype = q.dtype
-        index = torch.arange(
-            atoms, device=atom_mask.device, dtype=dtype
-        ) + 1.0
-        count = atom_mask.sum(dim=-1, keepdim=True).clamp_min(1).to(dtype)
-        golden = torch.pi * (3.0 - 5.0 ** 0.5)
-        phase = index[None, :] * golden
-        z = 1.0 - 2.0 * (index[None, :] - 0.5) / count
-        radius = torch.sqrt((1.0 - z.square()).clamp_min(0.0))
-        anchors = torch.stack([
-            radius * torch.cos(phase),
-            radius * torch.sin(phase),
-            z,
-        ], dim=-1)
-        scale = 1.5 * count.pow(1.0 / 3.0)
-        anchors = anchors * scale.unsqueeze(-1) * atom_mask.unsqueeze(-1)
+        return graph_smoothed_seed(
+            atom_mask,
+            q,
+            smoothing=self.graph_seed_smoothing,
+        )
 
-        degree = q.sum(dim=-1)
-        laplacian = torch.diag_embed(degree) - q
-        identity = torch.eye(
-            atoms, device=q.device, dtype=dtype
-        ).unsqueeze(0)
-        system = identity + self.graph_seed_smoothing * laplacian
-        seed = torch.linalg.solve(system, anchors)
-        seed = seed * atom_mask.unsqueeze(-1)
-        center = seed.sum(dim=1, keepdim=True) / count.unsqueeze(-1)
-        return (seed - center) * atom_mask.unsqueeze(-1)
+    def _make_seed(
+        self,
+        atom_mask: torch.Tensor,
+        probabilities: torch.Tensor,
+        geometry_probabilities: torch.Tensor,
+        covalent_radii: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.seed_mode == "mds":
+            return detached_graph_distance_mds_seed(
+                atom_mask,
+                probabilities,
+                covalent_radii,
+                self.bond_length_scales,
+                geometry_probabilities=geometry_probabilities,
+                geometry_cosines=self.geometry_cosines,
+                planar_geometry_index=PLANAR_GEOMETRY_INDEX,
+                inflation=self.mds_inflation,
+                jitter_scale=self.mds_jitter_scale,
+                stress_steps=self.mds_stress_steps,
+                stress_step_size=self.mds_stress_step_size,
+            )
+        q = (1.0 - probabilities[..., NONE]) * (
+            atom_mask[:, :, None] & atom_mask[:, None, :]
+        )
+        seed = self._fixed_seed(atom_mask, q)
+        hard_types = probabilities.argmax(dim=-1)
+        return seed, hard_types
 
     def terms(
         self,
@@ -489,13 +512,22 @@ class DifferentiableGeometrySolver(nn.Module):
         covalent_radii: torch.Tensor,
         vdw_radii: torch.Tensor,
         differentiable: bool,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-        q = (1.0 - probabilities[..., NONE]) * pair_mask
-        seed = self._fixed_seed(atom_mask, q)
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        Dict[str, torch.Tensor],
+        torch.Tensor,
+    ]:
+        seed, seed_hard_types = self._make_seed(
+            atom_mask,
+            probabilities,
+            geometry_probabilities,
+            covalent_radii,
+        )
         with torch.enable_grad():
             positions = seed
             if not positions.requires_grad:
-                positions = positions.requires_grad_(True)
+                positions = positions.detach().clone().requires_grad_(True)
             for _ in range(self.num_steps):
                 force_terms = self.terms(
                     positions,
@@ -545,7 +577,7 @@ class DifferentiableGeometrySolver(nn.Module):
             final_terms = {
                 key: value.detach() for key, value in final_terms.items()
             }
-        return seed, positions, final_terms
+        return seed, positions, final_terms, seed_hard_types
 
     def forward(
         self,
@@ -605,7 +637,7 @@ class DifferentiableGeometrySolver(nn.Module):
             )
             covalent_radii = self.covalent_radius_table[atomic_numbers]
             vdw_radii = self.vdw_radius_table[atomic_numbers]
-            seed, coordinates, terms = self._solve(
+            seed, coordinates, terms, seed_hard_types = self._solve(
                 graph["edge_probabilities"],
                 geometry_probabilities,
                 atom_mask,
@@ -618,6 +650,8 @@ class DifferentiableGeometrySolver(nn.Module):
             **graph,
             "geometry_probabilities": geometry_probabilities,
             "seed_coordinates": seed,
+            "seed_hard_bond_types": seed_hard_types,
+            "seed_mode": self.seed_mode,
             "coordinates": coordinates,
             "geometry_terms": terms,
             "covalent_radii": covalent_radii,

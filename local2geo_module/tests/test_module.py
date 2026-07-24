@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from local2geo_module.data import collate_local2geo, graph_from_smiles
-from local2geo_module.eval import evaluate_smiles
+from local2geo_module.eval import build_parser, evaluate_smiles
 from local2geo_module.geometry_solver import DifferentiableGeometrySolver
 from local2geo_module.soft_graph_simulator import SoftGraphSimulator
 
@@ -116,6 +116,102 @@ class ParameterFreeGeometrySolverTest(unittest.TestCase):
         for gradient in gradients:
             self.assertTrue(torch.isfinite(gradient).all())
             self.assertGreater(float(gradient.abs().sum()), 0.0)
+
+    def test_detached_mds_seed_keeps_relaxation_gradient_to_logits(self):
+        soft_graph = {
+            key: self._soft_graph()[key].clone().requires_grad_(True)
+            for key in ("heavy_edge_logits", "h_attachment_logits")
+        }
+        outputs = self._solve(
+            DifferentiableGeometrySolver(
+                num_steps=2,
+                seed_mode="mds",
+            ),
+            soft_graph,
+            differentiable=True,
+        )
+        self.assertEqual(outputs["seed_mode"], "mds")
+        self.assertFalse(outputs["seed_coordinates"].requires_grad)
+        self.assertTrue(torch.isfinite(outputs["coordinates"]).all())
+        gradients = torch.autograd.grad(
+            outputs["coordinates"].square().sum(),
+            (
+                soft_graph["heavy_edge_logits"],
+                soft_graph["h_attachment_logits"],
+            ),
+        )
+        for gradient in gradients:
+            self.assertTrue(torch.isfinite(gradient).all())
+            self.assertGreater(float(gradient.abs().sum()), 0.0)
+
+    def test_mds_seed_is_more_extended_for_a_long_chain(self):
+        batch = collate_local2geo([graph_from_smiles("CCCCCCCCCCCCC")])
+        graph = SoftGraphSimulator(logit_noise_std=0.0)(batch, seed=1)
+
+        def seed(mode):
+            return DifferentiableGeometrySolver(
+                num_steps=0,
+                seed_mode=mode,
+            )(
+                batch["atomic_numbers"],
+                batch["atom_mask"],
+                batch["heavy_mask"],
+                batch["hydrogen_mask"],
+                graph["heavy_edge_logits"],
+                graph["h_attachment_logits"],
+                differentiable=False,
+            )["seed_coordinates"]
+
+        differentiable_seed = seed("differentiable")
+        mds_seed = seed("mds")
+
+        def diameter(coordinates):
+            return torch.cdist(coordinates, coordinates).amax()
+
+        self.assertGreater(
+            float(diameter(mds_seed)),
+            1.5 * float(diameter(differentiable_seed)),
+        )
+
+    def test_mds_seed_stress_restores_tetrahedral_chain_angles(self):
+        batch = collate_local2geo([graph_from_smiles("CCCCCCCCCCCCC")])
+        graph = SoftGraphSimulator(logit_noise_std=0.0)(batch, seed=1)
+        outputs = DifferentiableGeometrySolver(
+            num_steps=0,
+            seed_mode="mds",
+        )(
+            batch["atomic_numbers"],
+            batch["atom_mask"],
+            batch["heavy_mask"],
+            batch["hydrogen_mask"],
+            graph["heavy_edge_logits"],
+            graph["h_attachment_logits"],
+            differentiable=False,
+        )
+        coordinates = outputs["seed_coordinates"][0]
+        hard_types = outputs["seed_hard_bond_types"][0]
+        atomic_numbers = batch["atomic_numbers"][0]
+        angles = []
+        for center in atomic_numbers.eq(6).nonzero().flatten():
+            neighbors = (
+                hard_types[center].gt(0) & atomic_numbers.eq(6)
+            ).nonzero().flatten()
+            if neighbors.numel() != 2:
+                continue
+            first = coordinates[neighbors[0]] - coordinates[center]
+            second = coordinates[neighbors[1]] - coordinates[center]
+            cosine = torch.dot(first, second) / (
+                first.norm() * second.norm()
+            )
+            angles.append(torch.rad2deg(torch.acos(cosine.clamp(-1, 1))))
+        mean_angle = torch.stack(angles).mean()
+        self.assertLess(float(mean_angle), 115.0)
+        self.assertGreater(float(mean_angle), 104.0)
+
+    def test_eval_defaults_to_mds_seed(self):
+        args = build_parser().parse_args(["--smiles", "CC"])
+        self.assertEqual(args.seed_mode, "mds")
+        self.assertEqual(args.mds_stress_steps, 384)
 
     def test_fixed_prior_solver_reduces_total_local_energy(self):
         solver = DifferentiableGeometrySolver(num_steps=64)

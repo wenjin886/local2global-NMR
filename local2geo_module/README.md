@@ -40,10 +40,17 @@ P, S, Cl, Br, and I, covering the current dataset. It raises on an unsupported
 element so extending the table is explicit rather than silently using an
 incorrect fallback.
 
-Coordinates are obtained by unrolled stress minimization from a deterministic
-graph-smoothed seed. With `differentiable=True`, every update uses
+Coordinates are obtained by unrolled stress minimization. The production
+solver retains the original differentiable graph-smoothed seed. Evaluation
+defaults to a detached seed constructed from hard bond-length-weighted shortest
+paths followed by classical MDS. A small deterministic 3D perturbation breaks
+the exact collinearity of path graphs. For the MDS path, VSEPR-weighted 1--3
+distance bounds, bond-distance projections, local stress, and an sp2 planarity
+term repair local geometry before the existing relaxation starts. With
+`differentiable=True`, every update after either seed uses
 `create_graph=True`, so downstream coordinate losses reach both heavy-edge and
-H-attachment logits.
+H-attachment logits through the soft relaxation terms. The detached MDS seed
+itself is deliberately outside that gradient path.
 
 ## Atom order and integration
 
@@ -88,11 +95,23 @@ No checkpoint is required:
 python -m local2geo_module.eval \
   --smiles "CCO" "c1ccccc1" \
   --input-mode clean-soft \
+  --seed-mode mds \
+  --mds-inflation 1.15 \
+  --mds-stress-steps 384 \
   --num-steps 256 \
   --unbonded-distance-scale 0.80 \
   --unbonded-weight 2.0 \
   --output-dir local2geo_outputs \
   --write-sdf
+```
+
+For a direct seed ablation with otherwise identical relaxation:
+
+```bash
+python -m local2geo_module.eval \
+  --smiles "CCCCCCCCCCCCC" \
+  --seed-mode differentiable \
+  --output-dir local2geo_outputs/soft_seed
 ```
 
 `--unbonded-distance-scale` multiplies the sum of the two vdW radii and
