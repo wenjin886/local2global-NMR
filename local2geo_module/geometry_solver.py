@@ -442,13 +442,23 @@ class DifferentiableGeometrySolver(nn.Module):
             )
         )
 
-        # Every pair which is not directly bonded receives the same soft
-        # excluded-volume lower bound. In particular, 1--3 pairs such as the
-        # H...H pairs in a methyl group remain active instead of being
-        # weakened or removed. Since q is a sharp-but-soft bond probability,
-        # (1 - q) keeps this constraint differentiable with respect to the
-        # incoming graph logits.
-        unbonded_weight = (1.0 - q) * pair_mask_f
+        # Generic vdW clash applies only beyond local 1--3 geometry. Bonded
+        # 1--2 pairs are removed by (1 - q), while soft two-hop connectivity
+        # removes 1--3 pairs whose distances are already controlled by the
+        # angle/VSEPR term. Normalizing the saturating map makes one clean
+        # two-edge path correspond to full exclusion without a hard threshold.
+        two_hop_mass = torch.bmm(q, q)
+        one_path_normalizer = 1.0 - torch.exp(
+            two_hop_mass.new_tensor(-1.0)
+        )
+        one_three_probability = (
+            (1.0 - torch.exp(-two_hop_mass)) / one_path_normalizer
+        ).clamp(0.0, 1.0)
+        unbonded_weight = (
+            (1.0 - q)
+            * (1.0 - one_three_probability)
+            * pair_mask_f
+        )
         vdw_sum = vdw_radii[:, :, None] + vdw_radii[:, None, :]
         penetration = self.clash_softness * F.softplus(
             (

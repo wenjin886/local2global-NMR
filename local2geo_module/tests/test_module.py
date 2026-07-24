@@ -241,11 +241,11 @@ class ParameterFreeGeometrySolverTest(unittest.TestCase):
             float(seed_terms["angle"]),
         )
 
-    def test_one_three_pairs_receive_full_unbonded_repulsion(self):
+    def test_one_three_pairs_are_excluded_from_generic_clash(self):
         solver = DifferentiableGeometrySolver(num_steps=0)
         # H(0)-C(1)-H(2): both C-H pairs are bonded, while H...H is a
-        # one-three pair. At 1.60 A it is above the old weakened 1-3 cutoff
-        # (0.62 * 2.40 A) but below the unified cutoff (0.80 * 2.40 A).
+        # one-three pair below the generic vdW cutoff. Its distance is governed
+        # by the local VSEPR/angle term and must not be pushed apart by clash.
         positions = torch.tensor(
             [[[-0.80, 0.0, 0.0], [0.0, 0.0, 0.0], [0.80, 0.0, 0.0]]],
             dtype=torch.float32,
@@ -267,7 +267,7 @@ class ParameterFreeGeometrySolverTest(unittest.TestCase):
         covalent_radii = torch.tensor([[0.31, 0.76, 0.31]])
         vdw_radii = torch.tensor([[1.20, 1.70, 1.20]])
 
-        terms = solver.terms(
+        local_terms = solver.terms(
             positions,
             probabilities,
             geometry_probabilities,
@@ -276,7 +276,22 @@ class ParameterFreeGeometrySolverTest(unittest.TestCase):
             covalent_radii,
             vdw_radii,
         )
-        self.assertGreater(float(terms["clash"]), 1e-3)
+        self.assertLess(float(local_terms["clash"]), 1e-8)
+
+        # With the two bonds removed, the same close coordinates are ordinary
+        # nonlocal unbonded pairs and must still receive clash repulsion.
+        unbonded_probabilities = torch.zeros_like(probabilities)
+        unbonded_probabilities[..., 0] = 1.0
+        nonlocal_terms = solver.terms(
+            positions,
+            unbonded_probabilities,
+            geometry_probabilities,
+            atom_mask,
+            pair_mask,
+            covalent_radii,
+            vdw_radii,
+        )
+        self.assertGreater(float(nonlocal_terms["clash"]), 1e-3)
 
     def test_batch_members_do_not_change_each_others_coordinates(self):
         one = collate_local2geo([self.samples[0]])
