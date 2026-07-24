@@ -96,7 +96,7 @@ callbacks:
     _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints
     filename: "{epoch:03d}"
-    monitor: val/heavy_fragment_score
+    monitor: val/graph_score
     mode: max
     save_last: true
     save_top_k: 3
@@ -121,7 +121,7 @@ trainer:
   check_val_every_n_epoch: 1
   num_sanity_val_steps: 2
 
-optimized_metric: val/heavy_fragment_score
+optimized_metric: val/graph_score
 ckpt_path: null
 
 hydra:

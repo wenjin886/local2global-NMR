@@ -32,6 +32,7 @@ class LitNMRToGraph(pl.LightningModule):
         self.criterion = criterion
         self.num_val_examples_to_log = num_val_examples_to_log
         self._validation_examples = []
+        self._graph_validation_examples = []
         # Deprecated no-op accepted only so an existing experiment config can
         # still instantiate this module while resuming its checkpoint.
         _ = check_bond_order
@@ -119,6 +120,7 @@ class LitNMRToGraph(pl.LightningModule):
             add_dataloader_idx=False,
         )
         self._collect_validation_examples(outputs, batch)
+        self._collect_graph_validation_examples(outputs, batch)
 
     def test_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "test", teacher_force_smiles=False)
@@ -130,21 +132,11 @@ class LitNMRToGraph(pl.LightningModule):
             smiles_mode: str,
     ) -> Dict[str, torch.Tensor]:
         zero = outputs["fragment_logits"].sum() * 0.0
-
-        edge_accuracy = None
-        if outputs.get("heavy_edge_logits") is not None:
-            edge_mask = outputs["heavy_edge_mask"] & torch.triu(
-                torch.ones_like(outputs["heavy_edge_mask"], dtype=torch.bool),
-                diagonal=1,
-            )
-            edge_mask = edge_mask & batch.bond_types.ge(0)
-            if edge_mask.any():
-                edge_prediction = outputs["heavy_edge_logits"].argmax(dim=-1)
-                edge_accuracy = (
-                    edge_prediction[edge_mask] == batch.bond_types[edge_mask]
-                ).float().mean()
-            else:
-                edge_accuracy = zero
+        graph_metrics = (
+            self._graph_metrics(outputs, batch)
+            if outputs.get("heavy_edge_logits") is not None
+            else {}
+        )
 
         fragment_prediction = outputs["fragment_logits"].argmax(dim=-1)
         fragment_scores = []
@@ -274,13 +266,83 @@ class LitNMRToGraph(pl.LightningModule):
                 heavy_neighbor_count_violation_rates
             ),
         }
-        if edge_accuracy is not None:
-            metrics["edge_accuracy"] = edge_accuracy
+        metrics.update(graph_metrics)
         if outputs.get("h_attachment_logits") is None:
             metrics.pop("h_attachment_multiset_accuracy")
             metrics.pop("h_count_mae")
         metrics.update(self._smiles_metrics(outputs, batch, smiles_mode))
         return metrics
+
+    @staticmethod
+    def _graph_metrics(
+            outputs: Dict[str, object],
+            batch: GraphBatch,
+    ) -> Dict[str, torch.Tensor]:
+        """Molecule-macro heavy-edge metrics without none-class domination."""
+        predictions = outputs["heavy_edge_logits"].argmax(dim=-1)
+        graph_scores = []
+        existence_f1s = []
+        typed_bond_recalls = []
+        for sample_index in range(predictions.size(0)):
+            valid_pairs = outputs["heavy_edge_mask"][sample_index] & torch.triu(
+                torch.ones_like(
+                    outputs["heavy_edge_mask"][sample_index],
+                    dtype=torch.bool,
+                ),
+                diagonal=1,
+            )
+            valid_pairs &= batch.bond_types[sample_index].ge(0)
+            predicted = predictions[sample_index, valid_pairs]
+            target = batch.bond_types[sample_index, valid_pairs]
+            if target.numel() == 0:
+                continue
+
+            predicted_exists = predicted.ne(0)
+            target_exists = target.ne(0)
+            true_positive = (predicted_exists & target_exists).sum().float()
+            predicted_positive = predicted_exists.sum().float()
+            target_positive = target_exists.sum().float()
+
+            precision = torch.where(
+                predicted_positive.gt(0),
+                true_positive / predicted_positive.clamp_min(1.0),
+                target_positive.eq(0).to(dtype=true_positive.dtype),
+            )
+            recall = torch.where(
+                target_positive.gt(0),
+                true_positive / target_positive.clamp_min(1.0),
+                torch.ones_like(true_positive),
+            )
+            existence_f1 = torch.where(
+                (precision + recall).gt(0),
+                2 * precision * recall / (precision + recall),
+                torch.zeros_like(precision),
+            )
+            typed_correct = (
+                predicted.eq(target) & target_exists
+            ).sum().float()
+            typed_bond_recall = torch.where(
+                target_positive.gt(0),
+                typed_correct / target_positive.clamp_min(1.0),
+                predicted_positive.eq(0).to(dtype=typed_correct.dtype),
+            )
+            graph_score = torch.sqrt(
+                (existence_f1 * typed_bond_recall).clamp_min(0.0)
+            )
+            existence_f1s.append(existence_f1)
+            typed_bond_recalls.append(typed_bond_recall)
+            graph_scores.append(graph_score)
+
+        zero = outputs["heavy_edge_logits"].sum() * 0.0
+
+        def mean(values):
+            return torch.stack(values).mean() if values else zero
+
+        return {
+            "graph_score": mean(graph_scores),
+            "bond_existence_f1": mean(existence_f1s),
+            "typed_bond_recall": mean(typed_bond_recalls),
+        }
 
     def _smiles_metrics(
             self,
@@ -329,6 +391,7 @@ class LitNMRToGraph(pl.LightningModule):
 
     def on_validation_epoch_start(self) -> None:
         self._validation_examples = []
+        self._graph_validation_examples = []
 
     def _format_fragments(
             self,
@@ -382,7 +445,9 @@ class LitNMRToGraph(pl.LightningModule):
             predicted_valid = predicted_molecule is not None
             non_stereo_exact = False
             target_composition = self._composition_from_atomic_numbers(
-                batch.atom_types[sample_index, batch.atom_mask[sample_index]].tolist()
+                batch.atom_types[
+                    sample_index, batch.atom_mask[sample_index]
+                ].tolist()
             )
             predicted_composition = None
             if predicted_molecule is not None and target_molecule is not None:
@@ -422,34 +487,277 @@ class LitNMRToGraph(pl.LightningModule):
                 predicted_fragments,
             ])
 
+    def _collect_graph_validation_examples(
+            self,
+            outputs: Dict[str, object],
+            batch: GraphBatch,
+    ) -> None:
+        if (
+            self.num_val_examples_to_log <= 0
+            or self.trainer.sanity_checking
+            or outputs.get("heavy_edge_logits") is None
+            or outputs.get("h_attachment_logits") is None
+        ):
+            return
+        remaining = (
+            self.num_val_examples_to_log
+            - len(self._graph_validation_examples)
+        )
+        if remaining <= 0:
+            return
+        predicted_edge_types = outputs["heavy_edge_logits"].argmax(dim=-1)
+        predicted_h_attachments = outputs["h_attachment_logits"].argmax(dim=-1)
+        for sample_index in range(min(remaining, batch.atom_types.size(0))):
+            self._graph_validation_examples.append({
+                "atom_types": batch.atom_types[sample_index].detach().cpu(),
+                "atom_mask": batch.atom_mask[sample_index].detach().cpu(),
+                "target_edge_types": (
+                    batch.bond_types[sample_index].detach().cpu()
+                ),
+                "predicted_edge_types": (
+                    predicted_edge_types[sample_index].detach().cpu()
+                ),
+                "target_h_attachments": (
+                    batch.h_attachment[sample_index].detach().cpu()
+                ),
+                "predicted_h_attachments": (
+                    predicted_h_attachments[sample_index].detach().cpu()
+                ),
+            })
+
     def on_validation_epoch_end(self) -> None:
         if (
-            not self._validation_examples
-            or self.trainer.sanity_checking
+            self.trainer.sanity_checking
             or not self.trainer.is_global_zero
         ):
             return
-        columns = [
-            "epoch",
-            "target_smiles",
-            "predicted_smiles",
-            "smiles_exact",
-            "smiles_valid",
-            "smiles_non_stereo_exact",
-            "target_composition",
-            "predicted_composition",
-            "composition_exact",
-            "target_fragments",
-            "predicted_fragments",
-        ]
         for logger in self.trainer.loggers:
-            if hasattr(logger, "log_table"):
+            if hasattr(logger, "log_table") and self._validation_examples:
                 logger.log_table(
                     key="val/examples",
-                    columns=columns,
+                    columns=[
+                        "epoch",
+                        "target_smiles",
+                        "predicted_smiles",
+                        "smiles_exact",
+                        "smiles_valid",
+                        "smiles_non_stereo_exact",
+                        "target_composition",
+                        "predicted_composition",
+                        "composition_exact",
+                        "target_fragments",
+                        "predicted_fragments",
+                    ],
                     data=self._validation_examples,
                     step=self.global_step,
                 )
+        if not self._graph_validation_examples:
+            return
+
+        import wandb
+
+        graph_rows = []
+        for example in self._graph_validation_examples:
+            target_graph = self._explicit_h_graph(
+                atom_types=example["atom_types"],
+                atom_mask=example["atom_mask"],
+                edge_types=example["target_edge_types"],
+                h_attachments=example["target_h_attachments"],
+            )
+            predicted_graph = self._explicit_h_graph(
+                atom_types=example["atom_types"],
+                atom_mask=example["atom_mask"],
+                edge_types=example["predicted_edge_types"],
+                h_attachments=example["predicted_h_attachments"],
+            )
+            positions = self._graph_layout(target_graph)
+            graph_rows.append([
+                wandb.Image(self._render_graph(target_graph, positions)),
+                wandb.Image(self._render_graph(predicted_graph, positions)),
+            ])
+
+        for logger in self.trainer.loggers:
+            if hasattr(logger, "log_table"):
+                logger.log_table(
+                    key="val/graph_examples",
+                    columns=["target_graph", "predicted_graph_raw"],
+                    data=graph_rows,
+                    step=self.global_step,
+                )
+
+    @staticmethod
+    def _explicit_h_graph(
+            atom_types: torch.Tensor,
+            atom_mask: torch.Tensor,
+            edge_types: torch.Tensor,
+            h_attachments: torch.Tensor,
+    ):
+        import networkx as nx
+
+        graph = nx.Graph()
+        valid_nodes = atom_mask.bool().nonzero(as_tuple=False).flatten().tolist()
+        for node_index in valid_nodes:
+            graph.add_node(
+                node_index,
+                atomic_number=int(atom_types[node_index]),
+            )
+
+        heavy_nodes = [
+            node_index
+            for node_index in valid_nodes
+            if int(atom_types[node_index]) != 1
+        ]
+        for left_position, left_node in enumerate(heavy_nodes):
+            for right_node in heavy_nodes[left_position + 1:]:
+                bond_type = int(edge_types[left_node, right_node])
+                if bond_type > 0:
+                    graph.add_edge(
+                        left_node,
+                        right_node,
+                        bond_type=bond_type,
+                    )
+
+        valid_node_set = set(valid_nodes)
+        for hydrogen_node in valid_nodes:
+            if int(atom_types[hydrogen_node]) != 1:
+                continue
+            parent_node = int(h_attachments[hydrogen_node])
+            if (
+                    parent_node in valid_node_set
+                    and int(atom_types[parent_node]) != 1
+            ):
+                graph.add_edge(
+                    hydrogen_node,
+                    parent_node,
+                    bond_type=1,
+                )
+        return graph
+
+    @staticmethod
+    def _graph_layout(graph):
+        import networkx as nx
+
+        if graph.number_of_nodes() == 1:
+            node = next(iter(graph.nodes))
+            return {node: (0.0, 0.0)}
+        return nx.spring_layout(graph, seed=0)
+
+    @staticmethod
+    def _render_graph(graph, positions):
+        import networkx as nx
+        import numpy as np
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
+        element_symbols = {
+            1: "H",
+            6: "C",
+            7: "N",
+            8: "O",
+            9: "F",
+            14: "Si",
+            15: "P",
+            16: "S",
+            17: "Cl",
+            35: "Br",
+            53: "I",
+        }
+        element_colors = {
+            1: "#F2F2F2",
+            6: "#4A4A4A",
+            7: "#4C78A8",
+            8: "#E45756",
+            9: "#72B7B2",
+            14: "#B8A48A",
+            15: "#F2A541",
+            16: "#EAC435",
+            17: "#54A24B",
+            35: "#A65F5F",
+            53: "#7A5195",
+        }
+        figure_size = min(10.0, max(5.0, graph.number_of_nodes() ** 0.5 * 1.4))
+        figure = Figure(figsize=(figure_size, figure_size), dpi=120)
+        canvas = FigureCanvasAgg(figure)
+        axis = figure.add_subplot(111)
+        axis.set_axis_off()
+
+        nodes = list(graph.nodes)
+        atomic_numbers = [
+            int(graph.nodes[node]["atomic_number"]) for node in nodes
+        ]
+        labels = {
+            node: (
+                f"{element_symbols.get(atomic_number, f'Z{atomic_number}')}"
+                f"{node}"
+            )
+            for node, atomic_number in zip(nodes, atomic_numbers)
+        }
+        nx.draw_networkx_nodes(
+            graph,
+            positions,
+            nodelist=nodes,
+            node_color=[
+                element_colors.get(atomic_number, "#BDBDBD")
+                for atomic_number in atomic_numbers
+            ],
+            node_size=[
+                260 if atomic_number == 1 else 520
+                for atomic_number in atomic_numbers
+            ],
+            edgecolors="#222222",
+            linewidths=0.8,
+            ax=axis,
+        )
+        nx.draw_networkx_labels(
+            graph,
+            positions,
+            labels=labels,
+            font_size=7,
+            font_color="black",
+            ax=axis,
+        )
+
+        bond_styles = {
+            1: (1.5, "solid"),
+            2: (3.0, "solid"),
+            3: (4.5, "solid"),
+            4: (2.0, "dashed"),
+        }
+        for bond_type, (width, style) in bond_styles.items():
+            edges = [
+                (left, right)
+                for left, right, attributes in graph.edges(data=True)
+                if int(attributes["bond_type"]) == bond_type
+            ]
+            if edges:
+                nx.draw_networkx_edges(
+                    graph,
+                    positions,
+                    edgelist=edges,
+                    width=width,
+                    style=style,
+                    edge_color="#333333",
+                    ax=axis,
+                )
+        edge_labels = {
+            (left, right): {2: "=", 3: "≡", 4: "ar"}[int(attributes["bond_type"])]
+            for left, right, attributes in graph.edges(data=True)
+            if int(attributes["bond_type"]) in {2, 3, 4}
+        }
+        if edge_labels:
+            nx.draw_networkx_edge_labels(
+                graph,
+                positions,
+                edge_labels=edge_labels,
+                font_size=7,
+                rotate=False,
+                ax=axis,
+            )
+        figure.tight_layout(pad=0.2)
+        canvas.draw()
+        image = np.asarray(canvas.buffer_rgba())[..., :3].copy()
+        figure.clear()
+        return image
 
     def _decode_smiles(self, token_ids: torch.Tensor) -> str:
         tokens = []

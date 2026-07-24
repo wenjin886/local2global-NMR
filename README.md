@@ -135,6 +135,18 @@ fragment argmax predictions additionally report the fraction of heavy atoms
 whose predicted number of directly bonded neighbors exceeds the
 dataset-observed element limit.
 
+When heavy-edge prediction is enabled, checkpoint selection uses the
+molecule-macro graph score:
+
+```text
+graph_score = sqrt(bond_existence_f1 * typed_bond_recall)
+```
+
+`bond_existence_f1` ignores bond type and evaluates whether each heavy-atom pair
+is connected. `typed_bond_recall` counts a target bond only when both its atom
+pair and bond class are correct. This avoids the large no-bond class dominating
+the monitor.
+
 The datamodule deterministically samples 1024 validation molecules for greedy
 SMILES generation:
 
@@ -155,6 +167,14 @@ This reuses the existing greedy outputs and does not run an additional
 generation pass. A
 `LearningRateMonitor` records the optimizer learning rate at every step,
 including warmup.
+
+For full-graph training, the same deterministic subset supplies the first 10
+graph examples without an additional forward pass. `val/graph_examples` has
+exactly two W&B columns, `target_graph` and `predicted_graph_raw`. Both are
+NetworkX renderings of the complete explicit-H graph. The predicted rendering
+contains only bonds actually selected by the heavy-edge and H-attachment
+argmaxes; it performs no RDKit sanitization, graph repair, or error
+highlighting.
 
 ## Heavy-fragment neighbor-count constraint
 
