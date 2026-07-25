@@ -1,0 +1,70 @@
+{
+  "overall": {
+    "bonded_to_nonbonded_pair_ratio": 0.10089153046062407,
+    "heavy_component_count_histogram": {
+      "1": 200
+    },
+    "isolated_heavy_atom_ratio": 0.0,
+    "isolated_heavy_atom_types": {},
+    "multiple_heavy_components_ratio": 0.0,
+    "num_bonded_heavy_pairs": 4753,
+    "num_heavy_atoms": 4441,
+    "num_isolated_heavy_atoms": 0,
+    "num_molecules": 200,
+    "num_molecules_multiple_heavy_components": 0,
+    "num_molecules_single_heavy_atom": 0,
+    "num_nonbonded_heavy_pairs": 47110,
+    "single_heavy_atom_molecule_ratio": 0.0
+  },
+  "test": {
+    "bonded_to_nonbonded_pair_ratio": 0.09601745771958538,
+    "heavy_component_count_histogram": {
+      "1": 20
+    },
+    "isolated_heavy_atom_ratio": 0.0,
+    "isolated_heavy_atom_types": {},
+    "multiple_heavy_components_ratio": 0.0,
+    "num_bonded_heavy_pairs": 528,
+    "num_heavy_atoms": 489,
+    "num_isolated_heavy_atoms": 0,
+    "num_molecules": 20,
+    "num_molecules_multiple_heavy_components": 0,
+    "num_molecules_single_heavy_atom": 0,
+    "num_nonbonded_heavy_pairs": 5499,
+    "single_heavy_atom_molecule_ratio": 0.0
+  },
+  "train": {
+    "bonded_to_nonbonded_pair_ratio": 0.10202352216116276,
+    "heavy_component_count_histogram": {
+      "1": 170
+    },
+    "isolated_heavy_atom_ratio": 0.0,
+    "isolated_heavy_atom_types": {},
+    "multiple_heavy_components_ratio": 0.0,
+    "num_bonded_heavy_pairs": 3973,
+    "num_heavy_atoms": 3716,
+    "num_isolated_heavy_atoms": 0,
+    "num_molecules": 170,
+    "num_molecules_multiple_heavy_components": 0,
+    "num_molecules_single_heavy_atom": 0,
+    "num_nonbonded_heavy_pairs": 38942,
+    "single_heavy_atom_molecule_ratio": 0.0
+  },
+  "val": {
+    "bonded_to_nonbonded_pair_ratio": 0.09441738478831023,
+    "heavy_component_count_histogram": {
+      "1": 10
+    },
+    "isolated_heavy_atom_ratio": 0.0,
+    "isolated_heavy_atom_types": {},
+    "multiple_heavy_components_ratio": 0.0,
+    "num_bonded_heavy_pairs": 252,
+    "num_heavy_atoms": 236,
+    "num_isolated_heavy_atoms": 0,
+    "num_molecules": 10,
+    "num_molecules_multiple_heavy_components": 0,
+    "num_molecules_single_heavy_atom": 0,
+    "num_nonbonded_heavy_pairs": 2669,
+    "single_heavy_atom_molecule_ratio": 0.0
+  }
+}

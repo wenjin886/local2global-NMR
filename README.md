@@ -359,6 +359,22 @@ datamodule.batch_transform.normalize_h_j: false
 Compute normalization statistics from the training split only and reuse that
 same `dataset_infos_train.json` for validation and test normalization/mapping.
 
+To audit whether a non-isolation constraint is valid and measure heavy-pair
+class imbalance, scan the materialized targets directly:
+
+```bash
+python preprocess/count_graph_connectivity.py \
+  --data_dir data/uspto/preprocessed
+```
+
+The script processes one split at a time and writes
+`graph_connectivity_stats.json`. It reports the fraction of molecules with
+multiple heavy connected components, isolated-heavy counts and element types,
+single-heavy-atom molecules, and the bonded/nonbonded unordered heavy-pair
+ratio. It uses only `h` and `bond_types`; RDKit and SMILES parsing are not
+needed, although the Python package used to serialize each `.pt` sample must be
+installed to load it.
+
 ## Training curriculum
 
 ### Stage 1: fragments only
