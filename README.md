@@ -174,7 +174,10 @@ exactly two W&B columns, `target_graph` and `predicted_graph_raw`. Both are
 NetworkX renderings of the complete explicit-H graph. The predicted rendering
 contains only bonds actually selected by the heavy-edge and H-attachment
 argmaxes; it performs no RDKit sanitization, graph repair, or error
-highlighting.
+highlighting. Only target heavy-atom coordinates are shared between the two
+panels. Hydrogens are independently arranged around their own target or
+predicted parent, so permutation-invariant H slots do not create misleading
+long bonds across the molecule.
 
 ## Heavy-fragment neighbor-count constraint
 
@@ -202,6 +205,22 @@ full-graph config enables the constraint with weight `0.01`. The lookup is a
 non-persistent buffer, and deprecated `heavy_degree_*` configuration names are
 accepted as aliases for checkpoint/config compatibility. H-parent fragment
 supervision is retained and is not subject to this overflow constraint.
+
+Full-graph training also constrains the graph actually realized by the edge and
+H-attachment heads. For every heavy atom:
+
+```text
+expected_heavy_neighbors = sum_j (1 - p(edge_ij = none))
+expected_H_neighbors = sum_h p(h -> i)
+expected_total_neighbors
+    = expected_heavy_neighbors + expected_H_neighbors
+```
+
+`edge_total_neighbor_count_overflow` applies the same normalized squared
+overflow against the dataset-observed element cap. It is fully differentiable,
+counts every non-none heavy bond as one neighbor irrespective of bond order,
+and uses soft H assignments rather than supplementing hydrogens from valence.
+`train_uspto_graph.yaml` enables it with weight `0.01`.
 
 ## H-to-heavy retrieval
 

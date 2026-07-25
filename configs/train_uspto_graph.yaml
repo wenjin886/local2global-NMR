@@ -83,6 +83,7 @@ lit_module:
     h_count_weight: 0.25
     h_entropy_weight: 0.0
     edge_weight: 1.0
+    edge_total_neighbor_count_weight: 0.01
     fragment_edge_consistency_weight: 0.25
     smiles_weight: 1.0
     permutation_invariant_hydrogens: true

@@ -207,6 +207,44 @@ def test_heavy_neighbor_count_loss_penalizes_only_neighbor_overflow():
     ).item() > 0
 
 
+def test_edge_total_neighbor_count_includes_soft_edges_and_h_attachments():
+    atom_types = torch.tensor([[1, 6, 8]])
+    heavy_mask = torch.tensor([[False, True, True]])
+    edge_mask = torch.zeros((1, 3, 3), dtype=torch.bool)
+    edge_mask[0, 1, 2] = edge_mask[0, 2, 1] = True
+    edge_logits = torch.full((1, 3, 3, 5), -2.0)
+    edge_logits[..., 0] = 2.0
+    edge_logits[0, 1, 2, 0] = edge_logits[0, 2, 1, 0] = -2.0
+    edge_logits[0, 1, 2, 1] = edge_logits[0, 2, 1, 1] = 2.0
+    edge_logits.requires_grad_()
+    attachment_probabilities = torch.zeros((1, 3, 3))
+    attachment_probabilities[0, 0, 1] = 1.0
+    outputs = {
+        "fragment_logits": torch.zeros(
+            1, 3, len(BOND_TYPE_CANDIDATES), 5
+        ),
+        "heavy_edge_logits": edge_logits,
+        "heavy_edge_mask": edge_mask,
+        "h_attachment_probabilities": attachment_probabilities,
+        "heavy_mask": heavy_mask,
+    }
+
+    permissive = NMRGraphLoss()
+    assert permissive.edge_total_neighbor_count_overflow_loss(
+        outputs, atom_types
+    ).item() == 0.0
+
+    constrained = NMRGraphLoss(
+        max_heavy_neighbor_counts={6: 1, 8: 1}
+    )
+    loss = constrained.edge_total_neighbor_count_overflow_loss(
+        outputs, atom_types
+    )
+    assert loss.item() > 0.0
+    loss.backward()
+    assert torch.count_nonzero(edge_logits.grad) > 0
+
+
 def test_legacy_degree_aliases_are_checkpoint_safe():
     legacy_config_criterion = NMRGraphLoss(
         heavy_degree_weight=0.25,

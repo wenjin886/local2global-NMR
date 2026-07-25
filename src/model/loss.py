@@ -24,6 +24,7 @@ class NMRGraphLoss(nn.Module):
             h_count_weight: float = 0.25,
             h_entropy_weight: float = 0.0,
             edge_weight: float = 1.0,
+            edge_total_neighbor_count_weight: float = 0.0,
             fragment_edge_consistency_weight: float = 0.25,
             smiles_weight: float = 0.0,
             edge_class_weights: Optional[torch.Tensor] = None,
@@ -64,6 +65,9 @@ class NMRGraphLoss(nn.Module):
         self.h_count_weight = h_count_weight
         self.h_entropy_weight = h_entropy_weight
         self.edge_weight = edge_weight
+        self.edge_total_neighbor_count_weight = (
+            edge_total_neighbor_count_weight
+        )
         self.fragment_edge_consistency_weight = fragment_edge_consistency_weight
         self.smiles_weight = smiles_weight
         self.permutation_invariant_hydrogens = permutation_invariant_hydrogens
@@ -355,6 +359,45 @@ class NMRGraphLoss(nn.Module):
             logits[mask], bond_types[mask].long(), weight=self.edge_class_weights
         )
 
+    def edge_total_neighbor_count_overflow_loss(
+            self,
+            outputs: Mapping[str, object],
+            atom_types: torch.Tensor,
+    ) -> torch.Tensor:
+        """Limit total neighbors realized by soft edges and H attachments."""
+        edge_probabilities = torch.softmax(
+            outputs["heavy_edge_logits"], dim=-1
+        )
+        edge_exists = 1.0 - edge_probabilities[..., 0]
+        edge_exists = edge_exists * outputs["heavy_edge_mask"].to(
+            dtype=edge_exists.dtype
+        )
+        expected_heavy_neighbors = edge_exists.sum(dim=-1)
+        expected_h_neighbors = outputs[
+            "h_attachment_probabilities"
+        ].sum(dim=1)
+        expected_total_neighbors = (
+            expected_heavy_neighbors + expected_h_neighbors
+        )
+
+        heavy_mask = outputs["heavy_mask"]
+        caps = self.heavy_neighbor_count_caps(atom_types)
+        unsupported = heavy_mask & caps.le(0)
+        if unsupported.any():
+            atomic_numbers = atom_types[unsupported].unique().tolist()
+            raise ValueError(
+                "Missing maximum-neighbor-count limits for heavy atoms: "
+                f"{atomic_numbers}"
+            )
+        valid = heavy_mask & caps.gt(0)
+        if not valid.any():
+            return outputs["heavy_edge_logits"].sum() * 0.0
+        normalized_overflow = (
+            torch.relu(expected_total_neighbors - caps)
+            / caps.clamp_min(1.0)
+        )
+        return normalized_overflow[valid].square().mean()
+
     @staticmethod
     def realized_fragment_counts(
             outputs: Mapping[str, object],
@@ -404,13 +447,16 @@ class NMRGraphLoss(nn.Module):
             self.h_attachment_weight,
             self.h_count_weight,
             self.h_entropy_weight,
+            self.edge_total_neighbor_count_weight,
         ))
         if attachment_required and outputs.get("h_attachment_probabilities") is None:
             raise ValueError(
                 "Attachment losses require model.predict_attachments=true"
             )
         edge_required = (
-            self.edge_weight != 0 or self.fragment_edge_consistency_weight != 0
+            self.edge_weight != 0
+            or self.edge_total_neighbor_count_weight != 0
+            or self.fragment_edge_consistency_weight != 0
         )
         if edge_required and outputs.get("heavy_edge_logits") is None:
             raise ValueError("Edge losses require model.predict_edges=true")
@@ -481,6 +527,11 @@ class NMRGraphLoss(nn.Module):
         losses["edge"] = (
             self.edge_loss(outputs, bond_types) if self.edge_weight != 0 else zero
         )
+        losses["edge_total_neighbor_count_overflow"] = (
+            self.edge_total_neighbor_count_overflow_loss(outputs, atom_types)
+            if self.edge_total_neighbor_count_weight != 0
+            else zero
+        )
         losses["fragment_edge_consistency"] = (
             self.fragment_edge_consistency_loss(outputs, atom_types)
             if self.fragment_edge_consistency_weight != 0
@@ -514,6 +565,8 @@ class NMRGraphLoss(nn.Module):
             + self.h_count_weight * losses["h_count"]
             + self.h_entropy_weight * losses["h_entropy"]
             + self.edge_weight * losses["edge"]
+            + self.edge_total_neighbor_count_weight
+            * losses["edge_total_neighbor_count_overflow"]
             + self.fragment_edge_consistency_weight
             * losses["fragment_edge_consistency"]
             + self.smiles_weight * losses["smiles"]

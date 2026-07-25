@@ -570,10 +570,14 @@ class LitNMRToGraph(pl.LightningModule):
                 edge_types=example["predicted_edge_types"],
                 h_attachments=example["predicted_h_attachments"],
             )
-            positions = self._graph_layout(target_graph)
+            heavy_positions = self._graph_layout(target_graph)
             graph_rows.append([
-                wandb.Image(self._render_graph(target_graph, positions)),
-                wandb.Image(self._render_graph(predicted_graph, positions)),
+                wandb.Image(
+                    self._render_graph(target_graph, heavy_positions)
+                ),
+                wandb.Image(
+                    self._render_graph(predicted_graph, heavy_positions)
+                ),
             ])
 
         for logger in self.trainer.loggers:
@@ -637,13 +641,75 @@ class LitNMRToGraph(pl.LightningModule):
     def _graph_layout(graph):
         import networkx as nx
 
-        if graph.number_of_nodes() == 1:
-            node = next(iter(graph.nodes))
+        heavy_nodes = [
+            node
+            for node, attributes in graph.nodes(data=True)
+            if int(attributes["atomic_number"]) != 1
+        ]
+        if not heavy_nodes:
+            return {}
+        if len(heavy_nodes) == 1:
+            node = heavy_nodes[0]
             return {node: (0.0, 0.0)}
-        return nx.spring_layout(graph, seed=0)
+        heavy_graph = graph.subgraph(heavy_nodes)
+        return nx.spring_layout(heavy_graph, seed=0)
 
     @staticmethod
-    def _render_graph(graph, positions):
+    def _place_hydrogens(graph, heavy_positions):
+        """Place H around its own parent without sharing H coordinates."""
+        import math
+        import numpy as np
+
+        positions = {
+            node: np.asarray(position, dtype=float).copy()
+            for node, position in heavy_positions.items()
+        }
+        if heavy_positions:
+            center = np.stack(list(positions.values())).mean(axis=0)
+        else:
+            center = np.zeros(2, dtype=float)
+        radius = 0.45 if len(heavy_positions) <= 1 else 0.18
+
+        for parent_node, parent_position in heavy_positions.items():
+            hydrogen_nodes = sorted(
+                neighbor
+                for neighbor in graph.neighbors(parent_node)
+                if int(graph.nodes[neighbor]["atomic_number"]) == 1
+            )
+            if not hydrogen_nodes:
+                continue
+            outward = np.asarray(parent_position) - center
+            if np.linalg.norm(outward) > 1e-8:
+                base_angle = math.atan2(outward[1], outward[0])
+            else:
+                base_angle = parent_node * 2.399963229728653
+            angular_step = min(0.75, math.pi / max(len(hydrogen_nodes), 1))
+            offset_center = (len(hydrogen_nodes) - 1) / 2
+            for offset, hydrogen_node in enumerate(hydrogen_nodes):
+                angle = base_angle + (offset - offset_center) * angular_step
+                positions[hydrogen_node] = (
+                    np.asarray(parent_position)
+                    + radius * np.array([math.cos(angle), math.sin(angle)])
+                )
+
+        unplaced_hydrogens = [
+            node
+            for node, attributes in graph.nodes(data=True)
+            if (
+                int(attributes["atomic_number"]) == 1
+                and node not in positions
+            )
+        ]
+        for offset, hydrogen_node in enumerate(sorted(unplaced_hydrogens)):
+            angle = 2 * math.pi * offset / max(len(unplaced_hydrogens), 1)
+            positions[hydrogen_node] = center + 1.2 * np.array([
+                math.cos(angle),
+                math.sin(angle),
+            ])
+        return positions
+
+    @staticmethod
+    def _render_graph(graph, heavy_positions):
         import networkx as nx
         import numpy as np
         from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -680,6 +746,9 @@ class LitNMRToGraph(pl.LightningModule):
         canvas = FigureCanvasAgg(figure)
         axis = figure.add_subplot(111)
         axis.set_axis_off()
+        positions = LitNMRToGraph._place_hydrogens(
+            graph, heavy_positions
+        )
 
         nodes = list(graph.nodes)
         atomic_numbers = [
@@ -687,8 +756,12 @@ class LitNMRToGraph(pl.LightningModule):
         ]
         labels = {
             node: (
-                f"{element_symbols.get(atomic_number, f'Z{atomic_number}')}"
-                f"{node}"
+                "H"
+                if atomic_number == 1
+                else (
+                    f"{element_symbols.get(atomic_number, f'Z{atomic_number}')}"
+                    f"{node}"
+                )
             )
             for node, atomic_number in zip(nodes, atomic_numbers)
         }
