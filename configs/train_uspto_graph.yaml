@@ -7,7 +7,8 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-2-nmr2graph-edge
-exp_name: dim512-finetunefromepoch38
+exp_name: dim512-finetunefromepoch38_bs64
+# exp_name: dim256-finetunefromepoch42
 
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
@@ -15,6 +16,9 @@ log_path: ${output_dir}/logs
 
 only_load_weights: true
 ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2graph/refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1_2026-07-23_12-14-26/checkpoints/epoch=038.ckpt
+
+# only_load_weights: false
+# ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-2-nmr2graph-edge/dim256-finetunefromepoch42_2026-07-25_14-54-19/checkpoints/epoch=002.ckpt
 
 hidden_dim: 512
 num_heads: 8
@@ -25,8 +29,8 @@ datamodule:
   train_path: ${data_path}/train.pt
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
-  train_batch_size: 128
-  val_batch_size: 64
+  train_batch_size: 64
+  val_batch_size: 32
   num_workers: 4
   pin_memory: true
   val_generation_size: 1024
@@ -74,7 +78,7 @@ lit_module:
     _target_: src.model.loss.NMRGraphLoss
     heavy_fragment_weight: 1.0
     heavy_fragment_presence_weight: 0.25
-    heavy_neighbor_count_weight: 0.01
+    heavy_neighbor_count_weight: 0.1
     max_heavy_neighbor_counts:
       6: 4
       7: 4
@@ -92,9 +96,9 @@ lit_module:
     h_count_weight: 0.25
     h_entropy_weight: 0.0
     edge_weight: 1.0
-    edge_total_neighbor_count_weight: 0.01
+    edge_total_neighbor_count_weight: 0.1
     fragment_edge_consistency_weight: 0.25
-    smiles_weight: 1.0
+    smiles_weight: 0.25
     permutation_invariant_hydrogens: true
   lr: 2e-4
   weight_decay: 1e-12

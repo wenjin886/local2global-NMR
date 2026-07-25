@@ -227,16 +227,32 @@ def preprocess_uspto_only_nmr_3d_coords(
         "test": {},
         "train": {},
     }
+    data_size_info ={
+        "only_nmr": {
+            "train": 0,
+            "test": 0,
+            "val": 0,
+        },
+        "coords_with_nmr": {
+            "train": 0,
+            "test": 0,
+            "val": 0,
+        }
+    }
     # compact nmr data
     for split in nmr_smiles_idx.keys():
         print(f"Step 1: Processing NMR data for {split}...")
+        save_path = osp.join(target_dir, f"{split}_only_nmr.pt")
+      
         nmr_data_list = torch.load(osp.join(nmr_dir, f"{split}.pt"))
         nmr_data_list = [compact_nmr_data(datai) for datai in nmr_data_list]
         nmr_smiles_idx[split] = {datai.isomeric_smiles: i for i,datai in enumerate(nmr_data_list)}
-        torch.save(nmr_data_list, osp.join(target_dir, f"{split}_only_nmr.pt"))
-        print(f"Step 1: Done processing NMR data for {split}...")
+        torch.save(nmr_data_list, save_path)
+        data_size_info["only_nmr"][split] = len(nmr_data_list)
+        print(f"Step 1: Done processing NMR data for {split}, saving to {save_path}")
         del nmr_data_list
-    
+            
+    print(nmr_smiles_idx)
     coord_data = {
         "train": [],
         "test": [],
@@ -251,19 +267,27 @@ def preprocess_uspto_only_nmr_3d_coords(
 
                 for nmr_split in nmr_smiles_idx.keys():
                     if smiles in nmr_smiles_idx[nmr_split]:
+                        print(f"Found {smiles} in {nmr_split}")
                         datai = convert_to_data(mol, smiles)
-                        coord_data[coord_split].append(datai)
-                        break
+                        coord_data[nmr_split].append(datai)
     
     for coord_split in coord_data.keys():
         nmr_data_split = torch.load(osp.join(target_dir, f"{coord_split}_only_nmr.pt"))
-        coord_data[coord_split] = [
-            add_nmr_to_coord_data(
-                datai, nmr_data_split, nmr_smiles_idx[coord_split]
-                ) for datai in coord_data[coord_split]]
-        torch.save(coord_data[coord_split], osp.join(target_dir, f"{coord_split}_with_nmr.pt"))
-        del coord_data[coord_split]
+        coord_data_with_nmr = []
+        for datai in tqdm(coord_data[coord_split], desc="Adding NMR to coordinates"):
+            coord_data_with_nmr.append(
+                add_nmr_to_coord_data(
+                    datai, nmr_data_split, nmr_smiles_idx[coord_split]
+                    )
+            )
+        torch.save(
+            coord_data_with_nmr, 
+            osp.join(target_dir, f"{coord_split}_with_nmr.pt"))
+        data_size_info["coords_with_nmr"][coord_split] = len(coord_data_with_nmr)
         del nmr_data_split
+    
+    with open(osp.join(target_dir, "data_size_info.json"), "w") as f:
+        json.dump(data_size_info, f)
             
     
         
@@ -277,8 +301,9 @@ def preprocess_uspto_only_nmr_3d_coords(
     pass
 
 if __name__ == "__main__":
-    # coords_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/download/preprocessed"
-    # tgt_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/uspto/preprocessed/3d_to_nmr"
-    # split_file = osp.join(osp.dirname(tgt_dir), "split_manifest.json")
+    coords_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/download/preprocessed"
     nmr_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/local2global/data/uspto/preprocessed"
-    preprocess_uspto_only_nmr_3d_coords(nmr_dir)
+    tgt_dir = osp.join(nmr_dir, "3d_to_nmr")
+    os.makedirs(tgt_dir, exist_ok=True)
+
+    preprocess_uspto_only_nmr_3d_coords(nmr_dir=nmr_dir,target_dir=tgt_dir, coords_dir=coords_dir)
