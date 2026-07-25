@@ -7,16 +7,16 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-2-nmr2graph-edge
-exp_name: dim256-finetunefromepoch42
+exp_name: dim512-finetunefromepoch38
 
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
 only_load_weights: true
-ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/test/refined_atom_nmr-neighborcountloss0.1—fragment_smiles-d256_2026-07-22_22-24-06/checkpoints/epoch=042.ckpt
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2graph/refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1_2026-07-23_12-14-26/checkpoints/epoch=038.ckpt
 
-hidden_dim: 256
+hidden_dim: 512
 num_heads: 8
 max_num_atoms: 101
 
