@@ -7,12 +7,12 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-1-nmr2graph
-exp_name: refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1
+exp_name: refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run2
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
-ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/test/refined_atom_nmr-neighborcountloss0.1—fragment_smiles-d512_2026-07-22_20-15-52/checkpoints/last.ckpt
+ckpt_path:/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2graph/refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1_2026-07-23_12-14-26/checkpoints/last.ckpt
 
 hidden_dim: 512
 num_heads: 8

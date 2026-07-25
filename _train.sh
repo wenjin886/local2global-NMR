@@ -26,7 +26,8 @@ export DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/d
 
 # echo "Data Preprocessing Done. Starting Training..."
 # Train Model
-python -m src.train -cn train_uspto_fragment
+# python -m src.train -cn train_uspto_fragment
+python -m src.train -cn train_uspto_graph
 
 
 

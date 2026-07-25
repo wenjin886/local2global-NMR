@@ -3,6 +3,7 @@ from typing import Optional
 import hydra
 import pytorch_lightning as pl
 from omegaconf import DictConfig
+import torch
 
 
 @hydra.main(config_path="../configs", version_base="1.3")
@@ -26,7 +27,13 @@ def main(cfg: DictConfig) -> Optional[float]:
         callbacks=callbacks,
         logger=logger,
     )
-    trainer.fit(lit_module, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
+    if cfg.get("only_load_weights", False):
+        lit_module.load_state_dict(
+            torch.load(cfg.ckpt_path)["state_dict"]
+        )
+        trainer.fit(lit_module, datamodule=datamodule)
+    else:
+        trainer.fit(lit_module, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
     if cfg.get("test", False):
         trainer.test(lit_module, datamodule=datamodule, ckpt_path="best")
     metric = cfg.get("optimized_metric")

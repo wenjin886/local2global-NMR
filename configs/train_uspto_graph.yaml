@@ -3,20 +3,29 @@ project: local2global-nmr
 train: true
 test: false
 
-data_path: ${oc.env:DATA_PATH,data/uspto/preprocessed}
-log_path: ${oc.env:LOG_PATH,logs}
-output_dir: ${hydra:runtime.output_dir}
+data_path: ${oc.env:DATA_PATH}
+data_name: uspto
+
+group: step-2-nmr2graph-edge
+exp_name: dim256-finetunefromepoch42
+
+exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
+log_path: ${output_dir}/logs
+
+only_load_weights: true
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/test/refined_atom_nmr-neighborcountloss0.1—fragment_smiles-d256_2026-07-22_22-24-06/checkpoints/epoch=042.ckpt
 
 hidden_dim: 256
 num_heads: 8
-max_num_atoms: 192
+max_num_atoms: 101
 
 datamodule:
   _target_: src.data.datamodule.NMRGraphDataModule
   train_path: ${data_path}/train.pt
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
-  train_batch_size: 32
+  train_batch_size: 128
   val_batch_size: 64
   num_workers: 4
   pin_memory: true
@@ -31,7 +40,7 @@ datamodule:
     normalize_h_j: true
     encode_multiplicity: false
     encode_smiles: false
-    max_multiplicity_classes: 512
+    max_multiplicity_classes: 122
 
 lit_module:
   _target_: src.lit.module.LitNMRToGraph
@@ -39,7 +48,7 @@ lit_module:
     _target_: src.model.nmr_to_graph.NMRToGraph
     hidden_dim: ${hidden_dim}
     num_heads: ${num_heads}
-    num_joint_layers: 3
+    num_joint_layers: 6
     num_atom_interaction_layers: 2
     num_fourier_features: 64
     max_num_atoms: ${max_num_atoms}
@@ -50,12 +59,12 @@ lit_module:
     use_h_integration: true
     use_h_multiplicity: true
     use_h_j: true
-    max_multiplicity_classes: 512
+    max_multiplicity_classes: 122
     use_smiles_loss: true
     use_smiles_conditioning: false
     smiles_memory: refined_atom_nmr
-    num_smiles_layers: 3
-    max_smiles_length: 256
+    num_smiles_layers: 6
+    max_smiles_length: 75
     smiles_vocab_path: ${data_path}/dataset_infos_train.json
     teacher_force_smiles_during_eval: false
     predict_attachments: true
@@ -111,6 +120,7 @@ logger:
     save_dir: ${output_dir}
     project: ${project}
     log_model: false
+    name: ${exp_name}
 
 trainer:
   _target_: pytorch_lightning.Trainer
@@ -123,7 +133,6 @@ trainer:
   num_sanity_val_steps: 2
 
 optimized_metric: val/graph_score
-ckpt_path: null
 
 hydra:
   run:
