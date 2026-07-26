@@ -28,6 +28,11 @@ def main(cfg: DictConfig) -> Optional[float]:
         logger=logger,
     )
     if cfg.get("only_load_weights", False):
+        if not cfg.get("ckpt_path"):
+            raise ValueError(
+                "only_load_weights=true requires ckpt_path to a previous "
+                "stage checkpoint"
+            )
         checkpoint = torch.load(cfg.ckpt_path, map_location="cpu")
         incompatible = lit_module.load_state_dict(
             checkpoint["state_dict"],

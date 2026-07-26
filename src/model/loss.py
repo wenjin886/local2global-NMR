@@ -131,7 +131,10 @@ class NMRGraphLoss(nn.Module):
 
     @staticmethod
     def _zero_like(outputs: Mapping[str, object]) -> torch.Tensor:
-        return outputs["fragment_logits"].sum() * 0.0
+        reference = outputs.get("smiles_logits")
+        if reference is None:
+            reference = outputs["fragment_logits"]
+        return reference.new_zeros(())
 
     @staticmethod
     def fragment_count_loss(
@@ -507,15 +510,24 @@ class NMRGraphLoss(nn.Module):
             raise ValueError("Edge losses require model.predict_edges=true")
 
         losses = {}
-        losses["heavy_fragment"] = self.fragment_count_loss(
-            outputs["fragment_logits"],
-            heavy_fragment_labels,
-            outputs["heavy_mask"],
+        zero = self._zero_like(outputs)
+        losses["heavy_fragment"] = (
+            self.fragment_count_loss(
+                outputs["fragment_logits"],
+                heavy_fragment_labels,
+                outputs["heavy_mask"],
+            )
+            if self.heavy_fragment_weight != 0
+            else zero
         )
-        losses["heavy_fragment_presence"] = self.fragment_presence_loss(
-            outputs["fragment_logits"],
-            heavy_fragment_labels,
-            outputs["heavy_mask"],
+        losses["heavy_fragment_presence"] = (
+            self.fragment_presence_loss(
+                outputs["fragment_logits"],
+                heavy_fragment_labels,
+                outputs["heavy_mask"],
+            )
+            if self.heavy_fragment_presence_weight != 0
+            else zero
         )
         losses["heavy_neighbor_count_overflow"] = (
             self.heavy_neighbor_count_overflow_loss(
@@ -524,19 +536,27 @@ class NMRGraphLoss(nn.Module):
             if self.heavy_neighbor_count_weight != 0
             else self._zero_like(outputs)
         )
-        (
-            losses["h_parent_fragment"],
-            losses["h_parent_type"],
-            losses["h_parent_presence"],
-        ) = self.permutation_invariant_h_environment_loss(
-            parent_type_logits=outputs["h_parent_type_logits"],
-            parent_fragment_logits=outputs["h_parent_fragment_logits"],
-            hydrogen_mask=outputs["hydrogen_mask"],
-            parent_types=h_parent_types,
-            parent_fragments=h_parent_fragment_labels,
-            parent_atom_types=outputs["parent_atom_types"],
-        )
-        zero = self._zero_like(outputs)
+        if any(weight != 0 for weight in (
+                self.h_parent_fragment_weight,
+                self.h_parent_type_weight,
+                self.h_parent_presence_weight,
+        )):
+            (
+                losses["h_parent_fragment"],
+                losses["h_parent_type"],
+                losses["h_parent_presence"],
+            ) = self.permutation_invariant_h_environment_loss(
+                parent_type_logits=outputs["h_parent_type_logits"],
+                parent_fragment_logits=outputs["h_parent_fragment_logits"],
+                hydrogen_mask=outputs["hydrogen_mask"],
+                parent_types=h_parent_types,
+                parent_fragments=h_parent_fragment_labels,
+                parent_atom_types=outputs["parent_atom_types"],
+            )
+        else:
+            losses["h_parent_fragment"] = zero
+            losses["h_parent_type"] = zero
+            losses["h_parent_presence"] = zero
         if self.h_attachment_weight != 0:
             if self.permutation_invariant_hydrogens:
                 losses["h_attachment"] = self._permutation_invariant_attachment_loss(

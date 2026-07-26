@@ -9,7 +9,11 @@ from src.data.constants import (
     HEAVY_ATOM_TYPES,
     SMILES_PAD_INDEX,
 )
-from src.nn.attention import MaskedCrossAttentionBlock, MaskedSelfAttentionEncoder
+from src.nn.attention import (
+    MaskedBiDirectionalCrossAttentionBlock,
+    MaskedCrossAttentionBlock,
+    MaskedSelfAttentionEncoder,
+)
 from src.nn.embedding import AtomSlotEmbedding, CNMRPeakEmbedding, HNMRPeakEmbedding
 from src.nn.smiles import NMRToSMILESDecoder
 from src.nn.graph import (
@@ -61,6 +65,7 @@ class NMRToGraph(nn.Module):
             max_multiplicity_classes: int = 512,
             use_smiles_loss: bool = False,
             use_smiles_conditioning: bool = False,
+            use_smiles_joint_bixt: bool = False,
             smiles_memory: str = "joint",
             num_smiles_layers: int = 3,
             max_smiles_length: int = 256,
@@ -103,6 +108,12 @@ class NMRToGraph(nn.Module):
         _xavier_initialize_matrices(self.joint_encoder)
         self.use_smiles_loss = use_smiles_loss
         self.use_smiles_conditioning = use_smiles_conditioning
+        self.use_smiles_joint_bixt = use_smiles_joint_bixt
+        if use_smiles_conditioning and use_smiles_joint_bixt:
+            raise ValueError(
+                "use_smiles_conditioning and use_smiles_joint_bixt are "
+                "mutually exclusive ablations"
+            )
         if smiles_memory not in {"joint", "refined_atom_nmr"}:
             raise ValueError(
                 "smiles_memory must be 'joint' or 'refined_atom_nmr'"
@@ -111,6 +122,8 @@ class NMRToGraph(nn.Module):
             raise ValueError(
                 "refined_atom_nmr memory cannot use decoder-to-atom conditioning"
             )
+        if smiles_memory != "joint" and use_smiles_joint_bixt:
+            raise ValueError("use_smiles_joint_bixt requires smiles_memory='joint'")
         self.smiles_memory = smiles_memory
         self.predict_attachments = predict_attachments
         self.predict_edges = predict_edges
@@ -124,7 +137,11 @@ class NMRToGraph(nn.Module):
         self.teacher_force_smiles_during_eval = teacher_force_smiles_during_eval
         self.max_smiles_length = max_smiles_length
         self.smiles_vocab = None
-        if use_smiles_loss or use_smiles_conditioning:
+        if (
+                use_smiles_loss
+                or use_smiles_conditioning
+                or use_smiles_joint_bixt
+        ):
             if smiles_vocab_path is not None:
                 with open(smiles_vocab_path, encoding="utf-8") as handle:
                     self.smiles_vocab = json.load(handle)["smiles_vocab"]
@@ -156,6 +173,20 @@ class NMRToGraph(nn.Module):
             )
             if use_smiles_conditioning else None
         )
+        # Deliberately restricted to one terminal block. Stacking a second
+        # bidirectional block would let teacher-forced future SMILES tokens
+        # enter the updated joint memory and leak back into earlier logits.
+        self.smiles_joint_bixt = (
+            MaskedBiDirectionalCrossAttentionBlock(
+                hidden_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+            )
+            if use_smiles_joint_bixt
+            else None
+        )
+        if self.smiles_joint_bixt is not None:
+            _xavier_initialize_matrices(self.smiles_joint_bixt)
         self.heavy_query_embedding = nn.Embedding(max_num_atoms, hidden_dim)
         self.heavy_query_decoder = MaskedCrossAttentionBlock(
             hidden_dim=hidden_dim,
@@ -247,6 +278,7 @@ class NMRToGraph(nn.Module):
                 input_mask=smiles_input_mask,
                 memory=memory,
                 memory_mask=memory_mask,
+                joint_fusion=self.smiles_joint_bixt,
             )
         max_steps = (
             smiles_input_ids.size(1)
@@ -257,6 +289,7 @@ class NMRToGraph(nn.Module):
             memory=memory,
             memory_mask=memory_mask,
             max_steps=max_steps,
+            joint_fusion=self.smiles_joint_bixt,
         )
 
     def forward(
@@ -311,16 +344,6 @@ class NMRToGraph(nn.Module):
 
         num_atoms = atom_types.size(1)
         num_h_peaks = h_nmr.size(1)
-        atom_features = joint_features[:, :num_atoms]
-        h_peak_features = joint_features[:, num_atoms:num_atoms + num_h_peaks]
-        c_peak_features = joint_features[:, num_atoms + num_h_peaks:]
-        peak_features, peak_mask = self._combine_spectra(
-            h_features=h_peak_features,
-            h_nmr_mask=h_nmr_mask,
-            c_features=c_peak_features,
-            c_nmr_mask=c_nmr_mask,
-        )
-
         smiles_outputs = None
         if self.smiles_memory == "joint":
             smiles_outputs = self._run_smiles_decoder(
@@ -330,6 +353,18 @@ class NMRToGraph(nn.Module):
                 smiles_input_mask=smiles_input_mask,
                 teacher_force_smiles=teacher_force_smiles,
             )
+            if self.smiles_joint_bixt is not None:
+                joint_features = smiles_outputs["updated_memory"]
+
+        atom_features = joint_features[:, :num_atoms]
+        h_peak_features = joint_features[:, num_atoms:num_atoms + num_h_peaks]
+        c_peak_features = joint_features[:, num_atoms + num_h_peaks:]
+        peak_features, peak_mask = self._combine_spectra(
+            h_features=h_peak_features,
+            h_nmr_mask=h_nmr_mask,
+            c_features=c_peak_features,
+            c_nmr_mask=c_nmr_mask,
+        )
 
         atom_smiles_attention = None
         if self.atom_smiles_layer is not None:
@@ -485,6 +520,10 @@ class NMRToGraph(nn.Module):
             "attention": {
                 "joint": joint_attention,
                 "atom_to_smiles": atom_smiles_attention,
+                "smiles_joint_bixt": (
+                    smiles_outputs["fusion_attention"]
+                    if smiles_outputs is not None else None
+                ),
                 "heavy_query_to_joint": heavy_query_attention,
                 "atom_interaction": interaction_attention,
                 "graph_joint": graph_joint_attention,

@@ -22,6 +22,7 @@ class NMRGraphDataModule(pl.LightningDataModule):
             batch_transform: Optional[Any] = None,
             val_generation_size: int = 1024,
             val_generation_seed: int = 0,
+            inference_only_validation: bool = False,
     ):
         super().__init__()
         if transform is not None and batch_transform is not None:
@@ -85,6 +86,12 @@ class NMRGraphDataModule(pl.LightningDataModule):
         return self._loader(self.train_dataset, self.hparams.train_batch_size, True)
 
     def val_dataloader(self):
+        if self.hparams.inference_only_validation:
+            return self._loader(
+                self.val_generation_dataset,
+                self.hparams.val_batch_size,
+                False,
+            )
         full = self._loader(self.val_dataset, self.hparams.val_batch_size, False)
         if len(self.val_generation_dataset) == 0:
             return full

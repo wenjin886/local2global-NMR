@@ -6,24 +6,19 @@ test: false
 data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
-group: step-2-nmr2graph-edge
-exp_name: dim512-finetunefromepoch38_bs64
-# exp_name: dim256-finetunefromepoch42
-
+group: step-0-nmr2smiles
+exp_name: joint-bixt-smiles-d512
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
-only_load_weights: true
-load_weights_strict: false
 ckpt_path: null
-# Supply the Stage-1 checkpoint on the command line.
-# ckpt_path: /path/to/fragment.ckpt
+only_load_weights: false
+load_weights_strict: true
 
 hidden_dim: 512
 num_heads: 8
 max_num_atoms: 101
-val_check_interval: 0.5
 inference_only_validation: true
 
 datamodule:
@@ -31,10 +26,10 @@ datamodule:
   train_path: ${data_path}/train.pt
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
-  train_batch_size: 64
-  val_batch_size: 32
-  num_workers: 4
-  pin_memory: true
+  train_batch_size: 128
+  val_batch_size: 64
+  num_workers: 0
+  pin_memory: false
   val_generation_size: 1024
   val_generation_seed: 0
   inference_only_validation: ${inference_only_validation}
@@ -75,52 +70,42 @@ lit_module:
     max_smiles_length: 75
     smiles_vocab_path: ${data_path}/dataset_infos_train.json
     teacher_force_smiles_during_eval: false
-    predict_attachments: true
-    predict_edges: true
-    use_graph_joint_encoder: true
+    predict_attachments: false
+    predict_edges: false
+    use_graph_joint_encoder: false
     num_graph_joint_layers: 1
     dropout: 0.1
   criterion:
     _target_: src.model.loss.NMRGraphLoss
-    heavy_fragment_weight: 1.0
-    heavy_fragment_presence_weight: 0.25
-    heavy_neighbor_count_weight: 0.1
-    max_heavy_neighbor_counts:
-      6: 4
-      7: 4
-      8: 2
-      9: 1
-      15: 4
-      16: 4
-      17: 1
-      35: 1
-      53: 1
-    h_parent_fragment_weight: 1.0
-    h_parent_presence_weight: 0.25
-    h_parent_type_weight: 0.25
-    h_attachment_weight: 1.0
-    h_count_weight: 0.25
+    heavy_fragment_weight: 0.0
+    heavy_fragment_presence_weight: 0.0
+    heavy_neighbor_count_weight: 0.0
+    h_parent_fragment_weight: 0.0
+    h_parent_presence_weight: 0.0
+    h_parent_type_weight: 0.0
+    h_attachment_weight: 0.0
+    h_count_weight: 0.0
     h_entropy_weight: 0.0
-    edge_weight: 1.0
-    edge_none_class_weight: 0.4
+    edge_weight: 0.0
+    edge_none_class_weight: 1.0
     edge_bond_class_weight: 1.0
-    edge_total_neighbor_count_weight: 0.1
-    fragment_edge_consistency_weight: 0.25
-    smiles_weight: 0.25
+    edge_total_neighbor_count_weight: 0.0
+    fragment_edge_consistency_weight: 0.0
+    smiles_weight: 1.0
     permutation_invariant_hydrogens: true
   lr: 2e-4
   weight_decay: 1e-12
   warm_up_steps: 100
   num_val_examples_to_log: 10
   inference_only_validation: ${inference_only_validation}
-  validation_stage: graph
+  validation_stage: smiles
 
 callbacks:
   model_checkpoint:
     _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints
-    filename: "{epoch:03d}-{step}"
-    monitor: val_inference/graph_score
+    filename: "{epoch:03d}"
+    monitor: val_inference/smiles_exact_accuracy
     mode: max
     save_last: true
     save_top_k: 3
@@ -143,13 +128,11 @@ trainer:
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
   max_epochs: 100
+  check_val_every_n_epoch: 1
   num_sanity_val_steps: 2
-  val_check_interval: ${val_check_interval}
-  # check_val_every_n_epoch: 1
 
-
-optimized_metric: val_inference/graph_score
+optimized_metric: val_inference/smiles_exact_accuracy
 
 hydra:
   run:
-    dir: ${log_path}/uspto_graph/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}
+    dir: ${log_path}

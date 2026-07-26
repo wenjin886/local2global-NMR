@@ -428,3 +428,135 @@ def test_smiles_teacher_forcing_loss_and_greedy_generation():
         generated = model(**batch.model_inputs())
     assert generated["smiles_teacher_forced"] is False
     assert generated["smiles_token_ids"].shape == batch.smiles_target_ids.shape
+
+
+def test_single_bixt_layer_updates_smiles_logits_and_joint_memory():
+    batch = collate_nmr_graph([make_sample(), make_sample()])
+    model = make_model(
+        use_smiles_loss=True,
+        use_smiles_joint_bixt=True,
+        smiles_memory="joint",
+        num_smiles_layers=1,
+        max_smiles_length=32,
+        smiles_vocab_size=6,
+    )
+    outputs = model(**batch.model_inputs(), teacher_force_smiles=True)
+    attention = outputs["attention"]["smiles_joint_bixt"]
+
+    assert attention["left_to_right"].shape[-2:] == (3, 9)
+    assert attention["right_to_left"].shape[-2:] == (9, 3)
+    assert outputs["joint_features"].shape == (2, 9, 32)
+    assert outputs["smiles_logits"].shape == (2, 3, 6)
+
+    (
+        outputs["smiles_logits"].sum()
+        + outputs["fragment_logits"].sum()
+    ).backward()
+    assert (
+        model.smiles_joint_bixt.left_output.weight.grad is not None
+    )
+    assert (
+        model.smiles_joint_bixt.right_output.weight.grad is not None
+    )
+    model.eval()
+    with torch.no_grad():
+        generated = model(**batch.model_inputs())
+    assert generated["smiles_teacher_forced"] is False
+    assert generated["attention"]["smiles_joint_bixt"] is not None
+    assert torch.equal(
+        generated["smiles_token_ids"],
+        generated["smiles_logits"].argmax(dim=-1),
+    )
+
+
+def test_terminal_bixt_teacher_forcing_does_not_leak_future_tokens():
+    batch = collate_nmr_graph([make_sample()])
+    model = make_model(
+        use_smiles_loss=True,
+        use_smiles_joint_bixt=True,
+        smiles_memory="joint",
+        num_smiles_layers=1,
+        max_smiles_length=32,
+        smiles_vocab_size=6,
+    )
+    model.eval()
+    original_inputs = batch.model_inputs()
+    changed_inputs = dict(original_inputs)
+    changed_ids = original_inputs["smiles_input_ids"].clone()
+    changed_ids[:, -1] = (changed_ids[:, -1] + 1) % 6
+    changed_inputs["smiles_input_ids"] = changed_ids
+
+    with torch.no_grad():
+        original = model(
+            **original_inputs, teacher_force_smiles=True
+        )
+        changed = model(
+            **changed_inputs, teacher_force_smiles=True
+        )
+
+    assert torch.allclose(
+        original["smiles_logits"][:, :-1],
+        changed["smiles_logits"][:, :-1],
+        atol=1e-6,
+    )
+    assert not torch.allclose(
+        original["smiles_logits"][:, -1],
+        changed["smiles_logits"][:, -1],
+    )
+
+
+def test_smiles_conditioning_and_bixt_are_mutually_exclusive():
+    try:
+        make_model(
+            use_smiles_loss=True,
+            use_smiles_conditioning=True,
+            use_smiles_joint_bixt=True,
+            smiles_vocab_size=6,
+        )
+    except ValueError as error:
+        assert "mutually exclusive" in str(error)
+    else:
+        raise AssertionError("Expected mutually exclusive conditioning error")
+
+
+def test_smiles_only_stage_does_not_train_fragment_parameters():
+    batch = collate_nmr_graph([make_sample(), make_sample()])
+    model = make_model(
+        use_smiles_loss=True,
+        use_smiles_joint_bixt=True,
+        smiles_memory="joint",
+        num_smiles_layers=1,
+        max_smiles_length=32,
+        smiles_vocab_size=6,
+        predict_attachments=False,
+        predict_edges=False,
+    )
+    criterion = NMRGraphLoss(
+        heavy_fragment_weight=0.0,
+        heavy_fragment_presence_weight=0.0,
+        heavy_neighbor_count_weight=0.0,
+        h_parent_fragment_weight=0.0,
+        h_parent_presence_weight=0.0,
+        h_parent_type_weight=0.0,
+        h_attachment_weight=0.0,
+        h_count_weight=0.0,
+        edge_weight=0.0,
+        fragment_edge_consistency_weight=0.0,
+        smiles_weight=1.0,
+    )
+    outputs = model(**batch.model_inputs())
+    loss, _ = criterion(
+        outputs=outputs,
+        atom_types=batch.atom_types,
+        bond_types=batch.bond_types,
+        h_attachment=batch.h_attachment,
+        heavy_fragment_labels=batch.heavy_fragment_labels,
+        h_parent_fragment_labels=batch.h_parent_fragment_labels,
+        h_parent_types=batch.h_parent_types,
+        smiles_target_ids=batch.smiles_target_ids,
+    )
+    loss.backward()
+
+    assert model.joint_encoder.layers[0].q_projection.weight.grad is not None
+    assert model.smiles_decoder.output_projection.weight.grad is not None
+    assert model.fragment_readout.readout[-1].weight.grad is None

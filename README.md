@@ -65,49 +65,40 @@ heavy-edge targets.
 This order is an internal training coordinate system. A final molecular graph
 can still be canonicalized after connectivity is predicted.
 
-## Optional SMILES auxiliary task
+## SMILES decoder and optional BiXT fusion
 
 A causal canonical-SMILES decoder can read either the original joint memory or
-the refined atom features together with the encoded NMR peaks. Three independent
-switches control its use:
+the refined atom/NMR memory. The staged configurations use:
 
 ```yaml
 lit_module.model.use_smiles_loss: true
-lit_module.criterion.smiles_weight: 1.0
 lit_module.model.use_smiles_conditioning: false
-lit_module.model.smiles_memory: refined_atom_nmr
+lit_module.model.use_smiles_joint_bixt: true
+lit_module.model.smiles_memory: joint
+lit_module.model.num_smiles_layers: 5
 ```
 
-`use_smiles_loss` enables the auxiliary sequence objective. With the default
-`use_smiles_conditioning: false`, the decoder is an independent training head:
-its hidden states and logits never enter the graph branch. `smiles_memory: joint`
-lets its loss update the joint encoder only. `smiles_memory: refined_atom_nmr`
-instead supplies the post-heavy-query/post-interaction atom features followed by
-the jointly encoded NMR peak features. The SMILES loss can then help distinguish
-ordered atom features and atom inventory while still leaving the graph forward
-path independent of generated SMILES.
+`use_smiles_joint_bixt` adds exactly one terminal bidirectional cross-attention
+block after the causal decoder. Following
+[BiXT](https://arxiv.org/abs/2402.12138), one shared atom/NMR-to-SMILES
+similarity matrix is normalized in both directions to update the SMILES hidden
+states and complete joint atom/H-NMR/C-NMR memory simultaneously. SMILES logits
+come from the updated hidden states, and downstream atom queries read the
+updated joint memory. During greedy generation, every next token is selected
+from the BiXT-updated logits.
 
-`use_smiles_conditioning` retains the earlier experimental interface that lets
-atom features read decoder hidden states. This creates the opposite dependency,
-so it is supported only with `smiles_memory: joint`; combining it with
-`refined_atom_nmr` would introduce a cycle and raises an explicit configuration
-error.
+The BiXT depth is intentionally fixed at one. Both directions are computed from
+pre-update inputs, so SMILES logits only read causal decoder states and the
+original joint memory. Feeding the SMILES-updated joint memory into a second
+BiXT block would leak later teacher-forced tokens back into earlier logits.
+With the implemented two-sided FFNs, five decoder layers plus terminal BiXT
+contains slightly more SMILES-path parameters than six decoder layers, but
+fewer than seven; it is therefore the intended near-six-layer comparison.
 
-Training and the full validation loader use teacher forcing. A separate fixed
-validation subset uses greedy self-conditioned generation, making the exposure
-gap visible without autoregressively decoding the entire validation set.
-For an explicit teacher-forced inference path, set:
-
-```yaml
-lit_module.model.teacher_force_smiles_during_eval: true
-```
-
-To run the proposed upper-bound conditioning experiment:
-
-```bash
-python src/train.py -cn train_uspto_graph \
-  lit_module.model.use_smiles_conditioning=true
-```
+`use_smiles_conditioning` retains the previous `atom_smiles_layer` for
+ablation, but it and `use_smiles_joint_bixt` are mutually exclusive. BiXT
+requires `smiles_memory: joint`; the refined-memory path remains available when
+BiXT is disabled.
 
 The generation target is canonical isomeric SMILES, so atom chirality and bond
 stereochemistry are preserved. `rxn.chemutils.tokenization.tokenize_smiles`
@@ -116,57 +107,47 @@ is built from the training split during preprocessing and stored in
 `dataset_infos_train.json` together with BOS/EOS/PAD/UNK control tokens. Validation
 and test tokens absent from the training vocabulary map to `<unk>`.
 
-## Validation metrics
+## Inference-only validation
 
-Checkpoint selection is independent of all loss weights and monitors:
-
-```text
-val/heavy_fragment_score
-    = sqrt(
-        heavy_fragment_presence_macro_f1
-        * heavy_fragment_positive_count_accuracy
-      )
-```
-
-Fragment metrics are computed per molecule and then averaged. Validation also
-reports atom-level fragment exact accuracy, permutation-invariant H-parent type
-and environment accuracy, H-attachment multiset accuracy, and H-count MAE. The
-fragment argmax predictions additionally report the fraction of heavy atoms
-whose predicted number of directly bonded neighbors exceeds the
-dataset-observed element limit.
-
-When heavy-edge prediction is enabled, checkpoint selection uses the
-molecule-macro graph score:
-
-```text
-graph_score = sqrt(bond_existence_f1 * typed_bond_recall)
-```
-
-`bond_existence_f1` ignores bond type and evaluates whether each heavy-atom pair
-is connected. `typed_bond_recall` counts a target bond only when both its atom
-pair and bond class are correct. This avoids the large no-bond class dominating
-the monitor.
-
-The datamodule deterministically samples 1024 validation molecules for greedy
-SMILES generation:
+Every stage validates on the same deterministic 1024-molecule subset:
 
 ```yaml
+inference_only_validation: true
 datamodule.val_generation_size: 1024
 datamodule.val_generation_seed: 0
 ```
 
-The full loader reports teacher-forced token accuracy and perplexity. The fixed
-subset reports greedy exact match, RDKit validity, stereo-agnostic exact match,
-and full element-composition exactness under the
-`val_generation/` namespace. The first 10 molecules of this deterministic
-subset are also logged once per epoch as a W&B table containing
+Validation never supplies teacher-forced SMILES. It performs greedy generation,
+feeds generated SMILES hidden states through BiXT, and executes the same
+fragment/graph path used at inference. The compact metric set is stage-aware:
+
+```text
+SMILES:
+  val_inference/smiles_exact_accuracy
+
+fragment:
+  val_inference/smiles_exact_accuracy
+  val_inference/heavy_fragment_score
+
+graph:
+  val_inference/smiles_exact_accuracy
+  val_inference/heavy_fragment_score
+  val_inference/graph_score
+  val_inference/edge_precision
+  val_inference/edge_recall
+  val_inference/predicted_to_target_edge_count_ratio
+```
+
+The fragment score is the geometric mean of fragment-presence macro-F1 and
+positive-count accuracy. The graph score is the geometric mean of
+bond-existence F1 and typed-bond recall. Checkpoint selection uses the main
+score for its stage and is independent of tunable loss weights.
+
+The first 10 molecules are still logged once per epoch as a W&B table containing
 target/predicted SMILES, validity, exactness, element compositions, and readable
-target/predicted heavy-atom fragment counts with `neighbors=current/maximum`
-summaries.
-This reuses the existing greedy outputs and does not run an additional
-generation pass. A
-`LearningRateMonitor` records the optimizer learning rate at every step,
-including warmup.
+target/predicted heavy-atom fragment counts. This reuses the greedy outputs and
+does not run an additional generation pass. A `LearningRateMonitor` records the
+optimizer learning rate at every step.
 
 For full-graph training, the same deterministic subset supplies the first 10
 graph examples without an additional forward pass. `val/graph_examples` has
@@ -197,11 +178,8 @@ F/Cl/Br/I 1, P 4, and S 4 in every split. These values are stored in
 `DEFAULT_MAX_NEIGHBOR_COUNTS` and can be overridden with
 `criterion.max_heavy_neighbor_counts`.
 
-`train_uspto_fragment.yaml` keeps
-`heavy_neighbor_count_weight: 0.0` and `smiles_memory: joint`, so checkpoints
-trained before this optional constraint and refined SMILES memory were added can
-continue training without changing their objective or parameter graph. The
-full-graph config enables the constraint with weight `0.01`. The lookup is a
+The SMILES-only stage disables this objective. Fragment and graph stages enable
+the fragment-side neighbor-count constraint with weight `0.1`. The lookup is a
 non-persistent buffer, and deprecated `heavy_degree_*` configuration names are
 accepted as aliases for checkpoint/config compatibility. H-parent fragment
 supervision is retained and is not subject to this overflow constraint.
@@ -225,7 +203,7 @@ and uses soft H assignments rather than supplementing hydrogens from valence.
 Heavy-edge cross entropy separately weights non-bonds and bonds. Edge class
 zero (`none`) uses `criterion.edge_none_class_weight`; every non-zero bond
 class uses the shared `criterion.edge_bond_class_weight`. The graph-training
-configuration uses `0.2` and `1.0`, respectively, to reduce domination by the
+configuration uses `0.4` and `1.0`, respectively, to reduce domination by the
 roughly ten-times-more-common non-bonded heavy-atom pairs. Both values default
 to `1.0`, so older configurations retain unweighted cross entropy.
 
@@ -406,45 +384,36 @@ installed to load it.
 
 ## Training curriculum
 
-### Stage 1: fragments only
+### Stage 0: joint encoder and SMILES
 
 ```bash
 DATA_PATH=data/uspto/preprocessed \
-python src/train.py -cn train_uspto_fragment
+python src/train.py -cn train_uspto_smiles
 ```
 
-Optimized losses:
+Only SMILES cross-entropy has non-zero weight. This pretrains the atom/NMR
+embeddings, joint encoder, five-layer causal decoder, and the SMILES-output side
+of terminal BiXT. Checkpoint selection uses greedy SMILES exact accuracy.
 
-```text
-heavy fragment count + presence
-H parent fragment count + presence
-H parent element
-```
-
-The fragment configuration sets `predict_attachments: false` and
-`predict_edges: false`. Attachment, H-context aggregation, and the dense
-`[B,N,N,3D]` heavy-edge readout are skipped entirely instead of being computed
-with zero loss weights. Training steps log losses only; molecule-wise Hungarian
-classification metrics are evaluated during validation.
-
-### Stage 2: add H-parent retrieval
-
-Start from the Stage-1 checkpoint and enable attachment/count losses while
-keeping edge losses disabled:
+### Stage 1: add fragments
 
 ```bash
-python src/train.py -cn train_uspto_graph \
-  ckpt_path=/path/to/fragment.ckpt \
-  lit_module.model.predict_edges=false \
-  lit_module.criterion.edge_weight=0 \
-  lit_module.criterion.fragment_edge_consistency_weight=0
+DATA_PATH=data/uspto/preprocessed \
+python src/train.py -cn train_uspto_fragment \
+  ckpt_path=/path/to/smiles.ckpt
 ```
 
-### Stage 3: full graph
+The fragment stage adds heavy-fragment and H-parent-environment supervision
+while retaining the SMILES objective. Attachment and edge prediction remain
+disabled. Non-strict weight loading initializes newly introduced or
+architecture-changed parameters while starting a new optimizer/scheduler.
+
+### Stage 2: full graph
 
 ```bash
+DATA_PATH=data/uspto/preprocessed \
 python src/train.py -cn train_uspto_graph \
-  ckpt_path=/path/to/attachment.ckpt
+  ckpt_path=/path/to/fragment.ckpt
 ```
 
 The full loss is:
@@ -476,10 +445,11 @@ attention
 
 These tensors can be used for pre/post-joint-encoder t-SNE, fragment linear
 probes, H-parent retrieval analysis, and joint atom-spectrum attention
-visualization. SMILES generation reads the joint memory as an auxiliary task;
-with `smiles_memory: refined_atom_nmr`, it instead reads the refined atom/NMR
-memory so its loss also supervises ordered atom refinement. Its decoder states
-still do not condition the graph pipeline by default.
+visualization. With `use_smiles_joint_bixt: true`, `joint_features` contains the
+SMILES-updated atom/NMR memory and `attention.smiles_joint_bixt` exposes both
+directions of the shared attention matrix. `graph_joint_features` contains the
+later fragment/H-context-aware atom/NMR refinement used by heavy-edge
+prediction.
 
 ## Installation and tests
 

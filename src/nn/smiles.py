@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 from torch import nn
@@ -76,14 +76,27 @@ class NMRToSMILESDecoder(nn.Module):
             input_mask: torch.Tensor,
             memory: torch.Tensor,
             memory_mask: torch.Tensor,
+            joint_fusion: Optional[nn.Module] = None,
     ) -> Dict[str, torch.Tensor]:
         hidden, logits = self.decode(input_ids, input_mask, memory, memory_mask)
+        updated_memory = memory
+        fusion_attention = None
+        if joint_fusion is not None:
+            hidden, updated_memory, fusion_attention = joint_fusion(
+                left=hidden,
+                right=memory,
+                left_mask=input_mask.bool(),
+                right_mask=memory_mask.bool(),
+            )
+            logits = self.output_projection(hidden)
         return {
             "hidden_states": hidden,
             "logits": logits,
             "mask": input_mask.bool(),
             "token_ids": logits.argmax(dim=-1),
             "teacher_forced": True,
+            "updated_memory": updated_memory,
+            "fusion_attention": fusion_attention,
         }
 
     def generate(
@@ -91,6 +104,7 @@ class NMRToSMILESDecoder(nn.Module):
             memory: torch.Tensor,
             memory_mask: torch.Tensor,
             max_steps: int,
+            joint_fusion: Optional[nn.Module] = None,
     ) -> Dict[str, torch.Tensor]:
         if max_steps > self.max_length:
             raise ValueError(
@@ -107,10 +121,20 @@ class NMRToSMILESDecoder(nn.Module):
         logit_steps = []
         output_masks = []
         generated_ids = []
+        updated_memory = memory
+        fusion_attention = None
         for _ in range(max_steps):
             hidden, logits = self.decode(
                 input_ids, input_mask, memory, memory_mask
             )
+            if joint_fusion is not None:
+                hidden, updated_memory, fusion_attention = joint_fusion(
+                    left=hidden,
+                    right=memory,
+                    left_mask=input_mask,
+                    right_mask=memory_mask.bool(),
+                )
+                logits = self.output_projection(hidden)
             step_hidden = hidden[:, -1]
             step_logits = logits[:, -1]
             next_ids = step_logits.argmax(dim=-1)
@@ -135,4 +159,6 @@ class NMRToSMILESDecoder(nn.Module):
             "mask": torch.stack(output_masks, dim=1),
             "token_ids": torch.stack(generated_ids, dim=1),
             "teacher_forced": False,
+            "updated_memory": updated_memory,
+            "fusion_attention": fusion_attention,
         }

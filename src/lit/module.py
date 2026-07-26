@@ -25,12 +25,20 @@ class LitNMRToGraph(pl.LightningModule):
             weight_decay: float = 1e-12,
             warm_up_steps: int = 100,
             num_val_examples_to_log: int = 10,
+            inference_only_validation: bool = False,
+            validation_stage: str = "graph",
             check_bond_order: bool = False,
     ):
         super().__init__()
         self.model = model
         self.criterion = criterion
         self.num_val_examples_to_log = num_val_examples_to_log
+        self.inference_only_validation = inference_only_validation
+        if validation_stage not in {"smiles", "fragment", "graph"}:
+            raise ValueError(
+                "validation_stage must be 'smiles', 'fragment', or 'graph'"
+            )
+        self.validation_stage = validation_stage
         self._validation_examples = []
         self._graph_validation_examples = []
         # Deprecated no-op accepted only so an existing experiment config can
@@ -106,6 +114,22 @@ class LitNMRToGraph(pl.LightningModule):
             batch_idx: int,
             dataloader_idx: int = 0,
     ):
+        if self.inference_only_validation:
+            outputs = self(batch, teacher_force_smiles=False)
+            metrics = self._inference_metrics(outputs, batch)
+            self.log_dict(
+                {
+                    "val_inference/%s" % key: value
+                    for key, value in metrics.items()
+                },
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch.atom_types.size(0),
+                add_dataloader_idx=False,
+            )
+            self._collect_validation_examples(outputs, batch)
+            self._collect_graph_validation_examples(outputs, batch)
+            return None
         if dataloader_idx == 0:
             return self._shared_step(
                 batch, "val", teacher_force_smiles=True
@@ -121,6 +145,82 @@ class LitNMRToGraph(pl.LightningModule):
         )
         self._collect_validation_examples(outputs, batch)
         self._collect_graph_validation_examples(outputs, batch)
+
+    def _inference_metrics(
+            self,
+            outputs: Dict[str, object],
+            batch: GraphBatch,
+    ) -> Dict[str, torch.Tensor]:
+        """Small, stage-aware metric set from the exact inference path."""
+        metrics = {}
+        predictions = outputs.get("smiles_token_ids")
+        if predictions is not None:
+            valid = batch.smiles_target_ids.ne(SMILES_PAD_INDEX)
+            correct = predictions.eq(batch.smiles_target_ids)
+            metrics["smiles_exact_accuracy"] = (
+                (correct | ~valid).all(dim=1).float().mean()
+            )
+        if self.validation_stage in {"fragment", "graph"}:
+            metrics["heavy_fragment_score"] = self._heavy_fragment_score(
+                outputs, batch
+            )
+        if self.validation_stage == "graph":
+            graph_metrics = self._graph_metrics(outputs, batch)
+            for key in (
+                "graph_score",
+                "edge_precision",
+                "edge_recall",
+                "predicted_to_target_edge_count_ratio",
+            ):
+                metrics[key] = graph_metrics[key]
+        return metrics
+
+    @staticmethod
+    def _heavy_fragment_score(
+            outputs: Dict[str, object],
+            batch: GraphBatch,
+    ) -> torch.Tensor:
+        predictions = outputs["fragment_logits"].argmax(dim=-1)
+        scores = []
+        for sample_index in range(predictions.size(0)):
+            heavy = outputs["heavy_mask"][sample_index]
+            target = batch.heavy_fragment_labels[sample_index, heavy]
+            predicted = predictions[sample_index, heavy]
+            valid = target.ge(0)
+            if target.numel() == 0:
+                continue
+            target_presence = target.gt(0)
+            predicted_presence = predicted.gt(0)
+            tp = (
+                valid & target_presence & predicted_presence
+            ).sum(dim=0).float()
+            fp = (
+                valid & ~target_presence & predicted_presence
+            ).sum(dim=0).float()
+            fn = (
+                valid & target_presence & ~predicted_presence
+            ).sum(dim=0).float()
+            denominator = 2 * tp + fp + fn
+            supported = denominator.gt(0)
+            presence_f1 = (
+                (2 * tp[supported] / denominator[supported]).mean()
+                if supported.any()
+                else predictions.sum() * 0.0 + 1.0
+            )
+            positive = valid & target.gt(0)
+            positive_accuracy = (
+                predicted[positive].eq(target[positive]).float().mean()
+                if positive.any()
+                else predictions.sum() * 0.0 + 1.0
+            )
+            scores.append(
+                torch.sqrt(
+                    (presence_f1 * positive_accuracy).clamp_min(0.0)
+                )
+            )
+        if scores:
+            return torch.stack(scores).mean()
+        return predictions.sum() * 0.0
 
     def test_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "test", teacher_force_smiles=False)
@@ -282,6 +382,9 @@ class LitNMRToGraph(pl.LightningModule):
         predictions = outputs["heavy_edge_logits"].argmax(dim=-1)
         graph_scores = []
         existence_f1s = []
+        existence_precisions = []
+        existence_recalls = []
+        predicted_to_target_ratios = []
         typed_bond_recalls = []
         for sample_index in range(predictions.size(0)):
             valid_pairs = outputs["heavy_edge_mask"][sample_index] & torch.triu(
@@ -330,6 +433,11 @@ class LitNMRToGraph(pl.LightningModule):
                 (existence_f1 * typed_bond_recall).clamp_min(0.0)
             )
             existence_f1s.append(existence_f1)
+            existence_precisions.append(precision)
+            existence_recalls.append(recall)
+            predicted_to_target_ratios.append(
+                predicted_positive / target_positive.clamp_min(1.0)
+            )
             typed_bond_recalls.append(typed_bond_recall)
             graph_scores.append(graph_score)
 
@@ -341,6 +449,11 @@ class LitNMRToGraph(pl.LightningModule):
         return {
             "graph_score": mean(graph_scores),
             "bond_existence_f1": mean(existence_f1s),
+            "edge_precision": mean(existence_precisions),
+            "edge_recall": mean(existence_recalls),
+            "predicted_to_target_edge_count_ratio": mean(
+                predicted_to_target_ratios
+            ),
             "typed_bond_recall": mean(typed_bond_recalls),
         }
 
@@ -462,17 +575,20 @@ class LitNMRToGraph(pl.LightningModule):
                 predicted_composition = self._molecule_composition(
                     predicted_molecule
                 )
-            heavy_mask = outputs["heavy_mask"][sample_index]
-            target_fragments = self._format_fragments(
-                batch.atom_types[sample_index],
-                batch.heavy_fragment_labels[sample_index],
-                heavy_mask,
-            )
-            predicted_fragments = self._format_fragments(
-                batch.atom_types[sample_index],
-                fragment_predictions[sample_index],
-                heavy_mask,
-            )
+            target_fragments = ""
+            predicted_fragments = ""
+            if self.validation_stage != "smiles":
+                heavy_mask = outputs["heavy_mask"][sample_index]
+                target_fragments = self._format_fragments(
+                    batch.atom_types[sample_index],
+                    batch.heavy_fragment_labels[sample_index],
+                    heavy_mask,
+                )
+                predicted_fragments = self._format_fragments(
+                    batch.atom_types[sample_index],
+                    fragment_predictions[sample_index],
+                    heavy_mask,
+                )
             self._validation_examples.append([
                 int(self.current_epoch),
                 target_smiles,
