@@ -154,6 +154,49 @@ def test_full_graph_loss_backpropagates_without_valence_term():
     assert model.edge_readout.mlp[-1].weight.grad is not None
 
 
+def test_graph_joint_encoder_refines_all_atoms_with_nmr_before_edge_readout():
+    batch = collate_nmr_graph([make_sample(), make_sample()])
+    model = make_model(
+        use_graph_joint_encoder=True,
+        num_graph_joint_layers=1,
+    )
+    outputs = model(**batch.model_inputs())
+
+    assert outputs["graph_joint_features"].shape == (2, 9, 32)
+    assert outputs["graph_atom_features"].shape == (2, 6, 32)
+    assert outputs["attention"]["graph_joint"].shape[-2:] == (9, 9)
+    assert torch.allclose(
+        outputs["heavy_edge_logits"],
+        outputs["heavy_edge_logits"].transpose(1, 2),
+        atol=1e-6,
+    )
+
+    outputs["heavy_edge_logits"].sum().backward()
+    graph_projection_gradient = (
+        model.graph_joint_encoder.layers[0].q_projection.weight.grad
+    )
+    assert graph_projection_gradient is not None
+    assert torch.count_nonzero(graph_projection_gradient) > 0
+
+
+def test_graph_joint_encoder_is_optional_for_old_model_state():
+    old_model = make_model(use_graph_joint_encoder=False)
+    new_model = make_model(
+        use_graph_joint_encoder=True,
+        num_graph_joint_layers=1,
+    )
+    incompatible = new_model.load_state_dict(
+        old_model.state_dict(), strict=False
+    )
+
+    assert incompatible.unexpected_keys == []
+    assert incompatible.missing_keys
+    assert all(
+        key.startswith("graph_joint_encoder.")
+        for key in incompatible.missing_keys
+    )
+
+
 def test_fragment_only_stage_has_no_edge_or_attachment_gradient():
     batch = collate_nmr_graph([make_sample()])
     model = make_model(predict_attachments=False, predict_edges=False)

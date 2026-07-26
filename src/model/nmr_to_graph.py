@@ -69,6 +69,8 @@ class NMRToGraph(nn.Module):
             teacher_force_smiles_during_eval: bool = False,
             predict_attachments: bool = True,
             predict_edges: bool = True,
+            use_graph_joint_encoder: bool = False,
+            num_graph_joint_layers: int = 1,
             dropout: float = 0.0,
     ):
         super().__init__()
@@ -114,6 +116,11 @@ class NMRToGraph(nn.Module):
         self.predict_edges = predict_edges
         if predict_edges and not predict_attachments:
             raise ValueError("predict_edges requires predict_attachments")
+        if use_graph_joint_encoder and not predict_edges:
+            raise ValueError("use_graph_joint_encoder requires predict_edges")
+        if use_graph_joint_encoder and num_graph_joint_layers <= 0:
+            raise ValueError("num_graph_joint_layers must be positive")
+        self.use_graph_joint_encoder = use_graph_joint_encoder
         self.teacher_force_smiles_during_eval = teacher_force_smiles_during_eval
         self.max_smiles_length = max_smiles_length
         self.smiles_vocab = None
@@ -185,6 +192,18 @@ class NMRToGraph(nn.Module):
             hidden_dim=hidden_dim,
         )
         self.h_context_aggregator = HydrogenContextAggregator(hidden_dim=hidden_dim)
+        self.graph_joint_encoder = (
+            MaskedSelfAttentionEncoder(
+                hidden_dim=hidden_dim,
+                num_heads=num_heads,
+                num_layers=num_graph_joint_layers,
+                dropout=dropout,
+            )
+            if use_graph_joint_encoder
+            else None
+        )
+        if self.graph_joint_encoder is not None:
+            _xavier_initialize_matrices(self.graph_joint_encoder)
         self.edge_readout = HeavyEdgeReadout(
             hidden_dim=hidden_dim,
             num_bond_types=num_bond_types,
@@ -381,6 +400,8 @@ class NMRToGraph(nn.Module):
         assigned_h_count = None
         edge_logits = None
         heavy_edge_mask = None
+        graph_joint_features = None
+        graph_joint_attention = None
         if self.predict_edges:
             fragment_conditioned_features, expected_fragment_counts = (
                 self.fragment_conditioner(
@@ -396,6 +417,20 @@ class NMRToGraph(nn.Module):
                     heavy_mask=heavy_mask,
                 )
             )
+            if self.graph_joint_encoder is not None:
+                graph_joint_input = torch.cat(
+                    [refined_atom_features, peak_features], dim=1
+                )
+                graph_joint_mask = torch.cat(
+                    [atom_mask, peak_mask], dim=1
+                )
+                graph_joint_features, graph_joint_attention = (
+                    self.graph_joint_encoder(
+                        graph_joint_input,
+                        graph_joint_mask,
+                    )
+                )
+                refined_atom_features = graph_joint_features[:, :num_atoms]
             edge_logits, heavy_edge_mask = self.edge_readout(
                 refined_atom_features,
                 heavy_mask,
@@ -408,6 +443,7 @@ class NMRToGraph(nn.Module):
             "atom_features": atom_features,
             "heavy_query_features": atom_features,
             "graph_atom_features": refined_atom_features,
+            "graph_joint_features": graph_joint_features,
             "joint_features": joint_features,
             "peak_features": peak_features,
             "h_peak_features": h_peak_features,
@@ -451,5 +487,6 @@ class NMRToGraph(nn.Module):
                 "atom_to_smiles": atom_smiles_attention,
                 "heavy_query_to_joint": heavy_query_attention,
                 "atom_interaction": interaction_attention,
+                "graph_joint": graph_joint_attention,
             },
         }

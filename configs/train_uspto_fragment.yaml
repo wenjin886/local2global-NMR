@@ -12,7 +12,7 @@ exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
-ckpt_path:/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2graph/refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1_2026-07-23_12-14-26/checkpoints/last.ckpt
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2graph/refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1_2026-07-23_12-14-26/checkpoints/last.ckpt
 
 hidden_dim: 512
 num_heads: 8
@@ -67,6 +67,8 @@ lit_module:
     teacher_force_smiles_during_eval: false
     predict_attachments: false
     predict_edges: false
+    use_graph_joint_encoder: false
+    num_graph_joint_layers: 1
     dropout: 0.1
   criterion:
     _target_: src.model.loss.NMRGraphLoss

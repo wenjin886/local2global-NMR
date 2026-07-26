@@ -229,6 +229,28 @@ configuration uses `0.2` and `1.0`, respectively, to reduce domination by the
 roughly ten-times-more-common non-bonded heavy-atom pairs. Both values default
 to `1.0`, so older configurations retain unweighted cross entropy.
 
+Immediately before heavy-edge readout, the optional graph joint encoder
+concatenates all fragment/H-context-refined atom tokens (including explicit H)
+with the jointly encoded H-NMR and C-NMR peak tokens. Masked self-attention then
+lets updated atoms and spectra interact globally, and the atom-token portion of
+its output is used for pairwise edge classification:
+
+```text
+[refined atom tokens; H-NMR tokens; C-NMR tokens]
+                         |
+             graph joint self-attention
+                         |
+              refined heavy-edge features
+```
+
+`use_graph_joint_encoder` controls this stage and
+`num_graph_joint_layers` controls its depth. The graph configuration enables
+one layer; the default remains disabled for architectural compatibility. Since
+enabling it introduces new trainable parameters, the graph configuration loads
+an older checkpoint as weights with `load_weights_strict: false` and starts a
+new optimizer/scheduler state rather than attempting a full training-state
+resume.
+
 ## H-to-heavy retrieval
 
 H attachment is a dynamic classifier whose class count is the number of heavy

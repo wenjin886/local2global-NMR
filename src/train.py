@@ -28,9 +28,17 @@ def main(cfg: DictConfig) -> Optional[float]:
         logger=logger,
     )
     if cfg.get("only_load_weights", False):
-        lit_module.load_state_dict(
-            torch.load(cfg.ckpt_path)["state_dict"]
+        checkpoint = torch.load(cfg.ckpt_path, map_location="cpu")
+        incompatible = lit_module.load_state_dict(
+            checkpoint["state_dict"],
+            strict=cfg.get("load_weights_strict", True),
         )
+        if not cfg.get("load_weights_strict", True):
+            print(
+                "Loaded checkpoint weights non-strictly: "
+                f"{len(incompatible.missing_keys)} missing keys, "
+                f"{len(incompatible.unexpected_keys)} unexpected keys"
+            )
         trainer.fit(lit_module, datamodule=datamodule)
     else:
         trainer.fit(lit_module, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
@@ -45,4 +53,3 @@ def main(cfg: DictConfig) -> Optional[float]:
 
 if __name__ == "__main__":
     main()
-
