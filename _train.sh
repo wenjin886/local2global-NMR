@@ -24,13 +24,13 @@ export DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/d
 #   --seed 0 \
 #   --keep_duplicate_records
 
-python -m preprocess.count_graph_connectivity \
-  --data_dir $DATA_PATH \
-  --output $DATA_PATH/graph_connectivity_stats.json
+# python -m preprocess.count_graph_connectivity \
+#   --data_dir $DATA_PATH \
+#   --output $DATA_PATH/graph_connectivity_stats.json
 # echo "Data Preprocessing Done. Starting Training..."
 # Train Model
 # python -m src.train -cn train_uspto_fragment
-# python -m src.train -cn train_uspto_graph
+python -m src.train -cn train_uspto_graph
 
 
 

@@ -7,18 +7,22 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-2-nmr2graph-edge
-exp_name: dim512-finetunefromepoch38_bs64
+exp_name: dim512-nonebondw0.4-graphjoinencoder-finetunefromepoch38-bs64
 # exp_name: dim256-finetunefromepoch42
 
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
-only_load_weights: true
+
 load_weights_strict: false
-ckpt_path: null
-# Supply the Stage-1 checkpoint on the command line.
-# ckpt_path: /path/to/fragment.ckpt
+
+only_load_weights: true
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2graph/refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1_2026-07-23_12-14-26/checkpoints/epoch=038.ckpt
+
+# only_load_weights: true
+# ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-2-nmr2graph-edge/dim512-finetunefromepoch38_bs64_2026-07-26_00-17-30/checkpoints/last.ckpt
+
 
 hidden_dim: 512
 num_heads: 8
@@ -33,7 +37,7 @@ datamodule:
   test_path: ${data_path}/test.pt
   train_batch_size: 64
   val_batch_size: 32
-  num_workers: 4
+  num_workers: 1
   pin_memory: true
   val_generation_size: 1024
   val_generation_seed: 0
