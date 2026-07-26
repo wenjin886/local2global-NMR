@@ -213,7 +213,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--splits",
         nargs="+",
-        default=["train", "val", "test"],
+        default=["val", "test", "train"],
         help="Split names to scan",
     )
     parser.add_argument(

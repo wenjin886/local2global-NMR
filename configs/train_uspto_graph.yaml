@@ -14,15 +14,16 @@ exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
-only_load_weights: true
-ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2graph/refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1_2026-07-23_12-14-26/checkpoints/epoch=038.ckpt
+# only_load_weights: true
+# ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2graph/refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1_2026-07-23_12-14-26/checkpoints/epoch=038.ckpt
 
-# only_load_weights: false
-# ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-2-nmr2graph-edge/dim256-finetunefromepoch42_2026-07-25_14-54-19/checkpoints/epoch=002.ckpt
+only_load_weights: false
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-2-nmr2graph-edge/dim512-finetunefromepoch38_bs64_2026-07-26_00-17-30/checkpoints/last.ckpt
 
 hidden_dim: 512
 num_heads: 8
 max_num_atoms: 101
+val_check_interval: 0.5
 
 datamodule:
   _target_: src.data.datamodule.NMRGraphDataModule
@@ -109,7 +110,7 @@ callbacks:
   model_checkpoint:
     _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${output_dir}/checkpoints
-    filename: "{epoch:03d}"
+    filename: "{epoch:03d}-{step}"
     monitor: val/graph_score
     mode: max
     save_last: true
@@ -132,9 +133,11 @@ trainer:
   devices: 1
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
-  max_epochs: 500
-  check_val_every_n_epoch: 1
+  max_epochs: 100
   num_sanity_val_steps: 2
+  val_check_interval: ${val_check_interval}
+  # check_val_every_n_epoch: 1
+
 
 optimized_metric: val/graph_score
 
