@@ -220,7 +220,14 @@ expected_total_neighbors
 overflow against the dataset-observed element cap. It is fully differentiable,
 counts every non-none heavy bond as one neighbor irrespective of bond order,
 and uses soft H assignments rather than supplementing hydrogens from valence.
-`train_uspto_graph.yaml` enables it with weight `0.01`.
+`train_uspto_graph.yaml` enables it with weight `0.1`.
+
+Heavy-edge cross entropy separately weights non-bonds and bonds. Edge class
+zero (`none`) uses `criterion.edge_none_class_weight`; every non-zero bond
+class uses the shared `criterion.edge_bond_class_weight`. The graph-training
+configuration uses `0.2` and `1.0`, respectively, to reduce domination by the
+roughly ten-times-more-common non-bonded heavy-atom pairs. Both values default
+to `1.0`, so older configurations retain unweighted cross entropy.
 
 ## H-to-heavy retrieval
 

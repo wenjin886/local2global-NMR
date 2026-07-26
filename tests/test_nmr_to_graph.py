@@ -245,6 +245,59 @@ def test_edge_total_neighbor_count_includes_soft_edges_and_h_attachments():
     assert torch.count_nonzero(edge_logits.grad) > 0
 
 
+def test_edge_loss_uses_shared_none_and_bond_class_weights():
+    logits = torch.tensor(
+        [[
+            [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 3.0, 0.0]],
+            [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        ]],
+        requires_grad=True,
+    )
+    edge_mask = torch.ones((1, 3, 3), dtype=torch.bool)
+    targets = torch.tensor([[
+        [0, 0, 0],
+        [0, 0, 1],
+        [0, 1, 0],
+    ]])
+    outputs = {
+        "heavy_edge_logits": logits,
+        "heavy_edge_mask": edge_mask,
+    }
+    criterion = NMRGraphLoss(
+        edge_none_class_weight=0.2,
+        edge_bond_class_weight=1.0,
+    )
+
+    actual = criterion.edge_loss(outputs, targets)
+    upper_triangle_logits = torch.stack((logits[0, 0, 1], logits[0, 0, 2],
+                                         logits[0, 1, 2]))
+    upper_triangle_targets = torch.tensor([0, 0, 1])
+    expected = F.cross_entropy(
+        upper_triangle_logits,
+        upper_triangle_targets,
+        weight=torch.tensor([0.2, 1.0, 1.0]),
+    )
+
+    assert torch.allclose(actual, expected)
+    actual.backward()
+    assert torch.count_nonzero(logits.grad) > 0
+
+
+def test_legacy_edge_class_weight_list_remains_supported():
+    criterion = NMRGraphLoss(edge_class_weights=[0.1, 1.0, 1.0])
+    assert torch.allclose(
+        criterion.edge_class_weights, torch.tensor([0.1, 1.0, 1.0])
+    )
+    assert "edge_class_weights" in criterion.state_dict()
+
+    scalar_criterion = NMRGraphLoss(
+        edge_none_class_weight=0.2,
+        edge_bond_class_weight=1.0,
+    )
+    assert "edge_class_weights" not in scalar_criterion.state_dict()
+
+
 def test_legacy_degree_aliases_are_checkpoint_safe():
     legacy_config_criterion = NMRGraphLoss(
         heavy_degree_weight=0.25,

@@ -24,6 +24,8 @@ class NMRGraphLoss(nn.Module):
             h_count_weight: float = 0.25,
             h_entropy_weight: float = 0.0,
             edge_weight: float = 1.0,
+            edge_none_class_weight: float = 1.0,
+            edge_bond_class_weight: float = 1.0,
             edge_total_neighbor_count_weight: float = 0.0,
             fragment_edge_consistency_weight: float = 0.25,
             smiles_weight: float = 0.0,
@@ -65,6 +67,12 @@ class NMRGraphLoss(nn.Module):
         self.h_count_weight = h_count_weight
         self.h_entropy_weight = h_entropy_weight
         self.edge_weight = edge_weight
+        if edge_none_class_weight < 0 or edge_bond_class_weight < 0:
+            raise ValueError("Edge class weights must be non-negative")
+        if edge_none_class_weight == 0 and edge_bond_class_weight == 0:
+            raise ValueError("At least one edge class weight must be positive")
+        self.edge_none_class_weight = float(edge_none_class_weight)
+        self.edge_bond_class_weight = float(edge_bond_class_weight)
         self.edge_total_neighbor_count_weight = (
             edge_total_neighbor_count_weight
         )
@@ -93,10 +101,33 @@ class NMRGraphLoss(nn.Module):
             neighbor_count_lookup,
             persistent=False,
         )
-        if edge_class_weights is None:
-            self.register_buffer("edge_class_weights", None)
-        else:
-            self.register_buffer("edge_class_weights", edge_class_weights.float())
+        if edge_class_weights is not None:
+            if (
+                    self.edge_none_class_weight != 1.0
+                    or self.edge_bond_class_weight != 1.0
+            ):
+                raise ValueError(
+                    "Specify edge_class_weights or edge_none_class_weight/"
+                    "edge_bond_class_weight, not both"
+                )
+            edge_class_weights = torch.as_tensor(
+                edge_class_weights, dtype=torch.float
+            )
+            if edge_class_weights.ndim != 1:
+                raise ValueError("edge_class_weights must be one-dimensional")
+            if (edge_class_weights < 0).any() or not edge_class_weights.any():
+                raise ValueError(
+                    "edge_class_weights must be non-negative with at least "
+                    "one positive entry"
+                )
+        # Scalar class weights are configuration constants and add no checkpoint
+        # state. Preserve the old persistence behavior only when the deprecated
+        # full-vector interface is explicitly used.
+        self.register_buffer(
+            "edge_class_weights",
+            edge_class_weights,
+            persistent=edge_class_weights is not None,
+        )
 
     @staticmethod
     def _zero_like(outputs: Mapping[str, object]) -> torch.Tensor:
@@ -355,8 +386,22 @@ class NMRGraphLoss(nn.Module):
         mask = mask & bond_types.ge(0)
         if not mask.any():
             return logits.sum() * 0.0
+        if self.edge_class_weights is None:
+            class_weights = logits.new_full(
+                (logits.size(-1),), self.edge_bond_class_weight
+            )
+            class_weights[0] = self.edge_none_class_weight
+        else:
+            if self.edge_class_weights.numel() != logits.size(-1):
+                raise ValueError(
+                    "edge_class_weights length must match the number of edge "
+                    f"classes ({logits.size(-1)})"
+                )
+            class_weights = self.edge_class_weights.to(
+                device=logits.device, dtype=logits.dtype
+            )
         return F.cross_entropy(
-            logits[mask], bond_types[mask].long(), weight=self.edge_class_weights
+            logits[mask], bond_types[mask].long(), weight=class_weights
         )
 
     def edge_total_neighbor_count_overflow_loss(
