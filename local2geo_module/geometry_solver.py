@@ -55,6 +55,8 @@ class DifferentiableGeometrySolver(nn.Module):
         soft_stress_path_temperature: float = 0.08,
         soft_stress_uncertainty_penalty: float = 3.0,
         soft_stress_global_weight: float = 0.8,
+        soft_stress_heavy_fraction: float = 0.65,
+        soft_stress_hydrogen_fraction: float = 0.20,
         edge_temperature: float = 0.7,
         attachment_temperature: float = 0.7,
         gradient_clip: float = 5.0,
@@ -93,6 +95,8 @@ class DifferentiableGeometrySolver(nn.Module):
             path_temperature=soft_stress_path_temperature,
             uncertainty_penalty=soft_stress_uncertainty_penalty,
             global_weight=soft_stress_global_weight,
+            heavy_stage_fraction=soft_stress_heavy_fraction,
+            hydrogen_stage_fraction=soft_stress_hydrogen_fraction,
         )
         self.edge_temperature = edge_temperature
         self.attachment_temperature = attachment_temperature

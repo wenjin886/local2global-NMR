@@ -86,14 +86,13 @@ class NMRGraphDataModule(pl.LightningDataModule):
         return self._loader(self.train_dataset, self.hparams.train_batch_size, True)
 
     def val_dataloader(self):
-        if self.hparams.inference_only_validation:
-            return self._loader(
-                self.val_generation_dataset,
-                self.hparams.val_batch_size,
-                False,
-            )
         full = self._loader(self.val_dataset, self.hparams.val_batch_size, False)
         if len(self.val_generation_dataset) == 0:
+            if self.hparams.inference_only_validation:
+                raise ValueError(
+                    "inference_only_validation requires "
+                    "val_generation_size > 0"
+                )
             return full
         generation = self._loader(
             self.val_generation_dataset, self.hparams.val_batch_size, False

@@ -35,7 +35,12 @@ class SoftDistanceStressSeed(nn.Module):
         one_three_weight: float = 12.0,
         one_four_weight: float = 4.0,
         global_weight: float = 0.8,
-        hydrogen_lower_weight: float = 0.15,
+        hydrogen_lower_weight: float = 1.0,
+        heavy_stage_fraction: float = 0.65,
+        hydrogen_stage_fraction: float = 0.20,
+        outward_strength: float = 1.5,
+        anchor_strength: float = 1.0,
+        steric_outward_weight: float = 0.5,
         gradient_clip: float = 8.0,
         max_displacement: float = 0.30,
     ) -> None:
@@ -48,12 +53,23 @@ class SoftDistanceStressSeed(nn.Module):
             "path_temperature": path_temperature,
             "global_distance_saturation": global_distance_saturation,
             "lower_softness": lower_softness,
+            "outward_strength": outward_strength,
+            "anchor_strength": anchor_strength,
             "gradient_clip": gradient_clip,
             "max_displacement": max_displacement,
         }
         if any(value <= 0 for value in positive.values()):
             raise ValueError(
                 "SoftDistanceStressSeed scales and step sizes must be positive"
+            )
+        if (
+            not 0.0 <= heavy_stage_fraction <= 1.0
+            or not 0.0 <= hydrogen_stage_fraction <= 1.0
+            or heavy_stage_fraction + hydrogen_stage_fraction > 1.0
+        ):
+            raise ValueError(
+                "heavy/hydrogen stage fractions must be in [0, 1] and "
+                "sum to at most 1"
             )
         self.num_steps = num_steps
         self.step_size = step_size
@@ -69,6 +85,11 @@ class SoftDistanceStressSeed(nn.Module):
         self.one_four_weight = one_four_weight
         self.global_weight = global_weight
         self.hydrogen_lower_weight = hydrogen_lower_weight
+        self.heavy_stage_fraction = heavy_stage_fraction
+        self.hydrogen_stage_fraction = hydrogen_stage_fraction
+        self.outward_strength = outward_strength
+        self.anchor_strength = anchor_strength
+        self.steric_outward_weight = steric_outward_weight
         self.gradient_clip = gradient_clip
         self.max_displacement = max_displacement
 
@@ -185,6 +206,128 @@ class SoftDistanceStressSeed(nn.Module):
         return coordinates / rms * radius.unsqueeze(-1) * mask
 
     @staticmethod
+    def _spherical_anchors(
+        atoms: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Deterministic distinct directions used only to break H symmetry."""
+        index = torch.arange(
+            atoms, device=device, dtype=dtype
+        ) + 0.5
+        golden = torch.pi * (3.0 - 5.0 ** 0.5)
+        z = 1.0 - 2.0 * index / max(atoms, 1)
+        radial = torch.sqrt((1.0 - z.square()).clamp_min(0.0))
+        return torch.stack(
+            (
+                radial * torch.cos(index * golden),
+                radial * torch.sin(index * golden),
+                z,
+            ),
+            dim=-1,
+        )
+
+    def _place_hydrogens(
+        self,
+        heavy_coordinates: torch.Tensor,
+        atom_mask: torch.Tensor,
+        heavy_mask: torch.Tensor,
+        bond_probability: torch.Tensor,
+        bond_target: torch.Tensor,
+    ) -> torch.Tensor:
+        """Attach H to soft parents on the outside of the heavy skeleton.
+
+        Parent positions and local outward directions are probability-weighted,
+        so a downstream coordinate loss can still correct uncertain attachment
+        and heavy-edge logits without a discrete parent selection.
+        """
+        dtype = heavy_coordinates.dtype
+        hydrogen_mask = atom_mask & ~heavy_mask
+        heavy_f = heavy_mask.to(dtype)
+        hydrogen_f = hydrogen_mask.to(dtype)
+        parent_weight = (
+            bond_probability
+            * hydrogen_f[:, :, None]
+            * heavy_f[:, None, :]
+        )
+        parent_probability = parent_weight / parent_weight.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-8)
+        parent_position = torch.bmm(
+            parent_probability, heavy_coordinates
+        )
+        parent_bond_length = (
+            parent_probability * bond_target
+        ).sum(dim=-1).clamp_min(0.6)
+
+        vector = (
+            heavy_coordinates[:, :, None, :]
+            - heavy_coordinates[:, None, :, :]
+        )
+        distance = torch.sqrt(
+            vector.square().sum(dim=-1) + 1e-8
+        )
+        unit = vector / distance.unsqueeze(-1)
+        heavy_pair = (
+            heavy_mask[:, :, None] & heavy_mask[:, None, :]
+        ).to(dtype)
+        eye = torch.eye(
+            heavy_mask.size(1),
+            device=heavy_mask.device,
+            dtype=dtype,
+        )[None]
+        heavy_pair = heavy_pair * (1.0 - eye)
+        heavy_bond = bond_probability * heavy_pair
+
+        # The bonded-neighbour term points away from the local heavy-atom
+        # cone. A shorter-range all-heavy term also resolves cyclic and
+        # approximately symmetric neighbourhoods without a global-centroid
+        # definition of "outside".
+        bonded_outward = (
+            heavy_bond.unsqueeze(-1) * unit
+        ).sum(dim=2)
+        steric_weight = (
+            torch.exp(-distance / 2.0) * heavy_pair
+        )
+        steric_outward = (
+            steric_weight.unsqueeze(-1) * unit
+        ).sum(dim=2)
+        parent_outward = (
+            bonded_outward
+            + self.steric_outward_weight * steric_outward
+        )
+        hydrogen_outward = torch.bmm(
+            parent_probability, parent_outward
+        )
+        outward_norm = torch.sqrt(
+            hydrogen_outward.square().sum(dim=-1, keepdim=True)
+            + 1e-4
+        )
+        hydrogen_outward = hydrogen_outward / outward_norm
+
+        anchors = self._spherical_anchors(
+            atom_mask.size(1),
+            atom_mask.device,
+            dtype,
+        )[None].expand(atom_mask.size(0), -1, -1)
+        direction = (
+            self.outward_strength * hydrogen_outward
+            + self.anchor_strength * anchors
+        )
+        direction = direction / torch.sqrt(
+            direction.square().sum(dim=-1, keepdim=True) + 1e-8
+        )
+        hydrogen_coordinates = (
+            parent_position
+            + parent_bond_length.unsqueeze(-1) * direction
+        )
+        return torch.where(
+            hydrogen_mask.unsqueeze(-1),
+            hydrogen_coordinates,
+            heavy_coordinates,
+        )
+
+    @staticmethod
     def _target_derivative(
         distance: torch.Tensor,
         target: torch.Tensor,
@@ -261,9 +404,22 @@ class SoftDistanceStressSeed(nn.Module):
             bond_share * target_by_type
         ).sum(dim=-1).clamp_min(0.5)
 
-        p13 = local_geometry_priors[
+        learned_p13 = local_geometry_priors[
             "one_three_probability"
         ].clamp(0.0, 1.0)
+        two_hop_mass = torch.bmm(
+            bond_probability, bond_probability
+        )
+        one_path_normalizer = 1.0 - torch.exp(
+            two_hop_mass.new_tensor(-1.0)
+        )
+        analytic_p13 = (
+            (1.0 - torch.exp(-two_hop_mass))
+            / one_path_normalizer
+        ).clamp(0.0, 1.0)
+        # The analytic soft path makes local H--X--H and H--X--heavy geometry
+        # available even when the pretrained auxiliary head is uncertain.
+        p13 = 1.0 - (1.0 - learned_p13) * (1.0 - analytic_p13)
         p14 = local_geometry_priors[
             "one_four_probability"
         ].clamp(0.0, 1.0)
@@ -325,16 +481,15 @@ class SoftDistanceStressSeed(nn.Module):
             * lower_scale
         )
 
+        # Stage 1 starts from the heavy skeleton only. Hydrogens are attached
+        # after the global heavy topology has been opened.
         coordinates = self._expanded_noise(
-            atom_mask,
+            heavy_mask,
             probabilities.dtype,
             generator,
             self.init_scale,
         )
         mask = atom_mask.unsqueeze(-1).to(coordinates.dtype)
-        count = atom_mask.sum(dim=-1, keepdim=True).clamp_min(1).to(
-            coordinates.dtype
-        )
         def update(
             current: torch.Tensor,
             current_bond_target: torch.Tensor,
@@ -345,6 +500,9 @@ class SoftDistanceStressSeed(nn.Module):
             current_one_three_membership: torch.Tensor,
             current_one_four_membership: torch.Tensor,
             current_global_membership: torch.Tensor,
+            current_stage_pair: torch.Tensor,
+            current_movable_mask: torch.Tensor,
+            current_center_mask: torch.Tensor,
         ) -> torch.Tensor:
             vector = (
                 current[:, :, None, :]
@@ -357,24 +515,28 @@ class SoftDistanceStressSeed(nn.Module):
             derivative = self._target_derivative(
                 distance,
                 current_bond_target,
-                self.bond_weight * current_bond_membership,
+                self.bond_weight
+                * current_bond_membership
+                * current_stage_pair,
             )
             derivative = derivative + self._target_derivative(
                 distance,
                 current_target_13,
                 self.one_three_weight
-                * current_one_three_membership,
+                * current_one_three_membership
+                * current_stage_pair,
             )
             derivative = derivative + self._target_derivative(
                 distance,
                 current_target_14,
                 self.one_four_weight
-                * current_one_four_membership,
+                * current_one_four_membership
+                * current_stage_pair,
             )
             derivative = derivative + self._lower_derivative(
                 distance,
                 current_global_lower,
-                current_global_membership,
+                current_global_membership * current_stage_pair,
             )
             # Row i contains each physical i--j pair once when accumulating
             # the gradient acting on atom i.
@@ -390,7 +552,11 @@ class SoftDistanceStressSeed(nn.Module):
             gradient = gradient / (
                 1.0 + norm / self.gradient_clip
             )
-            displacement = self.step_size * gradient
+            displacement = (
+                self.step_size
+                * gradient
+                * current_movable_mask.unsqueeze(-1)
+            )
             displacement_norm = torch.linalg.vector_norm(
                 displacement, dim=-1, keepdim=True
             ).clamp_min(1e-8)
@@ -398,13 +564,20 @@ class SoftDistanceStressSeed(nn.Module):
                 displacement_norm / self.max_displacement
             ).clamp_min(1.0)
             updated = (current - displacement) * mask
-            updated = updated - (
-                updated.sum(dim=1, keepdim=True)
-                / count.unsqueeze(-1)
+            center_count = current_center_mask.sum(
+                dim=1, keepdim=True
+            ).clamp_min(1.0)
+            center = (
+                updated
+                * current_center_mask.unsqueeze(-1)
+            ).sum(dim=1, keepdim=True) / center_count.unsqueeze(-1)
+            updated = (
+                updated
+                - center * current_center_mask.unsqueeze(-1)
             )
             return updated * mask
 
-        update_inputs = (
+        common_update_inputs = (
             bond_target,
             target_13,
             target_14,
@@ -414,18 +587,81 @@ class SoftDistanceStressSeed(nn.Module):
             one_four_membership,
             global_membership,
         )
-        for _ in range(self.num_steps):
-            if differentiable:
-                coordinates = checkpoint(
-                    update,
-                    coordinates,
-                    *update_inputs,
-                    use_reentrant=False,
-                )
-            else:
-                coordinates = update(
-                    coordinates, *update_inputs
-                ).detach()
+
+        def run_stage(
+            current: torch.Tensor,
+            steps: int,
+            stage_pair: torch.Tensor,
+            movable_mask: torch.Tensor,
+            center_mask: torch.Tensor,
+        ) -> torch.Tensor:
+            stage_inputs = (
+                *common_update_inputs,
+                stage_pair,
+                movable_mask.to(current.dtype),
+                center_mask.to(current.dtype),
+            )
+            for _ in range(steps):
+                if differentiable:
+                    current = checkpoint(
+                        update,
+                        current,
+                        *stage_inputs,
+                        use_reentrant=False,
+                    )
+                else:
+                    current = update(
+                        current, *stage_inputs
+                    ).detach()
+            return current
+
+        heavy_steps = int(round(
+            self.num_steps * self.heavy_stage_fraction
+        ))
+        hydrogen_steps = min(
+            self.num_steps - heavy_steps,
+            int(round(
+                self.num_steps * self.hydrogen_stage_fraction
+            )),
+        )
+        joint_steps = self.num_steps - heavy_steps - hydrogen_steps
+        heavy_pair = (
+            heavy_mask[:, :, None] & heavy_mask[:, None, :]
+        ).to(probabilities.dtype)
+        coordinates = run_stage(
+            coordinates,
+            heavy_steps,
+            heavy_pair,
+            heavy_mask,
+            heavy_mask,
+        )
+
+        # Stage 2 uses the soft H-parent distribution and the optimized local
+        # heavy environment to build an outward all-atom proposal.
+        coordinates = self._place_hydrogens(
+            coordinates,
+            atom_mask,
+            heavy_mask,
+            bond_probability,
+            bond_target,
+        )
+        hydrogen_mask = atom_mask & ~heavy_mask
+        coordinates = run_stage(
+            coordinates,
+            hydrogen_steps,
+            pair_mask_f,
+            hydrogen_mask,
+            torch.zeros_like(atom_mask),
+        )
+
+        # Stage 3 releases all atoms for a short joint reconciliation.
+        coordinates = run_stage(
+            coordinates,
+            joint_steps,
+            pair_mask_f,
+            atom_mask,
+            atom_mask,
+        )
         return coordinates if differentiable else coordinates.detach()
 
 

@@ -169,6 +169,42 @@ class SoftDistanceStressSeedTest(unittest.TestCase):
             float(stress_diameter), 1.5 * float(legacy_diameter)
         )
 
+    def test_hydrogens_are_placed_outside_the_ethane_skeleton(self):
+        batch = collate_local2geo([graph_from_smiles("CC")])
+        raw = SoftGraphSimulator(logit_noise_std=0.0)(batch, seed=3)
+        solver = DifferentiableGeometrySolver(
+            num_steps=0,
+            seed_mode="soft_stress",
+            soft_stress_steps=96,
+        )
+        coordinates = solver(
+            batch["atomic_numbers"],
+            batch["atom_mask"],
+            batch["heavy_mask"],
+            batch["hydrogen_mask"],
+            raw["heavy_edge_logits"],
+            raw["h_attachment_logits"],
+            differentiable=False,
+            local_geometry_priors=oracle_priors(batch),
+            coordinate_seed=3,
+        )["seed_coordinates"][0]
+        heavy = batch["heavy_mask"][0]
+        bond = batch["bond_types"][0].ne(0)
+        projections = []
+        for hydrogen in torch.where(batch["hydrogen_mask"][0])[0]:
+            parent = int(batch["h_attachment"][0, hydrogen])
+            heavy_neighbours = torch.where(
+                bond[parent] & heavy
+            )[0]
+            outward = (
+                coordinates[parent]
+                - coordinates[heavy_neighbours]
+            ).sum(dim=0)
+            h_vector = coordinates[hydrogen] - coordinates[parent]
+            projections.append(torch.dot(h_vector, outward))
+        projections = torch.stack(projections)
+        self.assertTrue(projections.gt(0.0).all())
+
     def test_coordinate_seed_is_reproducible(self):
         batch = collate_local2geo([graph_from_smiles("CCCCC")])
         raw = SoftGraphSimulator(logit_noise_std=0.0)(batch, seed=3)

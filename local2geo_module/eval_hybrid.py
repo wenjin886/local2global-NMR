@@ -69,6 +69,8 @@ def evaluate_smiles(
     soft_stress_steps: int,
     soft_stress_step_size: float,
     soft_stress_init_scale: float,
+    soft_stress_heavy_fraction: float,
+    soft_stress_hydrogen_fraction: float,
     write_sdf_files: bool,
 ) -> List[Path]:
     module = HybridLocal2GeoModule.load_from_checkpoint(
@@ -87,6 +89,10 @@ def evaluate_smiles(
         soft_stress_steps=soft_stress_steps,
         soft_stress_step_size=soft_stress_step_size,
         soft_stress_init_scale=soft_stress_init_scale,
+        soft_stress_heavy_fraction=soft_stress_heavy_fraction,
+        soft_stress_hydrogen_fraction=(
+            soft_stress_hydrogen_fraction
+        ),
     ).to(device)
 
     samples = [graph_from_smiles(value) for value in smiles]
@@ -211,6 +217,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--soft-stress-init-scale", type=float, default=1.5
     )
+    parser.add_argument(
+        "--soft-stress-heavy-fraction", type=float, default=0.65
+    )
+    parser.add_argument(
+        "--soft-stress-hydrogen-fraction", type=float, default=0.20
+    )
     parser.add_argument("--one-three-weight", type=float, default=2.0)
     parser.add_argument("--one-four-weight", type=float, default=2.0)
     parser.add_argument(
@@ -240,6 +252,13 @@ def main() -> None:
         or args.soft_stress_steps < 0
         or args.soft_stress_step_size <= 0
         or args.soft_stress_init_scale <= 0
+        or not 0 <= args.soft_stress_heavy_fraction <= 1
+        or not 0 <= args.soft_stress_hydrogen_fraction <= 1
+        or (
+            args.soft_stress_heavy_fraction
+            + args.soft_stress_hydrogen_fraction
+            > 1
+        )
     ):
         raise ValueError(
             "num-steps/noise/weights must be non-negative; step-size and "
@@ -265,6 +284,12 @@ def main() -> None:
         soft_stress_steps=args.soft_stress_steps,
         soft_stress_step_size=args.soft_stress_step_size,
         soft_stress_init_scale=args.soft_stress_init_scale,
+        soft_stress_heavy_fraction=(
+            args.soft_stress_heavy_fraction
+        ),
+        soft_stress_hydrogen_fraction=(
+            args.soft_stress_hydrogen_fraction
+        ),
         write_sdf_files=args.write_sdf,
     )
     print(f"Device:     {device}")

@@ -109,7 +109,7 @@ and test tokens absent from the training vocabulary map to `<unk>`.
 
 ## Inference-only validation
 
-Every stage validates on the same deterministic 1024-molecule subset:
+Every stage uses two validation paths:
 
 ```yaml
 inference_only_validation: true
@@ -117,9 +117,16 @@ datamodule.val_generation_size: 1024
 datamodule.val_generation_seed: 0
 ```
 
-Validation never supplies teacher-forced SMILES. It performs greedy generation,
-feeds generated SMILES hidden states through BiXT, and executes the same
-fragment/graph path used at inference. The compact metric set is stage-aware:
+The first dataloader traverses the complete validation set with teacher forcing
+and logs all standard `val/loss_*` terms, including `val/loss_weighted`, so
+train/val loss divergence remains visible. These losses never determine
+checkpoint selection.
+
+The second dataloader is the deterministic 1024-molecule subset. It performs
+greedy generation, feeds generated SMILES hidden states through BiXT, and
+executes the same fragment/graph path used at inference. No teacher-forced
+representation contributes to `val_inference/*`. The compact metric set is
+stage-aware:
 
 ```text
 SMILES:

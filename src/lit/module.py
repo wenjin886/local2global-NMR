@@ -115,6 +115,22 @@ class LitNMRToGraph(pl.LightningModule):
             dataloader_idx: int = 0,
     ):
         if self.inference_only_validation:
+            if dataloader_idx == 0:
+                loss, losses, _ = self.basic_step(
+                    batch, teacher_force_smiles=True
+                )
+                self.log_dict(
+                    {
+                        "val/loss_%s" % key: value
+                        for key, value in losses.items()
+                    },
+                    on_step=False,
+                    on_epoch=True,
+                    batch_size=batch.atom_types.size(0),
+                    add_dataloader_idx=False,
+                )
+                return loss
+
             outputs = self(batch, teacher_force_smiles=False)
             metrics = self._inference_metrics(outputs, batch)
             self.log_dict(

@@ -45,9 +45,12 @@ incorrect fallback.
 Coordinates are obtained by unrolled stress minimization. Three seed modes are
 kept for explicit ablation:
 
-- `soft_stress`: the hybrid default. Expanded random coordinates are refined
-  by soft bond, learned 1--3/1--4, uncertainty-aware soft path-distance, and
-  excluded-volume stress. It has no `argmax`, graph search, `eigh`, or detach.
+- `soft_stress`: the hybrid default. It first opens the heavy-atom skeleton,
+  then attaches H through soft parent probabilities and local outward
+  directions, and finally runs a short all-atom reconciliation. Every stage
+  uses soft bond, 1--3/1--4, uncertainty-aware path-distance, and
+  excluded-volume stress. Its differentiable path has no `argmax`, hard graph
+  search, `eigh`, or detach.
 - `differentiable`: the legacy graph-smoothed spherical seed.
 - `mds`: the detached hard shortest-path/MDS proposal used only as an
   evaluation comparison.
@@ -149,6 +152,8 @@ python -m local2geo_module.eval_hybrid \
   --input-mode clean-soft \
   --seed-mode soft_stress \
   --soft-stress-steps 96 \
+  --soft-stress-heavy-fraction 0.65 \
+  --soft-stress-hydrogen-fraction 0.20 \
   --num-steps 256 \
   --output-dir hybrid_local2geo_outputs \
   --write-sdf
