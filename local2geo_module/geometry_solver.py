@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -18,6 +18,7 @@ from .constants import (
     TRIPLE,
 )
 from .seed_generator import (
+    SoftDistanceStressSeed,
     detached_graph_distance_mds_seed,
     graph_smoothed_seed,
 )
@@ -48,6 +49,12 @@ class DifferentiableGeometrySolver(nn.Module):
         mds_jitter_scale: float = 0.08,
         mds_stress_steps: int = 384,
         mds_stress_step_size: float = 0.03,
+        soft_stress_steps: int = 96,
+        soft_stress_step_size: float = 0.06,
+        soft_stress_init_scale: float = 1.5,
+        soft_stress_path_temperature: float = 0.08,
+        soft_stress_uncertainty_penalty: float = 3.0,
+        soft_stress_global_weight: float = 0.8,
         edge_temperature: float = 0.7,
         attachment_temperature: float = 0.7,
         gradient_clip: float = 5.0,
@@ -68,15 +75,25 @@ class DifferentiableGeometrySolver(nn.Module):
         self.clash_smoothmax_temperature = clash_smoothmax_temperature
         self.geometry_temperature = geometry_temperature
         self.graph_seed_smoothing = graph_seed_smoothing
-        if seed_mode not in {"differentiable", "mds"}:
+        if seed_mode not in {
+            "differentiable", "soft_stress", "mds"
+        }:
             raise ValueError(
-                "seed_mode must be 'differentiable' or 'mds'"
+                "seed_mode must be differentiable, soft_stress, or mds"
             )
         self.seed_mode = seed_mode
         self.mds_inflation = mds_inflation
         self.mds_jitter_scale = mds_jitter_scale
         self.mds_stress_steps = mds_stress_steps
         self.mds_stress_step_size = mds_stress_step_size
+        self.soft_stress_seed = SoftDistanceStressSeed(
+            num_steps=soft_stress_steps,
+            step_size=soft_stress_step_size,
+            init_scale=soft_stress_init_scale,
+            path_temperature=soft_stress_path_temperature,
+            uncertainty_penalty=soft_stress_uncertainty_penalty,
+            global_weight=soft_stress_global_weight,
+        )
         self.edge_temperature = edge_temperature
         self.attachment_temperature = attachment_temperature
         self.gradient_clip = gradient_clip
@@ -306,9 +323,16 @@ class DifferentiableGeometrySolver(nn.Module):
     def _make_seed(
         self,
         atom_mask: torch.Tensor,
+        heavy_mask: torch.Tensor,
         probabilities: torch.Tensor,
         geometry_probabilities: torch.Tensor,
         covalent_radii: torch.Tensor,
+        vdw_radii: torch.Tensor,
+        local_geometry_priors: Optional[
+            Dict[str, torch.Tensor]
+        ],
+        differentiable: bool,
+        generator: Optional[torch.Generator] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.seed_mode == "mds":
             return detached_graph_distance_mds_seed(
@@ -324,6 +348,31 @@ class DifferentiableGeometrySolver(nn.Module):
                 stress_steps=self.mds_stress_steps,
                 stress_step_size=self.mds_stress_step_size,
             )
+        if self.seed_mode == "soft_stress":
+            if local_geometry_priors is None:
+                raise ValueError(
+                    "seed_mode='soft_stress' requires "
+                    "local_geometry_priors from SoftTopologyPrior"
+                )
+            seed = self.soft_stress_seed(
+                atom_mask=atom_mask,
+                heavy_mask=heavy_mask,
+                probabilities=probabilities,
+                covalent_radii=covalent_radii,
+                vdw_radii=vdw_radii,
+                bond_length_scales=self.bond_length_scales,
+                local_geometry_priors=local_geometry_priors,
+                differentiable=differentiable,
+                generator=generator,
+            )
+            # Hard types are metadata used by the legacy MDS diagnostics only.
+            # Returning zeros avoids inserting argmax into the soft seed path.
+            hard_types = torch.zeros(
+                probabilities.shape[:-1],
+                device=probabilities.device,
+                dtype=torch.long,
+            )
+            return seed, hard_types
         q = (1.0 - probabilities[..., NONE]) * (
             atom_mask[:, :, None] & atom_mask[:, None, :]
         )
@@ -536,6 +585,14 @@ class DifferentiableGeometrySolver(nn.Module):
             ] * (1.0 - q)
             learned_14 = (
                 local_geometry_priors["one_four_probability"]
+                * local_geometry_priors.get(
+                    "one_four_validity",
+                    torch.ones_like(
+                        local_geometry_priors[
+                            "one_four_probability"
+                        ]
+                    ),
+                )
                 * (1.0 - q)
                 * (1.0 - one_three_probability)
             )
@@ -583,6 +640,7 @@ class DifferentiableGeometrySolver(nn.Module):
         probabilities: torch.Tensor,
         geometry_probabilities: torch.Tensor,
         atom_mask: torch.Tensor,
+        heavy_mask: torch.Tensor,
         pair_mask: torch.Tensor,
         covalent_radii: torch.Tensor,
         vdw_radii: torch.Tensor,
@@ -590,17 +648,27 @@ class DifferentiableGeometrySolver(nn.Module):
         local_geometry_priors: Optional[
             Dict[str, torch.Tensor]
         ] = None,
+        coordinate_seed: Optional[int] = None,
     ) -> Tuple[
         torch.Tensor,
         torch.Tensor,
         Dict[str, torch.Tensor],
         torch.Tensor,
     ]:
+        generator = None
+        if coordinate_seed is not None:
+            generator = torch.Generator(device=probabilities.device)
+            generator.manual_seed(coordinate_seed)
         seed, seed_hard_types = self._make_seed(
             atom_mask,
+            heavy_mask,
             probabilities,
             geometry_probabilities,
             covalent_radii,
+            vdw_radii,
+            local_geometry_priors,
+            differentiable,
+            generator,
         )
         with torch.enable_grad():
             positions = seed
@@ -674,6 +742,7 @@ class DifferentiableGeometrySolver(nn.Module):
         local_geometry_priors: Optional[
             Dict[str, torch.Tensor]
         ] = None,
+        coordinate_seed: Optional[int] = None,
     ) -> Dict[str, torch.Tensor]:
         del heavy_mask, hydrogen_mask  # masks are encoded below by atom types.
         device_type = heavy_edge_logits.device.type
@@ -745,11 +814,13 @@ class DifferentiableGeometrySolver(nn.Module):
                 graph["edge_probabilities"],
                 geometry_probabilities,
                 atom_mask,
+                heavy_mask,
                 pair_mask,
                 covalent_radii,
                 vdw_radii,
                 differentiable=differentiable,
                 local_geometry_priors=local_geometry_priors,
+                coordinate_seed=coordinate_seed,
             )
         return {
             **graph,

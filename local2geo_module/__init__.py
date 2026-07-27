@@ -3,6 +3,7 @@
 from .geometry_solver import DifferentiableGeometrySolver
 # from .prior_initializer_0 import PriorGeometryInitializer
 from .seed_generator import (
+    SoftDistanceStressSeed,
     detached_graph_distance_mds_seed,
     graph_smoothed_seed,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "PriorGeometryInitializer",
     "SoftTopologyPrior",
     "SoftGraphSimulator",
+    "SoftDistanceStressSeed",
     "detached_graph_distance_mds_seed",
     "graph_smoothed_seed",
 ]

@@ -1,10 +1,432 @@
 from __future__ import annotations
 
 from itertools import combinations
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from torch import nn
+from torch.utils.checkpoint import checkpoint
+
+
+class SoftDistanceStressSeed(nn.Module):
+    """Fully soft, parameter-free distance-geometry coordinate seed.
+
+    The module embeds corrected graph probabilities and learned local distance
+    priors without neighbour selection, graph search, eigendecomposition, or
+    detached coordinate updates. A soft all-pairs path relaxation supplies
+    global heavy-atom lower bounds, while 1--2/1--3/1--4 targets control local
+    chemistry. Updates use analytic stress forces, so gradients from the final
+    coordinates flow through every step to all incoming probabilities.
+    """
+
+    def __init__(
+        self,
+        num_steps: int = 96,
+        step_size: float = 0.06,
+        init_scale: float = 1.5,
+        path_temperature: float = 0.08,
+        uncertainty_penalty: float = 3.0,
+        global_distance_scale: float = 0.90,
+        global_distance_saturation: float = 20.0,
+        vdw_scale: float = 0.72,
+        lower_softness: float = 0.12,
+        bond_weight: float = 12.0,
+        one_three_weight: float = 12.0,
+        one_four_weight: float = 4.0,
+        global_weight: float = 0.8,
+        hydrogen_lower_weight: float = 0.15,
+        gradient_clip: float = 8.0,
+        max_displacement: float = 0.30,
+    ) -> None:
+        super().__init__()
+        if num_steps < 0:
+            raise ValueError("num_steps must be non-negative")
+        positive = {
+            "step_size": step_size,
+            "init_scale": init_scale,
+            "path_temperature": path_temperature,
+            "global_distance_saturation": global_distance_saturation,
+            "lower_softness": lower_softness,
+            "gradient_clip": gradient_clip,
+            "max_displacement": max_displacement,
+        }
+        if any(value <= 0 for value in positive.values()):
+            raise ValueError(
+                "SoftDistanceStressSeed scales and step sizes must be positive"
+            )
+        self.num_steps = num_steps
+        self.step_size = step_size
+        self.init_scale = init_scale
+        self.path_temperature = path_temperature
+        self.uncertainty_penalty = uncertainty_penalty
+        self.global_distance_scale = global_distance_scale
+        self.global_distance_saturation = global_distance_saturation
+        self.vdw_scale = vdw_scale
+        self.lower_softness = lower_softness
+        self.bond_weight = bond_weight
+        self.one_three_weight = one_three_weight
+        self.one_four_weight = one_four_weight
+        self.global_weight = global_weight
+        self.hydrogen_lower_weight = hydrogen_lower_weight
+        self.gradient_clip = gradient_clip
+        self.max_displacement = max_displacement
+
+    @staticmethod
+    def _pair_mask(atom_mask: torch.Tensor) -> torch.Tensor:
+        atoms = atom_mask.size(1)
+        diagonal = torch.eye(
+            atoms, device=atom_mask.device, dtype=torch.bool
+        )[None]
+        return (
+            atom_mask[:, :, None]
+            & atom_mask[:, None, :]
+            & ~diagonal
+        )
+
+    def _soft_min(
+        self,
+        direct: torch.Tensor,
+        alternative: torch.Tensor,
+    ) -> torch.Tensor:
+        """Smooth minimum without log-sum-exp path-count bias."""
+        gate = torch.sigmoid(
+            (alternative - direct) / self.path_temperature
+        )
+        return gate * direct + (1.0 - gate) * alternative
+
+    def soft_path_distance(
+        self,
+        bond_probability: torch.Tensor,
+        bond_target: torch.Tensor,
+        atom_mask: torch.Tensor,
+        differentiable: bool = True,
+    ) -> torch.Tensor:
+        """Continuous Floyd relaxation over uncertainty-aware edge costs."""
+        pair_mask = self._pair_mask(atom_mask)
+        probability = bond_probability * pair_mask
+        direct = (
+            bond_target
+            + self.uncertainty_penalty
+            * (-torch.log(probability + 1e-6))
+        )
+        large = direct.new_full(direct.shape, 1e3)
+        distance = torch.where(pair_mask, direct, large)
+        diagonal = torch.eye(
+            distance.size(1),
+            device=distance.device,
+            dtype=torch.bool,
+        )[None]
+        distance = torch.where(
+            diagonal,
+            torch.zeros_like(distance),
+            distance,
+        )
+        valid_pair = (
+            atom_mask[:, :, None] & atom_mask[:, None, :]
+        )
+        for middle in range(distance.size(1)):
+            def relax(
+                current: torch.Tensor,
+                middle_index: int = middle,
+            ) -> torch.Tensor:
+                through = (
+                    current[:, :, middle_index, None]
+                    + current[:, None, middle_index, :]
+                )
+                candidate = self._soft_min(current, through)
+                middle_valid = atom_mask[
+                    :, middle_index, None, None
+                ]
+                updated = torch.where(
+                    middle_valid & valid_pair,
+                    candidate,
+                    current,
+                )
+                return torch.where(
+                    diagonal,
+                    torch.zeros_like(updated),
+                    updated,
+                )
+
+            if differentiable:
+                distance = checkpoint(
+                    relax, distance, use_reentrant=False
+                )
+            else:
+                distance = relax(distance).detach()
+        return distance * pair_mask
+
+    @staticmethod
+    def _expanded_noise(
+        atom_mask: torch.Tensor,
+        dtype: torch.dtype,
+        generator: Optional[torch.Generator],
+        init_scale: float,
+    ) -> torch.Tensor:
+        batch, atoms = atom_mask.shape
+        mask = atom_mask.unsqueeze(-1).to(dtype)
+        coordinates = torch.randn(
+            (batch, atoms, 3),
+            device=atom_mask.device,
+            dtype=dtype,
+            generator=generator,
+        ) * mask
+        count = atom_mask.sum(dim=-1, keepdim=True).clamp_min(1).to(dtype)
+        coordinates = coordinates - (
+            coordinates.sum(dim=1, keepdim=True)
+            / count.unsqueeze(-1)
+        )
+        rms = torch.sqrt(
+            coordinates.square().sum(dim=(1, 2), keepdim=True)
+            / (3.0 * count.unsqueeze(-1))
+        ).clamp_min(1e-4)
+        radius = init_scale * count.pow(1.0 / 3.0)
+        return coordinates / rms * radius.unsqueeze(-1) * mask
+
+    @staticmethod
+    def _target_derivative(
+        distance: torch.Tensor,
+        target: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """d [w log(d/t)^2] / d distance."""
+        return (
+            2.0
+            * weight
+            * torch.log(
+                distance.clamp_min(1e-4) / target.clamp_min(1e-4)
+            )
+            / distance.clamp_min(1e-4)
+        )
+
+    def _lower_derivative(
+        self,
+        distance: torch.Tensor,
+        lower: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """d [w softplus(lower-distance)^2] / d distance."""
+        scaled = (lower - distance) / self.lower_softness
+        violation = self.lower_softness * F.softplus(scaled)
+        return (
+            -2.0
+            * weight
+            * violation
+            * torch.sigmoid(scaled)
+        )
+
+    def forward(
+        self,
+        atom_mask: torch.Tensor,
+        heavy_mask: torch.Tensor,
+        probabilities: torch.Tensor,
+        covalent_radii: torch.Tensor,
+        vdw_radii: torch.Tensor,
+        bond_length_scales: torch.Tensor,
+        local_geometry_priors: Dict[str, torch.Tensor],
+        differentiable: bool = True,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        required = {
+            "one_three_probability",
+            "one_four_probability",
+            "one_three_distance_ratio",
+            "one_four_distance_ratio",
+        }
+        missing = required.difference(local_geometry_priors)
+        if missing:
+            raise ValueError(
+                "SoftDistanceStressSeed requires learned local priors: "
+                + ", ".join(sorted(missing))
+            )
+        pair_mask = self._pair_mask(atom_mask)
+        pair_mask_f = pair_mask.to(probabilities.dtype)
+        upper = torch.triu(
+            torch.ones_like(pair_mask_f), diagonal=1
+        )
+        bonded = probabilities[..., 1:]
+        bond_probability = bonded.sum(dim=-1) * pair_mask_f
+        bond_share = bonded / bonded.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-8)
+        radii_sum = (
+            covalent_radii[:, :, None]
+            + covalent_radii[:, None, :]
+        ).clamp_min(0.5)
+        target_by_type = (
+            radii_sum.unsqueeze(-1) * bond_length_scales[1:]
+        )
+        bond_target = (
+            bond_share * target_by_type
+        ).sum(dim=-1).clamp_min(0.5)
+
+        p13 = local_geometry_priors[
+            "one_three_probability"
+        ].clamp(0.0, 1.0)
+        p14 = local_geometry_priors[
+            "one_four_probability"
+        ].clamp(0.0, 1.0)
+        skeleton = (
+            heavy_mask[:, :, None] & heavy_mask[:, None, :]
+        ).to(probabilities.dtype)
+        # Assign each pair predominantly to its shortest supported shell.
+        bond_membership = bond_probability
+        one_three_membership = (
+            (1.0 - bond_membership) * p13 * pair_mask_f
+        )
+        one_four_membership = (
+            (1.0 - bond_membership)
+            * (1.0 - one_three_membership)
+            * p14
+            * skeleton
+            * pair_mask_f
+        )
+        target_13 = radii_sum * local_geometry_priors[
+            "one_three_distance_ratio"
+        ]
+        target_14 = radii_sum * local_geometry_priors[
+            "one_four_distance_ratio"
+        ]
+
+        path_distance = self.soft_path_distance(
+            bond_probability,
+            bond_target,
+            atom_mask,
+            differentiable=differentiable,
+        )
+        saturation = self.global_distance_saturation
+        graph_lower = (
+            self.global_distance_scale
+            * path_distance
+            / (1.0 + path_distance / saturation)
+        )
+        vdw_lower = self.vdw_scale * (
+            vdw_radii[:, :, None] + vdw_radii[:, None, :]
+        )
+        # Smooth max of graph expansion and excluded volume.
+        stacked_lower = torch.stack([graph_lower, vdw_lower], dim=-1)
+        global_lower = self.lower_softness * torch.logsumexp(
+            stacked_lower / self.lower_softness, dim=-1
+        )
+        far_membership = (
+            (1.0 - bond_membership)
+            * (1.0 - one_three_membership)
+            * (1.0 - one_four_membership)
+            * pair_mask_f
+        )
+        lower_scale = (
+            self.hydrogen_lower_weight
+            + (1.0 - self.hydrogen_lower_weight) * skeleton
+        )
+        global_membership = (
+            self.global_weight
+            * far_membership
+            * lower_scale
+        )
+
+        coordinates = self._expanded_noise(
+            atom_mask,
+            probabilities.dtype,
+            generator,
+            self.init_scale,
+        )
+        mask = atom_mask.unsqueeze(-1).to(coordinates.dtype)
+        count = atom_mask.sum(dim=-1, keepdim=True).clamp_min(1).to(
+            coordinates.dtype
+        )
+        def update(
+            current: torch.Tensor,
+            current_bond_target: torch.Tensor,
+            current_target_13: torch.Tensor,
+            current_target_14: torch.Tensor,
+            current_global_lower: torch.Tensor,
+            current_bond_membership: torch.Tensor,
+            current_one_three_membership: torch.Tensor,
+            current_one_four_membership: torch.Tensor,
+            current_global_membership: torch.Tensor,
+        ) -> torch.Tensor:
+            vector = (
+                current[:, :, None, :]
+                - current[:, None, :, :]
+            )
+            distance = torch.sqrt(
+                vector.square().sum(dim=-1) + 1e-8
+            )
+            unit = vector / distance.unsqueeze(-1)
+            derivative = self._target_derivative(
+                distance,
+                current_bond_target,
+                self.bond_weight * current_bond_membership,
+            )
+            derivative = derivative + self._target_derivative(
+                distance,
+                current_target_13,
+                self.one_three_weight
+                * current_one_three_membership,
+            )
+            derivative = derivative + self._target_derivative(
+                distance,
+                current_target_14,
+                self.one_four_weight
+                * current_one_four_membership,
+            )
+            derivative = derivative + self._lower_derivative(
+                distance,
+                current_global_lower,
+                current_global_membership,
+            )
+            # Row i contains each physical i--j pair once when accumulating
+            # the gradient acting on atom i.
+            gradient = (
+                derivative
+                * pair_mask_f
+                * upper.add(upper.transpose(1, 2))
+            ).unsqueeze(-1) * unit
+            gradient = gradient.sum(dim=2)
+            norm = torch.linalg.vector_norm(
+                gradient, dim=-1, keepdim=True
+            ).clamp_min(1e-8)
+            gradient = gradient / (
+                1.0 + norm / self.gradient_clip
+            )
+            displacement = self.step_size * gradient
+            displacement_norm = torch.linalg.vector_norm(
+                displacement, dim=-1, keepdim=True
+            ).clamp_min(1e-8)
+            displacement = displacement / (
+                displacement_norm / self.max_displacement
+            ).clamp_min(1.0)
+            updated = (current - displacement) * mask
+            updated = updated - (
+                updated.sum(dim=1, keepdim=True)
+                / count.unsqueeze(-1)
+            )
+            return updated * mask
+
+        update_inputs = (
+            bond_target,
+            target_13,
+            target_14,
+            global_lower,
+            bond_membership,
+            one_three_membership,
+            one_four_membership,
+            global_membership,
+        )
+        for _ in range(self.num_steps):
+            if differentiable:
+                coordinates = checkpoint(
+                    update,
+                    coordinates,
+                    *update_inputs,
+                    use_reentrant=False,
+                )
+            else:
+                coordinates = update(
+                    coordinates, *update_inputs
+                ).detach()
+        return coordinates if differentiable else coordinates.detach()
 
 
 def graph_smoothed_seed(

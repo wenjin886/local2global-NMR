@@ -42,17 +42,20 @@ P, S, Cl, Br, and I, covering the current dataset. It raises on an unsupported
 element so extending the table is explicit rather than silently using an
 incorrect fallback.
 
-Coordinates are obtained by unrolled stress minimization. The production
-solver retains the original differentiable graph-smoothed seed. Evaluation
-defaults to a detached seed constructed from hard bond-length-weighted shortest
-paths followed by classical MDS. A small deterministic 3D perturbation breaks
-the exact collinearity of path graphs. For the MDS path, VSEPR-weighted 1--3
-distance bounds, bond-distance projections, local stress, and an sp2 planarity
-term repair local geometry before the existing relaxation starts. With
-`differentiable=True`, every update after either seed uses
-`create_graph=True`, so downstream coordinate losses reach both heavy-edge and
-H-attachment logits through the soft relaxation terms. The detached MDS seed
-itself is deliberately outside that gradient path.
+Coordinates are obtained by unrolled stress minimization. Three seed modes are
+kept for explicit ablation:
+
+- `soft_stress`: the hybrid default. Expanded random coordinates are refined
+  by soft bond, learned 1--3/1--4, uncertainty-aware soft path-distance, and
+  excluded-volume stress. It has no `argmax`, graph search, `eigh`, or detach.
+- `differentiable`: the legacy graph-smoothed spherical seed.
+- `mds`: the detached hard shortest-path/MDS proposal used only as an
+  evaluation comparison.
+
+`SoftDistanceStressSeed` uses analytic force updates, so every unrolled step
+remains a continuous function of the corrected graph and local-prior outputs.
+The following local relaxation can likewise retain gradients to heavy-edge and
+H-attachment logits when called with `differentiable=True`.
 
 ## Atom order and integration
 
@@ -102,7 +105,7 @@ message-passing model. It predicts:
 Corrected logits use `corrected = raw + residual`, leaving an exact identity
 gradient path from later coordinate/NMR losses back to the original
 `NMRToGraph` logits. There is no `topk`, threshold, or `argmax` in this learned
-training path. MDS remains an evaluation-only detached seed choice.
+training path. MDS remains an explicit detached evaluation-only ablation.
 
 The default config reads the two example parquet files directly:
 
@@ -144,7 +147,8 @@ python -m local2geo_module.eval_hybrid \
   --checkpoint outputs/local2geo_hybrid/.../checkpoints/last.ckpt \
   --smiles "CCCC" "c1ccccc1" \
   --input-mode clean-soft \
-  --seed-mode mds \
+  --seed-mode soft_stress \
+  --soft-stress-steps 96 \
   --num-steps 256 \
   --output-dir hybrid_local2geo_outputs \
   --write-sdf
@@ -153,7 +157,7 @@ python -m local2geo_module.eval_hybrid \
 Use `--input-mode corrupted-soft` to measure graph-error recovery. For later
 end-to-end NMR training, import `HybridLocal2GeoModule.correct_graph` (or the
 contained `SoftTopologyPrior`) and run the geometry solver with
-`differentiable=True`; do not use the detached MDS seed for that training path.
+`seed_mode="soft_stress"` and `differentiable=True`.
 
 ## SMILES demo
 

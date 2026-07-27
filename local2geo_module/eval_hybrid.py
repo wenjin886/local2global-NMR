@@ -66,6 +66,9 @@ def evaluate_smiles(
     one_four_weight: float,
     bond_probability_power: float,
     angle_probability_power: float,
+    soft_stress_steps: int,
+    soft_stress_step_size: float,
+    soft_stress_init_scale: float,
     write_sdf_files: bool,
 ) -> List[Path]:
     module = HybridLocal2GeoModule.load_from_checkpoint(
@@ -81,6 +84,9 @@ def evaluate_smiles(
         one_four_distance_weight=one_four_weight,
         bond_probability_power=bond_probability_power,
         angle_probability_power=angle_probability_power,
+        soft_stress_steps=soft_stress_steps,
+        soft_stress_step_size=soft_stress_step_size,
+        soft_stress_init_scale=soft_stress_init_scale,
     ).to(device)
 
     samples = [graph_from_smiles(value) for value in smiles]
@@ -109,6 +115,10 @@ def evaluate_smiles(
             "one_four_distance_ratio": learned[
                 "one_four_distance_ratio"
             ],
+            "one_four_validity": (
+                batch["heavy_mask"][:, :, None]
+                & batch["heavy_mask"][:, None, :]
+            ).to(learned["one_four_probability"].dtype),
         }
     result = solver(
         atomic_numbers=batch["atomic_numbers"],
@@ -122,6 +132,7 @@ def evaluate_smiles(
         differentiable=False,
         geometry_probabilities_override=learned_geometry,
         local_geometry_priors=local_priors,
+        coordinate_seed=seed,
     )
     coordinates = result["coordinates"].cpu()
 
@@ -190,8 +201,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--step-size", type=float, default=0.02)
     parser.add_argument(
         "--seed-mode",
-        choices=("mds", "differentiable"),
-        default="mds",
+        choices=("soft_stress", "differentiable", "mds"),
+        default="soft_stress",
+    )
+    parser.add_argument("--soft-stress-steps", type=int, default=96)
+    parser.add_argument(
+        "--soft-stress-step-size", type=float, default=0.06
+    )
+    parser.add_argument(
+        "--soft-stress-init-scale", type=float, default=1.5
     )
     parser.add_argument("--one-three-weight", type=float, default=2.0)
     parser.add_argument("--one-four-weight", type=float, default=2.0)
@@ -219,6 +237,9 @@ def main() -> None:
         or args.one_four_weight < 0
         or args.bond_probability_power <= 0
         or args.angle_probability_power <= 0
+        or args.soft_stress_steps < 0
+        or args.soft_stress_step_size <= 0
+        or args.soft_stress_init_scale <= 0
     ):
         raise ValueError(
             "num-steps/noise/weights must be non-negative; step-size and "
@@ -241,6 +262,9 @@ def main() -> None:
         one_four_weight=args.one_four_weight,
         bond_probability_power=args.bond_probability_power,
         angle_probability_power=args.angle_probability_power,
+        soft_stress_steps=args.soft_stress_steps,
+        soft_stress_step_size=args.soft_stress_step_size,
+        soft_stress_init_scale=args.soft_stress_init_scale,
         write_sdf_files=args.write_sdf,
     )
     print(f"Device:     {device}")
