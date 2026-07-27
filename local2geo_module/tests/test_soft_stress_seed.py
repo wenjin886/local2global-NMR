@@ -27,6 +27,66 @@ def oracle_priors(batch):
 
 
 class SoftDistanceStressSeedTest(unittest.TestCase):
+    def test_butane_sparse_distances_survive_main_refinement(self):
+        batch = collate_local2geo([graph_from_smiles("CCCC")])
+        raw = SoftGraphSimulator(logit_noise_std=0.0)(batch, seed=3)
+        solver = DifferentiableGeometrySolver(
+            num_steps=64,
+            seed_mode="soft_stress",
+            soft_stress_steps=96,
+        )
+        coordinates = solver(
+            batch["atomic_numbers"],
+            batch["atom_mask"],
+            batch["heavy_mask"],
+            batch["hydrogen_mask"],
+            raw["heavy_edge_logits"],
+            raw["h_attachment_logits"],
+            differentiable=False,
+            local_geometry_priors=oracle_priors(batch),
+            coordinate_seed=3,
+        )["coordinates"][0]
+        distance = torch.cdist(coordinates, coordinates)
+        heavy_pair = (
+            batch["heavy_mask"][0, :, None]
+            & batch["heavy_mask"][0, None, :]
+        )
+        radii_sum = (
+            batch["covalent_radii"][0, :, None]
+            + batch["covalent_radii"][0, None, :]
+        )
+        target_12 = (
+            radii_sum
+            * solver.bond_length_scales[batch["bond_types"][0]]
+        )
+        priors = oracle_priors(batch)
+        target_13 = (
+            radii_sum * priors["one_three_distance_ratio"][0]
+        )
+        target_14 = (
+            radii_sum * priors["one_four_distance_ratio"][0]
+        )
+        masks_and_targets = (
+            (
+                batch["bond_types"][0].gt(0) & heavy_pair,
+                target_12,
+                0.15,
+            ),
+            (
+                batch["one_three_targets"][0].gt(0.5) & heavy_pair,
+                target_13,
+                0.20,
+            ),
+            (
+                batch["one_four_targets"][0].gt(0.5) & heavy_pair,
+                target_14,
+                0.25,
+            ),
+        )
+        for mask, target, tolerance in masks_and_targets:
+            error = (distance[mask] - target[mask]).abs().mean()
+            self.assertLess(float(error), tolerance)
+
     def test_full_prior_seed_path_reaches_raw_graph_logits(self):
         batch = collate_local2geo([graph_from_smiles("CCCC")])
         raw = SoftGraphSimulator(corruption_boost=6.0)(

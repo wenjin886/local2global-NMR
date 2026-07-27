@@ -107,7 +107,7 @@ is built from the training split during preprocessing and stored in
 `dataset_infos_train.json` together with BOS/EOS/PAD/UNK control tokens. Validation
 and test tokens absent from the training vocabulary map to `<unk>`.
 
-## Inference-only validation
+## Validation losses and inference metrics
 
 Every stage uses two validation paths:
 

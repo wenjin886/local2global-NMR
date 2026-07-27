@@ -95,6 +95,7 @@ class DifferentiableGeometrySolver(nn.Module):
             path_temperature=soft_stress_path_temperature,
             uncertainty_penalty=soft_stress_uncertainty_penalty,
             global_weight=soft_stress_global_weight,
+            confidence_power=bond_probability_power,
             heavy_stage_fraction=soft_stress_heavy_fraction,
             hydrogen_stage_fraction=soft_stress_hydrogen_fraction,
         )
@@ -675,43 +676,65 @@ class DifferentiableGeometrySolver(nn.Module):
             generator,
         )
         with torch.enable_grad():
-            positions = seed
-            if not positions.requires_grad:
-                positions = positions.detach().clone().requires_grad_(True)
-            for _ in range(self.num_steps):
-                force_terms = self.terms(
-                    positions,
-                    probabilities,
-                    geometry_probabilities,
-                    atom_mask,
-                    pair_mask,
-                    covalent_radii,
-                    vdw_radii,
-                    reduction="force",
+            if (
+                self.seed_mode == "soft_stress"
+                and local_geometry_priors is not None
+            ):
+                positions = self.soft_stress_seed.refine(
+                    coordinates=seed,
+                    atom_mask=atom_mask,
+                    heavy_mask=heavy_mask,
+                    probabilities=probabilities,
+                    covalent_radii=covalent_radii,
+                    vdw_radii=vdw_radii,
+                    bond_length_scales=self.bond_length_scales,
                     local_geometry_priors=local_geometry_priors,
+                    num_steps=self.num_steps,
+                    differentiable=differentiable,
                 )
-                gradient = torch.autograd.grad(
-                    self.total(force_terms),
-                    positions,
-                    create_graph=differentiable,
-                )[0]
-                norm = torch.sqrt(
-                    gradient.square().sum(dim=-1, keepdim=True) + 1e-12
-                )
-                gradient = gradient / (
-                    1.0 + norm / self.gradient_clip
-                )
-                positions = positions - self.step_size * gradient
-                count = atom_mask.sum(
-                    dim=1, keepdim=True
-                ).clamp_min(1).to(positions.dtype)
-                center = (
-                    positions.sum(dim=1, keepdim=True)
-                    / count.unsqueeze(-1)
-                )
-                positions = (
-                    positions - center
-                ) * atom_mask.unsqueeze(-1)
+            else:
+                positions = seed
+                if not positions.requires_grad:
+                    positions = (
+                        positions.detach().clone().requires_grad_(True)
+                    )
+                for _ in range(self.num_steps):
+                    force_terms = self.terms(
+                        positions,
+                        probabilities,
+                        geometry_probabilities,
+                        atom_mask,
+                        pair_mask,
+                        covalent_radii,
+                        vdw_radii,
+                        reduction="force",
+                        local_geometry_priors=local_geometry_priors,
+                    )
+                    gradient = torch.autograd.grad(
+                        self.total(force_terms),
+                        positions,
+                        create_graph=differentiable,
+                    )[0]
+                    norm = torch.sqrt(
+                        gradient.square().sum(
+                            dim=-1, keepdim=True
+                        )
+                        + 1e-12
+                    )
+                    gradient = gradient / (
+                        1.0 + norm / self.gradient_clip
+                    )
+                    positions = positions - self.step_size * gradient
+                    count = atom_mask.sum(
+                        dim=1, keepdim=True
+                    ).clamp_min(1).to(positions.dtype)
+                    center = (
+                        positions.sum(dim=1, keepdim=True)
+                        / count.unsqueeze(-1)
+                    )
+                    positions = (
+                        positions - center
+                    ) * atom_mask.unsqueeze(-1)
             final_terms = self.terms(
                 positions,
                 probabilities,

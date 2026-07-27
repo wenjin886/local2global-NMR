@@ -226,10 +226,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--one-three-weight", type=float, default=2.0)
     parser.add_argument("--one-four-weight", type=float, default=2.0)
     parser.add_argument(
-        "--bond-probability-power", type=float, default=1.0
+        "--bond-probability-power", type=float, default=3.0
     )
     parser.add_argument(
-        "--angle-probability-power", type=float, default=1.0
+        "--angle-probability-power", type=float, default=2.0
     )
     parser.add_argument("--write-sdf", action="store_true")
     return parser

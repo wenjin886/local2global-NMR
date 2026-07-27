@@ -55,10 +55,14 @@ kept for explicit ablation:
 - `mds`: the detached hard shortest-path/MDS proposal used only as an
   evaluation comparison.
 
-`SoftDistanceStressSeed` uses analytic force updates, so every unrolled step
-remains a continuous function of the corrected graph and local-prior outputs.
-The following local relaxation can likewise retain gradients to heavy-edge and
-H-attachment logits when called with `differentiable=True`.
+Each `SoftDistanceStressSeed` step is now a weighted SMACOF update over
+predicted D12/D13/D14 targets. 2-hop and
+3-hop membership is derived differentiably from the corrected graph rather
+than the less accurate auxiliary membership heads. A small linear confidence
+term preserves gradients to low-confidence edges, while weak graph/vdW terms
+act only as lower bounds. The same objective is reused by the following
+relaxation, so increasing `--num-steps` no longer switches to a compacting
+moment-angle objective.
 
 ## Atom order and integration
 

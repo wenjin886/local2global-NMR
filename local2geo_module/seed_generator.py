@@ -13,11 +13,11 @@ class SoftDistanceStressSeed(nn.Module):
     """Fully soft, parameter-free distance-geometry coordinate seed.
 
     The module embeds corrected graph probabilities and learned local distance
-    priors without neighbour selection, graph search, eigendecomposition, or
-    detached coordinate updates. A soft all-pairs path relaxation supplies
-    global heavy-atom lower bounds, while 1--2/1--3/1--4 targets control local
-    chemistry. Updates use analytic stress forces, so gradients from the final
-    coordinates flow through every step to all incoming probabilities.
+    priors without neighbour selection or detached coordinate updates. D12,
+    D13, and D14 are fitted by differentiable weighted SMACOF; non-local graph
+    and vdW distances are lower bounds only and therefore cannot compact the
+    molecule. Gradients from the final coordinates flow through every step to
+    all incoming probabilities.
     """
 
     def __init__(
@@ -35,6 +35,9 @@ class SoftDistanceStressSeed(nn.Module):
         one_three_weight: float = 12.0,
         one_four_weight: float = 4.0,
         global_weight: float = 0.8,
+        confidence_power: float = 3.0,
+        confidence_floor: float = 0.05,
+        smacof_regularization: float = 1e-4,
         hydrogen_lower_weight: float = 1.0,
         heavy_stage_fraction: float = 0.65,
         hydrogen_stage_fraction: float = 0.20,
@@ -55,6 +58,8 @@ class SoftDistanceStressSeed(nn.Module):
             "lower_softness": lower_softness,
             "outward_strength": outward_strength,
             "anchor_strength": anchor_strength,
+            "confidence_power": confidence_power,
+            "smacof_regularization": smacof_regularization,
             "gradient_clip": gradient_clip,
             "max_displacement": max_displacement,
         }
@@ -62,6 +67,8 @@ class SoftDistanceStressSeed(nn.Module):
             raise ValueError(
                 "SoftDistanceStressSeed scales and step sizes must be positive"
             )
+        if confidence_floor < 0:
+            raise ValueError("confidence_floor must be non-negative")
         if (
             not 0.0 <= heavy_stage_fraction <= 1.0
             or not 0.0 <= hydrogen_stage_fraction <= 1.0
@@ -84,6 +91,9 @@ class SoftDistanceStressSeed(nn.Module):
         self.one_three_weight = one_three_weight
         self.one_four_weight = one_four_weight
         self.global_weight = global_weight
+        self.confidence_power = confidence_power
+        self.confidence_floor = confidence_floor
+        self.smacof_regularization = smacof_regularization
         self.hydrogen_lower_weight = hydrogen_lower_weight
         self.heavy_stage_fraction = heavy_stage_fraction
         self.hydrogen_stage_fraction = hydrogen_stage_fraction
@@ -359,6 +369,255 @@ class SoftDistanceStressSeed(nn.Module):
             * torch.sigmoid(scaled)
         )
 
+    def _confidence_weight(self, probability: torch.Tensor) -> torch.Tensor:
+        """Sharp local confidence with a non-zero linear gradient path."""
+        probability = probability.clamp(0.0, 1.0)
+        return (
+            probability.pow(self.confidence_power)
+            + self.confidence_floor * probability
+        )
+
+    def _assemble_sparse_constraints(
+        self,
+        atom_mask: torch.Tensor,
+        heavy_mask: torch.Tensor,
+        probabilities: torch.Tensor,
+        covalent_radii: torch.Tensor,
+        vdw_radii: torch.Tensor,
+        bond_length_scales: torch.Tensor,
+        local_geometry_priors: Dict[str, torch.Tensor],
+        differentiable: bool,
+    ) -> Dict[str, torch.Tensor]:
+        """Build one internally weighted D12/D13/D14 stress matrix."""
+        pair_mask = self._pair_mask(atom_mask)
+        pair_mask_f = pair_mask.to(probabilities.dtype)
+        bonded = probabilities[..., 1:]
+        bond_probability = bonded.sum(dim=-1) * pair_mask_f
+        bond_share = bonded / bonded.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-8)
+        radii_sum = (
+            covalent_radii[:, :, None]
+            + covalent_radii[:, None, :]
+        ).clamp_min(0.5)
+        target_by_type = (
+            radii_sum.unsqueeze(-1) * bond_length_scales[1:]
+        )
+        target_12 = (
+            bond_share * target_by_type
+        ).sum(dim=-1).clamp_min(0.5)
+
+        two_hop_mass = torch.bmm(
+            bond_probability, bond_probability
+        )
+        normalizer = 1.0 - torch.exp(two_hop_mass.new_tensor(-1.0))
+        analytic_p13 = (
+            (1.0 - torch.exp(-two_hop_mass)) / normalizer
+        ).clamp(0.0, 1.0)
+        three_hop_mass = torch.bmm(
+            two_hop_mass, bond_probability
+        )
+        analytic_p14 = (
+            (1.0 - torch.exp(-three_hop_mass)) / normalizer
+        ).clamp(0.0, 1.0)
+        skeleton = (
+            heavy_mask[:, :, None] & heavy_mask[:, None, :]
+        ).to(probabilities.dtype)
+
+        shell_12 = bond_probability
+        shell_13 = (
+            (1.0 - shell_12) * analytic_p13 * pair_mask_f
+        )
+        shell_14 = (
+            (1.0 - shell_12)
+            * (1.0 - shell_13)
+            * analytic_p14
+            * skeleton
+            * pair_mask_f
+        )
+        target_13 = radii_sum * local_geometry_priors[
+            "one_three_distance_ratio"
+        ]
+        target_14 = radii_sum * local_geometry_priors[
+            "one_four_distance_ratio"
+        ]
+        weight_12 = (
+            self.bond_weight * self._confidence_weight(shell_12)
+        )
+        weight_13 = (
+            self.one_three_weight
+            * self._confidence_weight(shell_13)
+        )
+        weight_14 = (
+            self.one_four_weight
+            * self._confidence_weight(shell_14)
+        )
+        sparse_weight = (
+            weight_12 + weight_13 + weight_14
+        ) * pair_mask_f
+        sparse_target = (
+            weight_12 * target_12
+            + weight_13 * target_13
+            + weight_14 * target_14
+        ) / sparse_weight.clamp_min(1e-8)
+        sparse_target = sparse_target.clamp_min(0.5)
+
+        far_membership = (
+            (1.0 - shell_12)
+            * (1.0 - shell_13)
+            * (1.0 - shell_14)
+            * pair_mask_f
+        )
+        lower_scale = (
+            self.hydrogen_lower_weight
+            + (1.0 - self.hydrogen_lower_weight) * skeleton
+        )
+        lower_weight = (
+            self.global_weight * far_membership * lower_scale
+        )
+        vdw_lower = self.vdw_scale * (
+            vdw_radii[:, :, None] + vdw_radii[:, None, :]
+        )
+        path_distance = self.soft_path_distance(
+            bond_probability,
+            target_12,
+            atom_mask,
+            differentiable=differentiable,
+        )
+        graph_lower = (
+            self.global_distance_scale
+            * path_distance
+            / (
+                1.0
+                + path_distance / self.global_distance_saturation
+            )
+        )
+        lower_bound = self.lower_softness * torch.logsumexp(
+            torch.stack([vdw_lower, graph_lower], dim=-1)
+            / self.lower_softness,
+            dim=-1,
+        )
+        return {
+            "bond_probability": bond_probability,
+            "bond_target": target_12,
+            "sparse_target": sparse_target,
+            "sparse_weight": sparse_weight,
+            "lower_bound": lower_bound,
+            "lower_weight": lower_weight,
+            "shell_12": shell_12,
+            "shell_13": shell_13,
+            "shell_14": shell_14,
+        }
+
+    def _smacof_update(
+        self,
+        current: torch.Tensor,
+        target: torch.Tensor,
+        weight: torch.Tensor,
+        lower_bound: torch.Tensor,
+        lower_weight: torch.Tensor,
+        stage_pair: torch.Tensor,
+        movable_mask: torch.Tensor,
+        center_mask: torch.Tensor,
+        atom_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """One differentiable anchored SMACOF step plus weak vdW repulsion."""
+        dtype = current.dtype
+        distance = torch.sqrt(
+            (
+                current[:, :, None, :]
+                - current[:, None, :, :]
+            ).square().sum(dim=-1)
+            + 1e-8
+        )
+        local_weight = weight * stage_pair
+        active_lower_weight = (
+            lower_weight
+            * stage_pair
+            * torch.sigmoid(
+                (lower_bound - distance) / self.lower_softness
+            )
+        )
+        pair_weight = local_weight + active_lower_weight
+        pair_target = (
+            local_weight * target
+            + active_lower_weight * lower_bound
+        ) / pair_weight.clamp_min(1e-8)
+        pair_weight = 0.5 * (
+            pair_weight + pair_weight.transpose(1, 2)
+        )
+        pair_target = 0.5 * (
+            pair_target + pair_target.transpose(1, 2)
+        )
+        ratio = (
+            pair_weight * pair_target / distance.clamp_min(1e-4)
+        )
+        atoms = current.size(1)
+        eye = torch.eye(
+            atoms, device=current.device, dtype=dtype
+        )[None]
+        ratio = ratio * (1.0 - eye)
+        b_matrix = -ratio
+        b_matrix = b_matrix - torch.diag_embed(
+            b_matrix.sum(dim=-1)
+        )
+        laplacian = (
+            torch.diag_embed(pair_weight.sum(dim=-1))
+            - pair_weight
+        )
+        rhs = torch.bmm(b_matrix, current)
+
+        fixed = (~movable_mask.bool()) | (~atom_mask)
+        system = laplacian + self.smacof_regularization * eye
+        system = torch.where(
+            fixed[:, :, None],
+            eye.expand_as(system),
+            system,
+        )
+        rhs = torch.where(
+            fixed.unsqueeze(-1), current, rhs
+        )
+        updated = torch.linalg.solve(system, rhs)
+
+        # Sparse stress has no attractive long-range target. A weak hinge
+        # prevents non-local overlap without making the molecule compact.
+        vector = (
+            updated[:, :, None, :]
+            - updated[:, None, :, :]
+        )
+        distance = torch.sqrt(
+            vector.square().sum(dim=-1) + 1e-8
+        )
+        unit = vector / distance.unsqueeze(-1)
+        derivative = self._lower_derivative(
+            distance,
+            lower_bound,
+            lower_weight * stage_pair,
+        )
+        repulsion = (
+            derivative.unsqueeze(-1) * unit
+        ).sum(dim=2)
+        norm = torch.linalg.vector_norm(
+            repulsion, dim=-1, keepdim=True
+        ).clamp_min(1e-8)
+        repulsion = repulsion / (
+            1.0 + norm / self.gradient_clip
+        )
+        updated = updated - (
+            0.25
+            * self.step_size
+            * repulsion
+            * movable_mask.unsqueeze(-1)
+        )
+        center_count = center_mask.sum(
+            dim=1, keepdim=True
+        ).clamp_min(1.0)
+        center = (
+            updated * center_mask.unsqueeze(-1)
+        ).sum(dim=1, keepdim=True) / center_count.unsqueeze(-1)
+        updated = updated - center * center_mask.unsqueeze(-1)
+        return updated * atom_mask.unsqueeze(-1)
+
     def forward(
         self,
         atom_mask: torch.Tensor,
@@ -383,209 +642,21 @@ class SoftDistanceStressSeed(nn.Module):
                 "SoftDistanceStressSeed requires learned local priors: "
                 + ", ".join(sorted(missing))
             )
-        pair_mask = self._pair_mask(atom_mask)
-        pair_mask_f = pair_mask.to(probabilities.dtype)
-        upper = torch.triu(
-            torch.ones_like(pair_mask_f), diagonal=1
-        )
-        bonded = probabilities[..., 1:]
-        bond_probability = bonded.sum(dim=-1) * pair_mask_f
-        bond_share = bonded / bonded.sum(
-            dim=-1, keepdim=True
-        ).clamp_min(1e-8)
-        radii_sum = (
-            covalent_radii[:, :, None]
-            + covalent_radii[:, None, :]
-        ).clamp_min(0.5)
-        target_by_type = (
-            radii_sum.unsqueeze(-1) * bond_length_scales[1:]
-        )
-        bond_target = (
-            bond_share * target_by_type
-        ).sum(dim=-1).clamp_min(0.5)
-
-        learned_p13 = local_geometry_priors[
-            "one_three_probability"
-        ].clamp(0.0, 1.0)
-        two_hop_mass = torch.bmm(
-            bond_probability, bond_probability
-        )
-        one_path_normalizer = 1.0 - torch.exp(
-            two_hop_mass.new_tensor(-1.0)
-        )
-        analytic_p13 = (
-            (1.0 - torch.exp(-two_hop_mass))
-            / one_path_normalizer
-        ).clamp(0.0, 1.0)
-        # The analytic soft path makes local H--X--H and H--X--heavy geometry
-        # available even when the pretrained auxiliary head is uncertain.
-        p13 = 1.0 - (1.0 - learned_p13) * (1.0 - analytic_p13)
-        p14 = local_geometry_priors[
-            "one_four_probability"
-        ].clamp(0.0, 1.0)
-        skeleton = (
-            heavy_mask[:, :, None] & heavy_mask[:, None, :]
-        ).to(probabilities.dtype)
-        # Assign each pair predominantly to its shortest supported shell.
-        bond_membership = bond_probability
-        one_three_membership = (
-            (1.0 - bond_membership) * p13 * pair_mask_f
-        )
-        one_four_membership = (
-            (1.0 - bond_membership)
-            * (1.0 - one_three_membership)
-            * p14
-            * skeleton
-            * pair_mask_f
-        )
-        target_13 = radii_sum * local_geometry_priors[
-            "one_three_distance_ratio"
-        ]
-        target_14 = radii_sum * local_geometry_priors[
-            "one_four_distance_ratio"
-        ]
-
-        path_distance = self.soft_path_distance(
-            bond_probability,
-            bond_target,
+        constraints = self._assemble_sparse_constraints(
             atom_mask,
-            differentiable=differentiable,
+            heavy_mask,
+            probabilities,
+            covalent_radii,
+            vdw_radii,
+            bond_length_scales,
+            local_geometry_priors,
+            differentiable,
         )
-        saturation = self.global_distance_saturation
-        graph_lower = (
-            self.global_distance_scale
-            * path_distance
-            / (1.0 + path_distance / saturation)
-        )
-        vdw_lower = self.vdw_scale * (
-            vdw_radii[:, :, None] + vdw_radii[:, None, :]
-        )
-        # Smooth max of graph expansion and excluded volume.
-        stacked_lower = torch.stack([graph_lower, vdw_lower], dim=-1)
-        global_lower = self.lower_softness * torch.logsumexp(
-            stacked_lower / self.lower_softness, dim=-1
-        )
-        far_membership = (
-            (1.0 - bond_membership)
-            * (1.0 - one_three_membership)
-            * (1.0 - one_four_membership)
-            * pair_mask_f
-        )
-        lower_scale = (
-            self.hydrogen_lower_weight
-            + (1.0 - self.hydrogen_lower_weight) * skeleton
-        )
-        global_membership = (
-            self.global_weight
-            * far_membership
-            * lower_scale
-        )
-
-        # Stage 1 starts from the heavy skeleton only. Hydrogens are attached
-        # after the global heavy topology has been opened.
         coordinates = self._expanded_noise(
             heavy_mask,
             probabilities.dtype,
             generator,
             self.init_scale,
-        )
-        mask = atom_mask.unsqueeze(-1).to(coordinates.dtype)
-        def update(
-            current: torch.Tensor,
-            current_bond_target: torch.Tensor,
-            current_target_13: torch.Tensor,
-            current_target_14: torch.Tensor,
-            current_global_lower: torch.Tensor,
-            current_bond_membership: torch.Tensor,
-            current_one_three_membership: torch.Tensor,
-            current_one_four_membership: torch.Tensor,
-            current_global_membership: torch.Tensor,
-            current_stage_pair: torch.Tensor,
-            current_movable_mask: torch.Tensor,
-            current_center_mask: torch.Tensor,
-        ) -> torch.Tensor:
-            vector = (
-                current[:, :, None, :]
-                - current[:, None, :, :]
-            )
-            distance = torch.sqrt(
-                vector.square().sum(dim=-1) + 1e-8
-            )
-            unit = vector / distance.unsqueeze(-1)
-            derivative = self._target_derivative(
-                distance,
-                current_bond_target,
-                self.bond_weight
-                * current_bond_membership
-                * current_stage_pair,
-            )
-            derivative = derivative + self._target_derivative(
-                distance,
-                current_target_13,
-                self.one_three_weight
-                * current_one_three_membership
-                * current_stage_pair,
-            )
-            derivative = derivative + self._target_derivative(
-                distance,
-                current_target_14,
-                self.one_four_weight
-                * current_one_four_membership
-                * current_stage_pair,
-            )
-            derivative = derivative + self._lower_derivative(
-                distance,
-                current_global_lower,
-                current_global_membership * current_stage_pair,
-            )
-            # Row i contains each physical i--j pair once when accumulating
-            # the gradient acting on atom i.
-            gradient = (
-                derivative
-                * pair_mask_f
-                * upper.add(upper.transpose(1, 2))
-            ).unsqueeze(-1) * unit
-            gradient = gradient.sum(dim=2)
-            norm = torch.linalg.vector_norm(
-                gradient, dim=-1, keepdim=True
-            ).clamp_min(1e-8)
-            gradient = gradient / (
-                1.0 + norm / self.gradient_clip
-            )
-            displacement = (
-                self.step_size
-                * gradient
-                * current_movable_mask.unsqueeze(-1)
-            )
-            displacement_norm = torch.linalg.vector_norm(
-                displacement, dim=-1, keepdim=True
-            ).clamp_min(1e-8)
-            displacement = displacement / (
-                displacement_norm / self.max_displacement
-            ).clamp_min(1.0)
-            updated = (current - displacement) * mask
-            center_count = current_center_mask.sum(
-                dim=1, keepdim=True
-            ).clamp_min(1.0)
-            center = (
-                updated
-                * current_center_mask.unsqueeze(-1)
-            ).sum(dim=1, keepdim=True) / center_count.unsqueeze(-1)
-            updated = (
-                updated
-                - center * current_center_mask.unsqueeze(-1)
-            )
-            return updated * mask
-
-        common_update_inputs = (
-            bond_target,
-            target_13,
-            target_14,
-            global_lower,
-            bond_membership,
-            one_three_membership,
-            one_four_membership,
-            global_membership,
         )
 
         def run_stage(
@@ -596,21 +667,25 @@ class SoftDistanceStressSeed(nn.Module):
             center_mask: torch.Tensor,
         ) -> torch.Tensor:
             stage_inputs = (
-                *common_update_inputs,
+                constraints["sparse_target"],
+                constraints["sparse_weight"],
+                constraints["lower_bound"],
+                constraints["lower_weight"],
                 stage_pair,
                 movable_mask.to(current.dtype),
                 center_mask.to(current.dtype),
+                atom_mask,
             )
             for _ in range(steps):
                 if differentiable:
                     current = checkpoint(
-                        update,
+                        self._smacof_update,
                         current,
                         *stage_inputs,
                         use_reentrant=False,
                     )
                 else:
-                    current = update(
+                    current = self._smacof_update(
                         current, *stage_inputs
                     ).detach()
             return current
@@ -628,6 +703,7 @@ class SoftDistanceStressSeed(nn.Module):
         heavy_pair = (
             heavy_mask[:, :, None] & heavy_mask[:, None, :]
         ).to(probabilities.dtype)
+        all_pair = self._pair_mask(atom_mask).to(probabilities.dtype)
         coordinates = run_stage(
             coordinates,
             heavy_steps,
@@ -642,14 +718,14 @@ class SoftDistanceStressSeed(nn.Module):
             coordinates,
             atom_mask,
             heavy_mask,
-            bond_probability,
-            bond_target,
+            constraints["bond_probability"],
+            constraints["bond_target"],
         )
         hydrogen_mask = atom_mask & ~heavy_mask
         coordinates = run_stage(
             coordinates,
             hydrogen_steps,
-            pair_mask_f,
+            all_pair,
             hydrogen_mask,
             torch.zeros_like(atom_mask),
         )
@@ -658,11 +734,63 @@ class SoftDistanceStressSeed(nn.Module):
         coordinates = run_stage(
             coordinates,
             joint_steps,
-            pair_mask_f,
+            all_pair,
             atom_mask,
             atom_mask,
         )
         return coordinates if differentiable else coordinates.detach()
+
+    def refine(
+        self,
+        coordinates: torch.Tensor,
+        atom_mask: torch.Tensor,
+        heavy_mask: torch.Tensor,
+        probabilities: torch.Tensor,
+        covalent_radii: torch.Tensor,
+        vdw_radii: torch.Tensor,
+        bond_length_scales: torch.Tensor,
+        local_geometry_priors: Dict[str, torch.Tensor],
+        num_steps: int,
+        differentiable: bool = True,
+    ) -> torch.Tensor:
+        """Refine an existing seed with the identical sparse objective."""
+        if num_steps < 0:
+            raise ValueError("num_steps must be non-negative")
+        constraints = self._assemble_sparse_constraints(
+            atom_mask,
+            heavy_mask,
+            probabilities,
+            covalent_radii,
+            vdw_radii,
+            bond_length_scales,
+            local_geometry_priors,
+            differentiable,
+        )
+        all_pair = self._pair_mask(atom_mask).to(coordinates.dtype)
+        update_inputs = (
+            constraints["sparse_target"],
+            constraints["sparse_weight"],
+            constraints["lower_bound"],
+            constraints["lower_weight"],
+            all_pair,
+            atom_mask.to(coordinates.dtype),
+            atom_mask.to(coordinates.dtype),
+            atom_mask,
+        )
+        current = coordinates
+        for _ in range(num_steps):
+            if differentiable:
+                current = checkpoint(
+                    self._smacof_update,
+                    current,
+                    *update_inputs,
+                    use_reentrant=False,
+                )
+            else:
+                current = self._smacof_update(
+                    current, *update_inputs
+                ).detach()
+        return current if differentiable else current.detach()
 
 
 def graph_smoothed_seed(
