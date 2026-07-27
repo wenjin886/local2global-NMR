@@ -56,8 +56,17 @@ export HYDRA_FULL_ERROR=1
 #   --device cpu \
 #   --write-sdf
 
-python -m local2geo_module.eval_prior \
-  --smiles "C=C(CSCCCSc1ccc(C(=O)C(C)(C)C(=O)OC)cc1)CN1CCOCC1" "CCCCCCC" "CCCCCCCCC" \
-  --input-mode corrupted-soft \
-  --noise-std 0.1 \
-  --output-dir xyz_out/corrupted-4
+# python -m local2geo_module.eval_prior \
+  # --smiles "C=C(CSCCCSc1ccc(C(=O)C(C)(C)C(=O)OC)cc1)CN1CCOCC1" "CCCCCCC" "CCCCCCCCC" \
+  # --input-mode corrupted-soft \
+  # --noise-std 0.1 \
+  # --output-dir xyz_out/corrupted-4
+
+exp_path="/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-3-geoinit/dim512-bs256_2026-07-27_17-23-06"
+python -m local2geo_module.eval_hybrid \
+  --checkpoint ${exp_path}/checkpoints/last.ckpt \
+  --smiles "C=C(CSCCCSc1ccc(C(=O)C(C)(C)C(=O)OC)cc1)CN1CCOCC1" "CCCC" "CCCCCCCCC" \
+  --seed-mode soft_stress \
+  --soft-stress-steps 96 \
+  --num-steps 0 \
+  --output-dir ${exp_path}/xyz_out
