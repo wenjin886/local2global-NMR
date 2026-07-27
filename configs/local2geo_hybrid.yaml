@@ -1,26 +1,33 @@
 seed: 1729
 run_test: true
 
+data_name: uspto
+exp_name: dim512-bs256
+group: step-3-geoinit
+exp_save_dir_name: ${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${group}/${exp_save_dir_name}
+log_path: ${output_dir}/logs
+
 data:
-  parquet_paths:
-    - data/uspto/exp_data/example_data_1.parquet
-    - data/uspto/exp_data/example_data_2.parquet
+  parquet_paths: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/uspto/data4initializer
+    # - data/uspto/exp_data/example_data_1.parquet
+    # - data/uspto/exp_data/example_data_2.parquet
   smiles_column: smiles
-  split_ratios: [0.8, 0.1, 0.1]
+  split_ratios: [0.85, 0.05, 0.1]
   split_seed: ${seed}
-  train_batch_size: 8
-  val_batch_size: 8
-  num_workers: 4
+  train_batch_size: 256
+  val_batch_size: 256
+  num_workers: 2
   pin_memory: true
   persistent_workers: true
-  max_heavy_atoms: 96
-  max_total_atoms: 128
+  max_heavy_atoms: 101
+  max_total_atoms: 35
   train_limit: null
   val_limit: null
   test_limit: null
 
 model:
-  hidden_dim: 128
+  hidden_dim: 512
   num_layers: 3
   dropout: 0.05
   residual_scale: 6.0
@@ -63,10 +70,10 @@ checkpoint:
 logger:
   enabled: true
   project: local2geo-hybrid
-  name: null
-  mode: offline
+  name: ${exp_name}
+  mode: online
   log_model: false
 
 hydra:
   run:
-    dir: outputs/local2geo_hybrid/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${log_path}

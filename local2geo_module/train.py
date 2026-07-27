@@ -36,7 +36,8 @@ def main(config: DictConfig) -> None:
             config.model, resolve=True, throw_on_missing=True
         )
     )
-    output_dir = Path(HydraConfig.get().runtime.output_dir)
+    # output_dir = Path(HydraConfig.get().runtime.output_dir)
+    output_dir = Path(config.output_dir)
     checkpoint = ModelCheckpoint(
         dirpath=output_dir / "checkpoints",
         filename="epoch={epoch:03d}-val_loss={val/loss:.4f}",

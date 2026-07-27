@@ -29,10 +29,13 @@ export DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/d
 #   --output $DATA_PATH/graph_connectivity_stats.json
 # echo "Data Preprocessing Done. Starting Training..."
 # Train Model
-python -m src.train -cn train_uspto_smiles
+# python -m src.train -cn train_uspto_smiles
 
 # python -m src.train -cn train_uspto_fragment
 # python -m src.train -cn train_uspto_graph
+
+# === Pretrain Initializer ===
+python -m local2geo_module.train
 
 
 

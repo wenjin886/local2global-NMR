@@ -11,6 +11,7 @@ from rdkit import Chem
 from rdkit.Chem import rdchem
 from torch.utils.data import DataLoader, Dataset
 
+import os
 from .constants import (
     AROMATIC,
     BOND_LENGTH_SCALES,
@@ -408,6 +409,8 @@ class Local2GeoDataset(Dataset):
 def _expand_parquet_paths(
     paths: Union[str, Path, Sequence[Union[str, Path]]],
 ) -> Sequence[Path]:
+    if os.path.isdir(paths):
+        paths = [os.path.join(paths, file) for file in os.listdir(paths)]
     if isinstance(paths, (str, Path)):
         paths = [paths]
     expanded = []
