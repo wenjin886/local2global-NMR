@@ -1,11 +1,13 @@
 # local2geo_module
 
-`local2geo_module` is a parameter-free, differentiable all-atom geometry
-initializer. It consumes the soft heavy-edge and H-attachment logits produced
-by `NMRToGraph` and returns explicit-H coordinates in the same atom-slot order.
+`local2geo_module` contains both a parameter-free differentiable all-atom
+geometry solver and an optional learned soft-topology prior. Together they
+consume the soft heavy-edge and H-attachment logits produced by `NMRToGraph`
+and return explicit-H coordinates in the same atom-slot order.
 
-It does not use conformers, 3D labels, RDKit embedding, force fields, a learned
-coordinate MLP, or a graph projection network.
+Neither path uses conformers, 3D labels, RDKit embedding, force fields, or a
+learned coordinate MLP. The learned prior is trained only from clean 2D graphs
+and synthetic corruptions of their logits.
 
 ## Components
 
@@ -87,6 +89,72 @@ differentiable. Coordinates and later SE(3) distance/direction calculations
 should preferably remain FP32, while scalar feature MLPs may use mixed
 precision.
 
+## Hybrid soft-topology pretraining (no 3D labels)
+
+The hybrid path replaces discrete neighbour/path projection with a dense
+message-passing model. It predicts:
+
+- residual corrections to heavy-bond and H-attachment logits;
+- soft 1--3 and 1--4 membership;
+- local distance as an endpoint-covalent-radius log-ratio;
+- geometry class, ring, conjugation, and torsion-class auxiliaries.
+
+Corrected logits use `corrected = raw + residual`, leaving an exact identity
+gradient path from later coordinate/NMR losses back to the original
+`NMRToGraph` logits. There is no `topk`, threshold, or `argmax` in this learned
+training path. MDS remains an evaluation-only detached seed choice.
+
+The default config reads the two example parquet files directly:
+
+```bash
+python -m local2geo_module.train
+```
+
+The default W&B mode is `offline`; use online logging on HPC with:
+
+```bash
+python -m local2geo_module.train \
+  logger.mode=online \
+  data.parquet_paths='[/path/to/parquet_directory]'
+```
+
+Useful smoke-test overrides are:
+
+```bash
+python -m local2geo_module.train \
+  data.train_limit=32 data.val_limit=8 \
+  data.num_workers=0 trainer.max_epochs=1 \
+  logger.enabled=false
+```
+
+Canonical non-stereochemical SMILES are deduplicated and deterministically
+split 80/10/10, preventing the same 2D graph from leaking across splits.
+Supervision is generated entirely from SMILES connectivity:
+
+- bond and H-parent labels from the clean graph;
+- graph-distance-2/3 membership;
+- ring/conjugation and geometry classes;
+- VSEPR/covalent-radius 1--3 targets;
+- planar, ring-gauche, or acyclic-heavy-chain anti 1--4 targets.
+
+After training, load a Lightning checkpoint and write explicit-H XYZ:
+
+```bash
+python -m local2geo_module.eval_hybrid \
+  --checkpoint outputs/local2geo_hybrid/.../checkpoints/last.ckpt \
+  --smiles "CCCC" "c1ccccc1" \
+  --input-mode clean-soft \
+  --seed-mode mds \
+  --num-steps 256 \
+  --output-dir hybrid_local2geo_outputs \
+  --write-sdf
+```
+
+Use `--input-mode corrupted-soft` to measure graph-error recovery. For later
+end-to-end NMR training, import `HybridLocal2GeoModule.correct_graph` (or the
+contained `SoftTopologyPrior`) and run the geometry solver with
+`differentiable=True`; do not use the detached MDS seed for that training path.
+
 ## SMILES demo
 
 No checkpoint is required:
@@ -113,6 +181,22 @@ python -m local2geo_module.eval \
   --seed-mode differentiable \
   --output-dir local2geo_outputs/soft_seed
 ```
+
+To evaluate the fully-soft prior initializer directly from SMILES:
+
+```bash
+python -m local2geo_module.eval_prior \
+  --smiles "CCO" "c1ccccc1" \
+  --input-mode clean-soft \
+  --num-steps 400 \
+  --output-dir prior_initializer_outputs \
+  --write-sdf
+```
+
+This path writes explicit-hydrogen XYZ coordinates. It uses the SMILES only to
+simulate NMRToGraph-shaped soft probabilities; the prior initializer receives
+the resulting edge and geometry probabilities rather than RDKit coordinates.
+Use `--input-mode corrupted-soft` to test robustness to graph errors.
 
 `--unbonded-distance-scale` multiplies the sum of the two vdW radii and
 therefore controls the soft lower bound for every unbonded pair. Values around
@@ -155,7 +239,8 @@ independence, and XYZ/SDF export.
 
 ## W&B visualization
 
-`visualization.py` retains the 2D graph and 3D SDF utilities. Because this
-initializer has no standalone training loop, random validation structure
-logging belongs in the main NMR Lightning module after integration rather than
-in a separate local2geo trainer.
+`visualization.py` retains the 2D graph and 3D SDF utilities. The hybrid
+standalone trainer logs all scalar recovery/local-prior metrics through its
+Lightning logger; 3D structure logging can be added after a checkpoint is
+meaningful because coordinate relaxation is deliberately not part of the
+2D-only pretraining loss.

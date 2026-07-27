@@ -48,10 +48,16 @@ export HYDRA_FULL_ERROR=1
 #   --device cpu \
 #   # --write-sdf
 
-python -m local2geo_module.eval \
-  --smiles "CCCCCCC" \
-  --seed-mode mds \
-  --num-steps 256 \
-  --output-dir xyz_out/mds \
-  --device cpu \
-  --write-sdf
+# python -m local2geo_module.eval \
+#   --smiles "CCCCCCC" \
+#   --seed-mode mds \
+#   --num-steps 256 \
+#   --output-dir xyz_out/mds \
+#   --device cpu \
+#   --write-sdf
+
+python -m local2geo_module.eval_prior \
+  --smiles "C=C(CSCCCSc1ccc(C(=O)C(C)(C)C(=O)OC)cc1)CN1CCOCC1" "CCCCCCC" "CCCCCCCCC" \
+  --input-mode corrupted-soft \
+  --noise-std 0.1 \
+  --output-dir xyz_out/corrupted-4

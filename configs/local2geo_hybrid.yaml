@@ -1,0 +1,72 @@
+seed: 1729
+run_test: true
+
+data:
+  parquet_paths:
+    - data/uspto/exp_data/example_data_1.parquet
+    - data/uspto/exp_data/example_data_2.parquet
+  smiles_column: smiles
+  split_ratios: [0.8, 0.1, 0.1]
+  split_seed: ${seed}
+  train_batch_size: 8
+  val_batch_size: 8
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  max_heavy_atoms: 96
+  max_total_atoms: 128
+  train_limit: null
+  val_limit: null
+  test_limit: null
+
+model:
+  hidden_dim: 128
+  num_layers: 3
+  dropout: 0.05
+  residual_scale: 6.0
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-5
+
+  # Synthetic NMR-to-graph errors. The correct 2D graph remains the label.
+  clean_margin: 4.0
+  logit_noise_std: 0.4
+  bond_type_confusion_probability: 0.15
+  false_positive_probability: 0.03
+  false_negative_probability: 0.12
+  attachment_confusion_probability: 0.15
+  corruption_boost: 6.0
+
+  edge_loss_weight: 1.0
+  attachment_loss_weight: 1.0
+  geometry_loss_weight: 0.3
+  one_three_loss_weight: 0.5
+  one_four_loss_weight: 0.5
+  distance_loss_weight: 0.5
+  ring_loss_weight: 0.2
+  conjugated_loss_weight: 0.2
+  torsion_loss_weight: 0.3
+  residual_loss_weight: 1.0e-3
+  positive_class_weight_cap: 20.0
+
+trainer:
+  accelerator: auto
+  devices: 1
+  max_epochs: 50
+  gradient_clip_val: 1.0
+  log_every_n_steps: 10
+  check_val_every_n_epoch: 1
+  deterministic: false
+
+checkpoint:
+  save_top_k: 3
+
+logger:
+  enabled: true
+  project: local2geo-hybrid
+  name: null
+  mode: offline
+  log_model: false
+
+hydra:
+  run:
+    dir: outputs/local2geo_hybrid/${now:%Y-%m-%d}/${now:%H-%M-%S}

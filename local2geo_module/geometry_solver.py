@@ -34,6 +34,8 @@ class DifferentiableGeometrySolver(nn.Module):
         angle_weight: float = 4.0,
         planar_weight: float = 0.5,
         clash_weight: float = 2.0,
+        one_three_distance_weight: float = 0.0,
+        one_four_distance_weight: float = 0.0,
         bond_probability_power: float = 3.0,
         angle_probability_power: float = 2.0,
         clash_distance_scale: float = 0.80,
@@ -57,6 +59,8 @@ class DifferentiableGeometrySolver(nn.Module):
         self.angle_weight = angle_weight
         self.planar_weight = planar_weight
         self.clash_weight = clash_weight
+        self.one_three_distance_weight = one_three_distance_weight
+        self.one_four_distance_weight = one_four_distance_weight
         self.bond_probability_power = bond_probability_power
         self.angle_probability_power = angle_probability_power
         self.clash_distance_scale = clash_distance_scale
@@ -337,6 +341,9 @@ class DifferentiableGeometrySolver(nn.Module):
         covalent_radii: torch.Tensor,
         vdw_radii: torch.Tensor,
         reduction: str = "mean",
+        local_geometry_priors: Optional[
+            Dict[str, torch.Tensor]
+        ] = None,
     ) -> Dict[str, torch.Tensor]:
         dtype = positions.dtype
         pair_mask_f = pair_mask.to(dtype)
@@ -451,9 +458,19 @@ class DifferentiableGeometrySolver(nn.Module):
         one_path_normalizer = 1.0 - torch.exp(
             two_hop_mass.new_tensor(-1.0)
         )
-        one_three_probability = (
+        analytic_one_three_probability = (
             (1.0 - torch.exp(-two_hop_mass)) / one_path_normalizer
         ).clamp(0.0, 1.0)
+        one_three_probability = analytic_one_three_probability
+        if local_geometry_priors is not None:
+            learned_one_three = local_geometry_priors[
+                "one_three_probability"
+            ].clamp(0.0, 1.0)
+            # Soft union retains the analytic path and lets the learned prior
+            # restore a missed/low-confidence path without a hard threshold.
+            one_three_probability = 1.0 - (
+                1.0 - analytic_one_three_probability
+            ) * (1.0 - learned_one_three)
         unbonded_weight = (
             (1.0 - q)
             * (1.0 - one_three_probability)
@@ -498,11 +515,55 @@ class DifferentiableGeometrySolver(nn.Module):
                 per_atom_clash, atom_mask.to(dtype)
             )
         )
+        zero = positions.sum() * 0.0
+        local_one_three = zero
+        local_one_four = zero
+        if local_geometry_priors is not None:
+            radii_baseline = (
+                covalent_radii[:, :, None]
+                + covalent_radii[:, None, :]
+            ).clamp_min(0.5)
+            target_13 = (
+                radii_baseline
+                * local_geometry_priors["one_three_distance_ratio"]
+            )
+            target_14 = (
+                radii_baseline
+                * local_geometry_priors["one_four_distance_ratio"]
+            )
+            learned_13 = local_geometry_priors[
+                "one_three_probability"
+            ] * (1.0 - q)
+            learned_14 = (
+                local_geometry_priors["one_four_probability"]
+                * (1.0 - q)
+                * (1.0 - one_three_probability)
+            )
+            learned_13 = learned_13 * pair_mask_f * upper
+            learned_14 = learned_14 * pair_mask_f * upper
+            value_13 = torch.log(
+                distance.clamp_min(1e-4) / target_13.clamp_min(1e-4)
+            ).square()
+            value_14 = torch.log(
+                distance.clamp_min(1e-4) / target_14.clamp_min(1e-4)
+            ).square()
+            if reduction == "force":
+                local_one_three = (value_13 * learned_13).sum()
+                local_one_four = (value_14 * learned_14).sum()
+            else:
+                local_one_three = self._masked_mean(
+                    value_13, learned_13
+                )
+                local_one_four = self._masked_mean(
+                    value_14, learned_14
+                )
         return {
             "bond": bond,
             "angle": angle,
             "planar": planar,
             "clash": clash,
+            "one_three_distance": local_one_three,
+            "one_four_distance": local_one_four,
         }
 
     def total(self, terms: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -511,6 +572,10 @@ class DifferentiableGeometrySolver(nn.Module):
             + self.angle_weight * terms["angle"]
             + self.planar_weight * terms["planar"]
             + self.clash_weight * terms["clash"]
+            + self.one_three_distance_weight
+            * terms.get("one_three_distance", 0.0)
+            + self.one_four_distance_weight
+            * terms.get("one_four_distance", 0.0)
         )
 
     def _solve(
@@ -522,6 +587,9 @@ class DifferentiableGeometrySolver(nn.Module):
         covalent_radii: torch.Tensor,
         vdw_radii: torch.Tensor,
         differentiable: bool,
+        local_geometry_priors: Optional[
+            Dict[str, torch.Tensor]
+        ] = None,
     ) -> Tuple[
         torch.Tensor,
         torch.Tensor,
@@ -548,6 +616,7 @@ class DifferentiableGeometrySolver(nn.Module):
                     covalent_radii,
                     vdw_radii,
                     reduction="force",
+                    local_geometry_priors=local_geometry_priors,
                 )
                 gradient = torch.autograd.grad(
                     self.total(force_terms),
@@ -580,6 +649,7 @@ class DifferentiableGeometrySolver(nn.Module):
                 covalent_radii,
                 vdw_radii,
                 reduction="mean",
+                local_geometry_priors=local_geometry_priors,
             )
         if not differentiable:
             positions = positions.detach()
@@ -598,6 +668,12 @@ class DifferentiableGeometrySolver(nn.Module):
         heavy_edge_logits: torch.Tensor,
         h_attachment_logits: torch.Tensor,
         differentiable: bool = True,
+        geometry_probabilities_override: Optional[
+            torch.Tensor
+        ] = None,
+        local_geometry_priors: Optional[
+            Dict[str, torch.Tensor]
+        ] = None,
     ) -> Dict[str, torch.Tensor]:
         del heavy_mask, hydrogen_mask  # masks are encoded below by atom types.
         device_type = heavy_edge_logits.device.type
@@ -640,11 +716,29 @@ class DifferentiableGeometrySolver(nn.Module):
                 heavy_pair_mask,
                 attachment_mask,
             )
-            geometry_probabilities = self.soft_geometry_probabilities(
-                atomic_numbers,
-                atom_mask,
-                graph["edge_probabilities"],
+            analytic_geometry_probabilities = (
+                self.soft_geometry_probabilities(
+                    atomic_numbers,
+                    atom_mask,
+                    graph["edge_probabilities"],
+                )
             )
+            if geometry_probabilities_override is None:
+                geometry_probabilities = analytic_geometry_probabilities
+            else:
+                learned_geometry = (
+                    geometry_probabilities_override.float()
+                    * atom_mask.unsqueeze(-1)
+                )
+                learned_geometry = learned_geometry / learned_geometry.sum(
+                    dim=-1, keepdim=True
+                ).clamp_min(1e-8)
+                # Retain an analytic gradient path from corrected edges while
+                # allowing the pretrained head to resolve soft hybridisation.
+                geometry_probabilities = (
+                    0.2 * analytic_geometry_probabilities
+                    + 0.8 * learned_geometry
+                )
             covalent_radii = self.covalent_radius_table[atomic_numbers]
             vdw_radii = self.vdw_radius_table[atomic_numbers]
             seed, coordinates, terms, seed_hard_types = self._solve(
@@ -655,6 +749,7 @@ class DifferentiableGeometrySolver(nn.Module):
                 covalent_radii,
                 vdw_radii,
                 differentiable=differentiable,
+                local_geometry_priors=local_geometry_priors,
             )
         return {
             **graph,
