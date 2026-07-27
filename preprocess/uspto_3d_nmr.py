@@ -242,17 +242,22 @@ def preprocess_uspto_only_nmr_3d_coords(
     # compact nmr data
     for split in nmr_smiles_idx.keys():
         print(f"Step 1: Processing NMR data for {split}...")
-        save_path = osp.join(target_dir, f"{split}_only_nmr.pt")
-      
-        nmr_data_list = torch.load(osp.join(nmr_dir, f"{split}.pt"))
-        nmr_data_list = [compact_nmr_data(datai) for datai in nmr_data_list]
+        split_path= osp.join(target_dir, f"{split}_only_nmr.pt")
+        if os.path.exists(split_path):
+            print(f"Already compact data. Loading from {split_path}")
+            nmr_data_list = torch.load(split_path)
+        else:
+            nmr_data_list = torch.load(osp.join(nmr_dir, f"{split}.pt"))
+            nmr_data_list = [
+                compact_nmr_data(datai) for datai in tqdm(nmr_data_list)]
+            torch.save(nmr_data_list, split_path)
+            print(f"Saving compact data to {split_path}")
+                
         nmr_smiles_idx[split] = {datai.isomeric_smiles: i for i,datai in enumerate(nmr_data_list)}
-        torch.save(nmr_data_list, save_path)
         data_size_info["only_nmr"][split] = len(nmr_data_list)
-        print(f"Step 1: Done processing NMR data for {split}, saving to {save_path}")
         del nmr_data_list
             
-    print(nmr_smiles_idx)
+    # print(nmr_smiles_idx)
     coord_data = {
         "train": [],
         "test": [],
@@ -267,7 +272,7 @@ def preprocess_uspto_only_nmr_3d_coords(
 
                 for nmr_split in nmr_smiles_idx.keys():
                     if smiles in nmr_smiles_idx[nmr_split]:
-                        print(f"Found {smiles} in {nmr_split}")
+                        # print(f"Found {smiles} in {nmr_split}")
                         datai = convert_to_data(mol, smiles)
                         coord_data[nmr_split].append(datai)
     
@@ -302,7 +307,8 @@ def preprocess_uspto_only_nmr_3d_coords(
 
 if __name__ == "__main__":
     coords_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/download/preprocessed"
-    nmr_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/local2global/data/uspto/preprocessed"
+    # nmr_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/local2global/data/uspto/preprocessed"
+    nmr_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/uspto/preprocessed"
     tgt_dir = osp.join(nmr_dir, "3d_to_nmr")
     os.makedirs(tgt_dir, exist_ok=True)
 

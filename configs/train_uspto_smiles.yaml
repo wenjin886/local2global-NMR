@@ -12,7 +12,7 @@ exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
-ckpt_path: null
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-0-nmr2smiles/joint-bixt-smiles-d512_2026-07-26_20-54-46/checkpoints/last.ckpt
 only_load_weights: false
 load_weights_strict: true
 
@@ -26,9 +26,9 @@ datamodule:
   train_path: ${data_path}/train.pt
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
-  train_batch_size: 128
+  train_batch_size: 256
   val_batch_size: 64
-  num_workers: 0
+  num_workers: 1
   pin_memory: false
   val_generation_size: 1024
   val_generation_seed: 0
