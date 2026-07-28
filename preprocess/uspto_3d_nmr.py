@@ -1,10 +1,11 @@
 """Build a compact, sharded USPTO 3D -> NMR pretraining dataset.
 
-The source spectra are MestreNova simulations. Hydrogen peak integrations are
-expanded into an atom-sized multiset. Carbon labels are matched to
-chirality-aware RDKit symmetry classes; raw carbon *line* counts are not used
-as atom counts because heteronuclear coupling can split one resonance into
-many lines.
+The authoritative NMR records and split assignments come directly from
+``uspto_nmr_preprocess.py`` outputs (``train.pt``, ``val.pt``, and
+``test.pt``). Raw hydrogen and carbon peak sets are retained without expanding
+integrations, collapsing carbon lines, or requiring peak/atom cardinalities to
+match. Chirality-aware RDKit graph symmetry classes are stored as per-atom
+environment labels for an optional pretraining consistency loss.
 
 The output is deliberately independent from the fragment/NMR-to-graph
 datasets. Each molecule is stored once with all available RDKit conformers;
@@ -26,7 +27,6 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 
 import h5py
 import numpy as np
-import pyarrow.parquet as pq
 import torch
 from rdkit import Chem
 from tqdm import tqdm
@@ -34,7 +34,7 @@ from tqdm import tqdm
 
 URL_USPTO = "https://zenodo.org/records/17766755/files/uspto.tar.gz?download=1"
 SPLITS = ("train", "val", "test")
-DATASET_VERSION = 1
+DATASET_VERSION = 2
 
 
 def read_str(value: Any) -> str:
@@ -241,12 +241,12 @@ def collapse_carbon_lines(
     class_count: int,
     max_cluster_span: float = 15.0,
 ) -> Optional[torch.Tensor]:
-    """Collapse sorted multiplet lines into a known number of resonances.
+    """Legacy audit helper for collapsing lines to a known resonance count.
 
     This exact one-dimensional dynamic program minimizes weighted within-group
-    variance over contiguous groups. It is intentionally opt-in: raw lines can
-    include pathological simulated multiplets, so ``carbon_policy=exact`` is
-    the conservative default.
+    variance over contiguous groups. The current 3D2Shift builder deliberately
+    does not call this helper and retains raw carbon peaks from the NMR PT
+    records.
     """
     values, weights = _carbon_line_values(peaks)
     line_count = len(values)
@@ -358,7 +358,7 @@ def molecule_from_h5(
     return {
         "atomic_numbers": torch.tensor(charges, dtype=torch.long),
         "positions": torch.tensor(positions, dtype=torch.float32),
-        "equivalence_classes": symmetry_classes(molecule),
+        "environment_ids": symmetry_classes(molecule),
     }, "ok"
 
 
@@ -541,117 +541,14 @@ def preprocess_uspto_only_nmr_3d_coords(
     )
 
 
-def _carbon_class_count(
-    atomic_numbers: torch.Tensor,
-    classes: torch.Tensor,
-) -> int:
-    return int(torch.unique(classes[atomic_numbers.eq(6)]).numel())
-
-
-def _hydrogen_training_mask(
-    molecule: Chem.Mol,
-    policy: str,
-    target_count: int,
-    max_missing_hydrogens: int,
-) -> Optional[torch.Tensor]:
-    atomic_numbers = torch.tensor(
-        [atom.GetAtomicNum() for atom in molecule.GetAtoms()]
-    )
-    all_h = atomic_numbers.eq(1)
-    carbon_h = torch.tensor(
-        [
-            atom.GetAtomicNum() == 1
-            and atom.GetNeighbors()[0].GetAtomicNum() == 6
-            for atom in molecule.GetAtoms()
-        ],
-        dtype=torch.bool,
-    )
-    if target_count == int(all_h.sum()):
-        return all_h
-    if policy == "exact_or_carbon_bound" and target_count == int(carbon_h.sum()):
-        return carbon_h
-    if (
-        policy == "partial_missing"
-        and 0 < int(all_h.sum()) - target_count <= max_missing_hydrogens
-    ):
-        return all_h
-    return None
-
-
-def targets_from_row(
-    row: Mapping[str, Any],
-    structure: Dict[str, Any],
-    structure_smiles: str,
-    hydrogen_policy: str,
-    carbon_policy: str,
-    max_carbon_cluster_span: float,
-    max_missing_hydrogens: int,
-) -> Tuple[Optional[Dict[str, Any]], str]:
-    molecule = _explicit_molecule(structure_smiles)
-    if molecule is None:
-        return None, "invalid_smiles"
-    hydrogen_peaks = _as_peak_list(row.get("h_nmr_peaks"))
-    peak_tensors = hydrogen_peak_tensors(hydrogen_peaks)
-    h_targets = expand_hydrogen_shifts(hydrogen_peaks)
-    if h_targets is None or h_targets.numel() == 0:
-        return None, "invalid_hydrogen_integration"
-    h_mask = _hydrogen_training_mask(
-        molecule,
-        hydrogen_policy,
-        int(h_targets.numel()),
-        max_missing_hydrogens=max_missing_hydrogens,
-    )
-    if h_mask is None:
-        return None, "hydrogen_count_mismatch"
-
-    class_count = _carbon_class_count(
-        structure["atomic_numbers"], structure["equivalence_classes"]
-    )
-    if class_count == 0:
-        return None, "no_carbon_targets"
-    carbon_peaks = _as_peak_list(row.get("c_nmr_peaks"))
-    if carbon_policy == "exact":
-        values, _ = _carbon_line_values(carbon_peaks)
-        c_targets = (
-            torch.tensor(values, dtype=torch.float32)
-            if len(values) == class_count
-            else None
-        )
-    elif carbon_policy == "collapse":
-        c_targets = collapse_carbon_lines(
-            carbon_peaks, class_count, max_carbon_cluster_span
-        )
-    else:
-        raise ValueError(f"Unknown carbon policy: {carbon_policy}")
-    if c_targets is None:
-        return None, "carbon_count_mismatch"
-    carbon_classes = structure["equivalence_classes"][
-        structure["atomic_numbers"].eq(6)
-    ]
-    class_sizes = torch.stack(
-        [
-            carbon_classes.eq(item).sum()
-            for item in torch.unique(carbon_classes, sorted=True)
-        ]
-    )
-    assert peak_tensors is not None
-    return {
-        "h_shifts": h_targets,
-        "h_peak_shifts": peak_tensors[0],
-        "h_peak_counts": peak_tensors[1],
-        "h_prediction_mask": h_mask,
-        "c_shifts": c_targets,
-        # These sizes belong to the ordered symmetry classes, not directly to
-        # the sorted c_shifts. Their shift assignment is established by the
-        # per-batch multiset matching loss.
-        "c_equivalence_class_sizes": class_sizes,
-    }, "ok"
-
-
 def iter_parquet_rows(
     paths: Sequence[str | Path],
     batch_size: int = 4096,
 ) -> Iterator[Dict[str, Any]]:
+    # Parquet is used only by the standalone audit utility. Keep it out of the
+    # 3D2Shift build path and avoid making pyarrow a build-time dependency.
+    import pyarrow.parquet as pq
+
     columns = ["smiles", "h_nmr_peaks", "c_nmr_peaks"]
     for path in paths:
         parquet = pq.ParquetFile(str(path))
@@ -788,15 +685,45 @@ class ShardWriter:
         return manifest
 
 
+def targets_from_nmr_record(
+    record: Any,
+) -> Tuple[Optional[Dict[str, torch.Tensor]], str]:
+    """Read raw peak sets from an authoritative uspto_nmr_preprocess record."""
+    h_peaks = torch.as_tensor(
+        getattr(record, "h_nmr", []), dtype=torch.float32
+    ).reshape(-1)
+    c_peaks = torch.as_tensor(
+        getattr(record, "c_nmr", []), dtype=torch.float32
+    ).reshape(-1)
+    if not torch.isfinite(h_peaks).all() or not torch.isfinite(c_peaks).all():
+        return None, "nonfinite_peak_shift"
+    if h_peaks.numel() == 0 and c_peaks.numel() == 0:
+        return None, "no_peak_shifts"
+
+    integration = torch.as_tensor(
+        getattr(record, "h_nmr_integration", []), dtype=torch.float32
+    ).reshape(-1)
+    integration_mask = torch.as_tensor(
+        getattr(record, "h_nmr_integration_mask", []), dtype=torch.bool
+    ).reshape(-1)
+    if integration.numel() != h_peaks.numel():
+        integration = torch.zeros_like(h_peaks)
+        integration_mask = torch.zeros_like(h_peaks, dtype=torch.bool)
+    elif integration_mask.numel() != h_peaks.numel():
+        integration_mask = torch.isfinite(integration)
+    integration = torch.nan_to_num(integration)
+    return {
+        "h_peak_shifts": h_peaks,
+        "h_peak_integrations": integration,
+        "h_peak_integration_mask": integration_mask,
+        "c_peak_shifts": c_peaks,
+    }, "ok"
+
+
 def build_3d2shift_dataset(
-    parquet_paths: Sequence[str | Path],
     nmr_dir: str | Path,
     coords_dir: str | Path,
     output_dir: str | Path,
-    hydrogen_policy: str = "exact",
-    carbon_policy: str = "exact",
-    max_carbon_cluster_span: float = 15.0,
-    max_missing_hydrogens: int = 2,
     shard_size: int = 4096,
     audit_only: bool = False,
     index_cache: str | Path | None = None,
@@ -809,7 +736,7 @@ def build_3d2shift_dataset(
         if index_cache is None
         else Path(index_cache)
     )
-    coordinate_index, audit, split_for_smiles, nmr_audit = (
+    coordinate_index, audit, _, nmr_audit = (
         load_or_build_index_cache(
             coords_dir=coords_dir,
             nmr_dir=nmr_dir,
@@ -832,72 +759,46 @@ def build_3d2shift_dataset(
         for split in SPLITS
         if osp.exists(osp.join(str(coords_dir), f"{split}_molecules.h5"))
     }
-    seen_coordinate_records: set[Tuple[str, str, str]] = set()
     try:
-        for row in tqdm(iter_parquet_rows(parquet_paths), desc="Matching spectra"):
-            smiles = str(row.get("smiles", ""))
-            key = canonical_smiles(smiles, isomeric=True)
-            if key is None:
-                audit["invalid_parquet_smiles"] += 1
-                continue
-            output_split = split_for_smiles.get(key)
-            if output_split is None:
-                audit["spectrum_not_in_nmr_splits"] += 1
-                continue
-            references = coordinate_index.get(key, [])
-            if not references:
-                audit["spectrum_without_coordinates"] += 1
-                continue
-            for coordinate_split, mol_idx in references:
-                record_key = (coordinate_split, mol_idx, key)
-                if record_key in seen_coordinate_records:
-                    audit["duplicate_spectrum_for_coordinate"] += 1
+        for output_split in SPLITS:
+            records = _load_torch(Path(nmr_dir) / f"{output_split}.pt")
+            for record_index, record in enumerate(
+                tqdm(records, desc=f"Building {output_split} 3D2Shift")
+            ):
+                smiles = getattr(record, "isomeric_smiles", None)
+                if smiles is None:
+                    smiles = getattr(record, "smiles", "")
+                key = canonical_smiles(str(smiles), isomeric=True)
+                if key is None:
+                    audit[f"rejected/invalid_nmr_smiles/{output_split}"] += 1
                     continue
+                references = sorted(coordinate_index.get(key, []))
+                if not references:
+                    audit["spectrum_without_coordinates"] += 1
+                    continue
+                if len(references) > 1:
+                    audit["multiple_coordinate_records"] += 1
+                coordinate_split, mol_idx = references[0]
                 group = handles[coordinate_split][mol_idx]
                 coordinate_smiles = read_str(group.attrs["smiles"])
                 structure, reason = molecule_from_h5(group, coordinate_smiles)
                 if structure is None:
                     audit[f"rejected/{reason}"] += 1
                     continue
-                h_preview = expand_hydrogen_shifts(
-                    _as_peak_list(row.get("h_nmr_peaks"))
-                )
-                if h_preview is not None:
-                    total_h = int(structure["atomic_numbers"].eq(1).sum())
-                    audit[
-                        f"hydrogen_total_minus_integrated/"
-                        f"{total_h - int(h_preview.numel())}"
-                    ] += 1
-                carbon_classes = _carbon_class_count(
-                    structure["atomic_numbers"],
-                    structure["equivalence_classes"],
-                )
-                carbon_lines, _ = _carbon_line_values(
-                    _as_peak_list(row.get("c_nmr_peaks"))
-                )
-                audit[
-                    f"carbon_lines_minus_classes/"
-                    f"{len(carbon_lines) - carbon_classes}"
-                ] += 1
-                targets, reason = targets_from_row(
-                    row,
-                    structure,
-                    structure_smiles=coordinate_smiles,
-                    hydrogen_policy=hydrogen_policy,
-                    carbon_policy=carbon_policy,
-                    max_carbon_cluster_span=max_carbon_cluster_span,
-                    max_missing_hydrogens=max_missing_hydrogens,
-                )
+                targets, reason = targets_from_nmr_record(record)
                 if targets is None:
                     audit[f"rejected/{reason}"] += 1
                     continue
-                seen_coordinate_records.add(record_key)
                 audit[f"accepted/{output_split}"] += 1
                 if audit_only:
                     continue
                 sample = {
-                    "id": f"{output_split}:{coordinate_split}:{mol_idx}",
+                    "id": (
+                        f"{output_split}:{record_index}:"
+                        f"{coordinate_split}:{mol_idx}"
+                    ),
                     "smiles": coordinate_smiles,
+                    "nmr_record_index": record_index,
                     "coordinate_source_split": coordinate_split,
                     **structure,
                     **targets,
@@ -912,13 +813,8 @@ def build_3d2shift_dataset(
     }
     report = {
         "version": DATASET_VERSION,
-        "parquet_paths": [str(Path(path)) for path in parquet_paths],
         "nmr_dir": str(Path(nmr_dir)),
         "coords_dir": str(Path(coords_dir)),
-        "hydrogen_policy": hydrogen_policy,
-        "carbon_policy": carbon_policy,
-        "max_carbon_cluster_span": max_carbon_cluster_span,
-        "max_missing_hydrogens": max_missing_hydrogens,
         "index_cache": str(cache_path),
         "audit_only": audit_only,
         "counts": dict(sorted(audit.items())),
@@ -948,7 +844,6 @@ def build_parser() -> argparse.ArgumentParser:
     legacy.add_argument("--output-dir", required=True)
 
     build = subparsers.add_parser("build")
-    build.add_argument("--parquet", nargs="+", required=True)
     build.add_argument(
         "--nmr-dir",
         required=True,
@@ -956,16 +851,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.add_argument("--coords-dir", required=True)
     build.add_argument("--output-dir", required=True)
-    build.add_argument(
-        "--hydrogen-policy",
-        choices=("exact", "exact_or_carbon_bound", "partial_missing"),
-        default="exact",
-    )
-    build.add_argument(
-        "--carbon-policy", choices=("exact", "collapse"), default="exact"
-    )
-    build.add_argument("--max-carbon-cluster-span", type=float, default=15.0)
-    build.add_argument("--max-missing-hydrogens", type=int, default=2)
     build.add_argument("--shard-size", type=int, default=4096)
     build.add_argument("--audit-only", action="store_true")
     build.add_argument(
@@ -992,14 +877,9 @@ def main() -> None:
         )
         return
     report = build_3d2shift_dataset(
-        parquet_paths=args.parquet,
         nmr_dir=args.nmr_dir,
         coords_dir=args.coords_dir,
         output_dir=args.output_dir,
-        hydrogen_policy=args.hydrogen_policy,
-        carbon_policy=args.carbon_policy,
-        max_carbon_cluster_span=args.max_carbon_cluster_span,
-        max_missing_hydrogens=args.max_missing_hydrogens,
         shard_size=args.shard_size,
         audit_only=args.audit_only,
         index_cache=args.index_cache,

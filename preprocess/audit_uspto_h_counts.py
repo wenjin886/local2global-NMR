@@ -1,4 +1,4 @@
-"""Audit USPTO proton-label cardinality against explicit and O-bound H counts.
+"""Audit USPTO proton/carbon peak cardinality against molecular atom counts.
 
 The per-molecule output distinguishes the number of peak rows from the number
 of proton labels after expanding MestreNova ``nH`` integrations.
@@ -52,15 +52,47 @@ OUTPUT_SCHEMA = pa.schema(
         # Strictly positive missing count equal to the number of O-bound H.
         ("positive_missing_equals_oh", pa.bool_()),
         ("accept_exact_or_missing_oh", pa.bool_()),
+        ("h_shift_count_gt_total_h", pa.bool_()),
+        ("h_environment_count", pa.int64()),
+        ("h_peaks_minus_environments", pa.int64()),
+        ("h_peak_count_gt_environments", pa.bool_()),
+        # Carbon entries are raw simulated lines and may include heteronuclear
+        # splitting; both atom and graph-equivalence baselines are reported.
+        ("c_peak_line_count", pa.int64()),
+        ("total_c_count", pa.int64()),
+        ("c_environment_count", pa.int64()),
+        ("c_lines_minus_total_c", pa.int64()),
+        ("c_lines_minus_environments", pa.int64()),
+        ("c_line_count_gt_total_c", pa.bool_()),
+        ("c_line_count_gt_environments", pa.bool_()),
     ]
 )
 
 
-def _hydrogen_counts(smiles: str) -> Optional[Dict[str, int]]:
+def _molecular_counts(smiles: str) -> Optional[Dict[str, int]]:
     molecule = Chem.MolFromSmiles(smiles)
     if molecule is None:
         return None
+    ranks = Chem.CanonicalRankAtoms(
+        molecule, breakTies=False, includeChirality=True
+    )
+    carbon_ranks = {
+        int(rank)
+        for atom, rank in zip(molecule.GetAtoms(), ranks)
+        if atom.GetAtomicNum() == 6
+    }
+    total_c = sum(
+        atom.GetAtomicNum() == 6 for atom in molecule.GetAtoms()
+    )
     molecule = Chem.AddHs(molecule)
+    explicit_ranks = Chem.CanonicalRankAtoms(
+        molecule, breakTies=False, includeChirality=True
+    )
+    hydrogen_ranks = {
+        int(rank)
+        for atom, rank in zip(molecule.GetAtoms(), explicit_ranks)
+        if atom.GetAtomicNum() == 1
+    }
     total_h = 0
     oh_h = 0
     for atom in molecule.GetAtoms():
@@ -74,6 +106,9 @@ def _hydrogen_counts(smiles: str) -> Optional[Dict[str, int]]:
         "total_h_count": total_h,
         "oh_h_count": oh_h,
         "non_oh_h_count": total_h - oh_h,
+        "total_c_count": total_c,
+        "c_environment_count": len(carbon_ranks),
+        "h_environment_count": len(hydrogen_ranks),
     }
 
 
@@ -84,7 +119,7 @@ def audit_row(
 ) -> Dict[str, Any]:
     smiles = str(row.get("smiles", ""))
     isomeric = canonical_smiles(smiles, isomeric=True)
-    molecule_counts = _hydrogen_counts(smiles)
+    molecule_counts = _molecular_counts(smiles)
     peaks = _as_peak_list(row.get("h_nmr_peaks"))
     integrations: List[int] = []
     invalid_count = 0
@@ -129,6 +164,34 @@ def audit_row(
     matches_all_h = (
         None if total_minus_shift is None else total_minus_shift == 0
     )
+    carbon_peaks = _as_peak_list(row.get("c_nmr_peaks"))
+    c_line_count = len(carbon_peaks)
+    total_c = (
+        None if molecule_counts is None else molecule_counts["total_c_count"]
+    )
+    c_environment_count = (
+        None
+        if molecule_counts is None
+        else molecule_counts["c_environment_count"]
+    )
+    c_lines_minus_total = (
+        None if total_c is None else c_line_count - total_c
+    )
+    c_lines_minus_environments = (
+        None
+        if c_environment_count is None
+        else c_line_count - c_environment_count
+    )
+    h_environment_count = (
+        None
+        if molecule_counts is None
+        else molecule_counts["h_environment_count"]
+    )
+    h_peaks_minus_environments = (
+        None
+        if h_environment_count is None
+        else len(peaks) - h_environment_count
+    )
     return {
         "row_index": row_index,
         "smiles": smiles,
@@ -156,6 +219,31 @@ def audit_row(
             None
             if matches_all_h is None or positive_missing_equals_oh is None
             else matches_all_h or positive_missing_equals_oh
+        ),
+        "h_shift_count_gt_total_h": (
+            None
+            if total_minus_shift is None
+            else total_minus_shift < 0
+        ),
+        "h_environment_count": h_environment_count,
+        "h_peaks_minus_environments": h_peaks_minus_environments,
+        "h_peak_count_gt_environments": (
+            None
+            if h_peaks_minus_environments is None
+            else h_peaks_minus_environments > 0
+        ),
+        "c_peak_line_count": c_line_count,
+        "total_c_count": total_c,
+        "c_environment_count": c_environment_count,
+        "c_lines_minus_total_c": c_lines_minus_total,
+        "c_lines_minus_environments": c_lines_minus_environments,
+        "c_line_count_gt_total_c": (
+            None if c_lines_minus_total is None else c_lines_minus_total > 0
+        ),
+        "c_line_count_gt_environments": (
+            None
+            if c_lines_minus_environments is None
+            else c_lines_minus_environments > 0
         ),
     }
 
@@ -195,6 +283,28 @@ def _update_summary(summary: Counter, record: Mapping[str, Any]) -> None:
         summary[
             "accept_exact_or_missing_oh/"
             f"{record['accept_exact_or_missing_oh']}"
+        ] += 1
+    for key in (
+        "h_shift_count_gt_total_h",
+        "h_peak_count_gt_environments",
+        "c_line_count_gt_total_c",
+        "c_line_count_gt_environments",
+    ):
+        if record[key] is not None:
+            summary[f"{key}/{record[key]}"] += 1
+    if record["c_lines_minus_total_c"] is not None:
+        summary[
+            f"c_lines_minus_total_c/{record['c_lines_minus_total_c']}"
+        ] += 1
+    if record["h_peaks_minus_environments"] is not None:
+        summary[
+            "h_peaks_minus_environments/"
+            f"{record['h_peaks_minus_environments']}"
+        ] += 1
+    if record["c_lines_minus_environments"] is not None:
+        summary[
+            "c_lines_minus_environments/"
+            f"{record['c_lines_minus_environments']}"
         ] += 1
 
 

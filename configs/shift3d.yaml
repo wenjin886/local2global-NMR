@@ -12,6 +12,7 @@ data:
   eval_conformer_index: 0
 
 model:
+  stats_path: data/uspto/preprocessed/dataset_infos_train.json
   hidden_dim: 128
   num_interactions: 6
   num_rbf: 64
@@ -20,8 +21,14 @@ model:
   learning_rate: 3.0e-4
   weight_decay: 1.0e-5
   h_loss_weight: 1.0
-  c_loss_weight: 0.1
+  c_loss_weight: 1.0
   equivalence_loss_weight: 0.1
+  h_huber_delta: 0.2
+  c_huber_delta: 2.0
+  h_outlier_cap: 2.0
+  c_outlier_cap: 20.0
+  h_softmin_temperature: 0.05
+  c_softmin_temperature: 0.5
 
 checkpoint:
   save_top_k: 3

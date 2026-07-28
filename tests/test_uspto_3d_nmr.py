@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from rdkit import Chem
+from types import SimpleNamespace
 
 from preprocess.uspto_3d_nmr import (
     _normalize_coordinates,
@@ -8,6 +9,7 @@ from preprocess.uspto_3d_nmr import (
     expand_hydrogen_shifts,
     hydrogen_peak_tensors,
     symmetry_classes,
+    targets_from_nmr_record,
 )
 
 
@@ -57,3 +59,25 @@ def test_symmetry_classes_group_equivalent_explicit_hydrogens():
         torch.tensor([atom.GetAtomicNum() == 1 for atom in molecule.GetAtoms()])
     ]
     assert torch.unique(hydrogen_classes).numel() == 1
+
+
+def test_nmr_pt_targets_preserve_raw_peak_sets_and_optional_integration():
+    record = SimpleNamespace(
+        h_nmr=torch.tensor([1.0, 3.5]),
+        h_nmr_integration=torch.tensor([3.0, float("nan")]),
+        h_nmr_integration_mask=torch.tensor([True, False]),
+        c_nmr=torch.tensor([20.0, 99.0, 100.0]),
+    )
+    targets, reason = targets_from_nmr_record(record)
+    assert reason == "ok"
+    assert targets is not None
+    assert torch.equal(targets["h_peak_shifts"], torch.tensor([1.0, 3.5]))
+    assert torch.equal(
+        targets["c_peak_shifts"], torch.tensor([20.0, 99.0, 100.0])
+    )
+    assert torch.equal(
+        targets["h_peak_integration_mask"], torch.tensor([True, False])
+    )
+    assert torch.equal(
+        targets["h_peak_integrations"], torch.tensor([3.0, 0.0])
+    )

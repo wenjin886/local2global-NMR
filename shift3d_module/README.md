@@ -9,11 +9,10 @@ The encoder follows the continuous-filter distance message passing used by
 perform conformer pooling: each stored conformer is an independent geometry
 augmentation view during training.
 
-Build a conservative dataset:
+Build the dataset:
 
 ```bash
 python -m preprocess.uspto_3d_nmr build \
-  --parquet data/uspto/exp_data/*.parquet \
   --nmr-dir data/uspto/preprocessed \
   --coords-dir /path/to/preprocessed_coordinates \
   --output-dir data/uspto/3d2shift
@@ -24,25 +23,44 @@ The final train/validation/test assignment is read exclusively from
 `uspto_nmr_preprocess.py`. The split names on the coordinate HDF5 files are
 used only to locate coordinates.
 
-The default keeps only samples whose integrated hydrogen multiset exactly
-matches the explicit hydrogen count and whose carbon line count exactly
-matches the number of chirality-aware carbon symmetry classes. Run the same
-command with `--audit-only` first on the full source collection and inspect
-`audit.json`. `--hydrogen-policy exact_or_carbon_bound` and
-`--carbon-policy collapse` are explicit, less conservative alternatives.
-For simulated spectra with one or two missing proton labels, use
-`--hydrogen-policy partial_missing --max-missing-hydrogens 2`; training then
-uses a rectangular Hungarian assignment to select the observed subset.
+The builder does not read the source parquet files. It preserves the raw
+`h_nmr` and `c_nmr` peak sets from the three `.pt` files, without expanding
+hydrogen integrations, collapsing carbon lines, or rejecting samples because
+the number of peaks differs from the number of atoms. Hydrogen integration is
+retained as optional metadata but is not used by the current set loss.
+
+For each explicit atom, `environment_ids` is generated from the SMILES graph
+with chirality-aware RDKit canonical symmetry ranks. The HDF5 atomic-number
+sequence is checked against the explicit-H RDKit molecule before these labels
+are accepted, so the environment IDs, atom types, and every stored conformer
+share one atom order.
 
 The expensive coordinate and NMR split indices are cached at
-`OUTPUT_DIR/index_cache.pt`. Subsequent policy experiments reuse this file.
+`OUTPUT_DIR/index_cache.pt`. Subsequent dataset rebuilds reuse this file.
 The cache is invalidated automatically when any source HDF5/PT size or
 modification time changes; `--rebuild-index-cache` forces regeneration.
 
-`h_peak_counts` preserves the source integration for every proton peak.
-Carbon integrals are not treated as atom counts; `c_equivalence_class_sizes`
-stores the class multiplicities derived from the SMILES graph, while the
-class-to-shift assignment remains latent and is solved by multiset matching.
+The primary objective is a robust bidirectional set loss:
+
+`L_set = 1/2 mean_atom softmin_peak cost + 1/2 mean_peak softmin_atom cost`.
+
+It operates directly on per-atom predictions and supports arbitrary atom/peak
+cardinalities. A capped Huber pair cost reduces the influence of extra or
+spurious peaks. During standalone pretraining, `L_equiv` additionally
+penalizes prediction spread among atoms with the same `environment_id`.
+For end-to-end NMR -> 3D -> NMR training, set
+`model.equivalence_loss_weight=0`; graph environment labels are then not
+required by the downstream loss.
+
+The SchNet heads predict normalized shifts. H and C peak targets are
+standardized independently with the training-only statistics in
+`dataset_infos_train.json`; validation and test statistics are never used.
+Set/equivalence losses operate in normalized space, while predictions and
+nearest-set MAE metrics are converted back to ppm. The ppm-valued Huber,
+outlier-cap, and soft-matching settings in the config are converted internally,
+so they retain their physical interpretation. The resolved mean/std values are
+stored in the Lightning checkpoint, allowing evaluation without re-reading the
+JSON file.
 
 Train and evaluate:
 

@@ -9,6 +9,10 @@ def test_audit_row_identifies_exactly_missing_oh_hydrogen():
                 {"delta": 1.0, "nH": 3},
                 {"delta": 3.5, "nH": 2},
             ],
+            "c_nmr_peaks": [
+                {"delta (ppm)": 20.0},
+                {"delta (ppm)": 60.0},
+            ],
         },
         row_index=0,
     )
@@ -22,6 +26,11 @@ def test_audit_row_identifies_exactly_missing_oh_hydrogen():
     assert record["missing_equals_oh"]
     assert record["positive_missing_equals_oh"]
     assert record["accept_exact_or_missing_oh"]
+    assert record["h_environment_count"] == 3
+    assert record["h_peaks_minus_environments"] == -1
+    assert record["total_c_count"] == 2
+    assert record["c_environment_count"] == 2
+    assert not record["c_line_count_gt_total_c"]
 
 
 def test_audit_row_ignores_zero_integration_artifact_peak():
@@ -32,6 +41,10 @@ def test_audit_row_ignores_zero_integration_artifact_peak():
                 {"delta": 0.0, "nH": 0},
                 {"delta": 1.0, "nH": 6},
             ],
+            "c_nmr_peaks": [
+                {"delta (ppm)": 10.0},
+                {"delta (ppm)": 10.1},
+            ],
         },
         row_index=0,
     )
@@ -41,3 +54,6 @@ def test_audit_row_ignores_zero_integration_artifact_peak():
     assert record["matches_all_h"]
     assert not record["positive_missing_equals_oh"]
     assert record["accept_exact_or_missing_oh"]
+    assert record["h_environment_count"] == 1
+    assert record["h_peaks_minus_environments"] == 1
+    assert record["c_line_count_gt_environments"]
