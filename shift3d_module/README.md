@@ -14,9 +14,15 @@ Build a conservative dataset:
 ```bash
 python -m preprocess.uspto_3d_nmr build \
   --parquet data/uspto/exp_data/*.parquet \
+  --nmr-dir data/uspto/preprocessed \
   --coords-dir /path/to/preprocessed_coordinates \
   --output-dir data/uspto/3d2shift
 ```
+
+The final train/validation/test assignment is read exclusively from
+`--nmr-dir/train.pt`, `val.pt`, and `test.pt`, as produced by
+`uspto_nmr_preprocess.py`. The split names on the coordinate HDF5 files are
+used only to locate coordinates.
 
 The default keeps only samples whose integrated hydrogen multiset exactly
 matches the explicit hydrogen count and whose carbon line count exactly

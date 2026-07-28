@@ -359,6 +359,185 @@ def molecule_from_h5(
     }, "ok"
 
 
+def convert_to_data(mol_from_h5: h5py.Group, smiles: str):
+    """Compatibility converter retained for the original ``*_with_nmr.pt`` flow."""
+    try:
+        from torch_geometric.data import Data
+    except ImportError as error:
+        raise ImportError(
+            "The legacy PyG output path requires torch_geometric. "
+            "The sharded 3D2Shift builder does not."
+        ) from error
+
+    data = Data(smiles=smiles)
+    atom_features = mol_from_h5["atom_features"]
+    atom_coords = atom_features["atom_coords"][()]
+    atom_charges = atom_features["atom_charges"][()]
+    atom_mask = atom_features["atom_mask"][()]
+    mask = np.asarray(atom_mask).astype(bool).reshape(-1)
+    data.num_nodes = int(mask.sum())
+    data.h = torch.tensor(
+        np.asarray(atom_charges).reshape(-1)[mask], dtype=torch.long
+    )
+    # Keep all conformers. This fixes the old [:num_atoms] slicing, which
+    # sliced the conformer axis when atom_coords had shape [C, N, 3].
+    data.pos = torch.tensor(
+        _normalize_coordinates(atom_coords, mask), dtype=torch.float32
+    )
+    return data
+
+
+def compact_nmr_data(data: Any) -> Any:
+    """Retain shift counts needed by 3D2Shift in the legacy compact files."""
+    keep = {
+        "h_nmr",
+        "h_nmr_integration",
+        "h_nmr_integration_mask",
+        "c_nmr",
+        "smiles",
+        "canonical_smiles",
+        "isomeric_smiles",
+    }
+    for key in list(data.keys()):
+        if key not in keep:
+            del data[key]
+    return data
+
+
+def add_nmr_to_coord_data(
+    coord_data: Any,
+    nmr_data_split: Sequence[Any],
+    nmr_smiles_idx: Mapping[str, int],
+) -> Any:
+    """Attach the NMR record selected by the pre-existing NMR split."""
+    nmr_data = nmr_data_split[nmr_smiles_idx[coord_data.smiles]]
+    coord_data.h_nmr = nmr_data.h_nmr
+    coord_data.c_nmr = nmr_data.c_nmr
+    if hasattr(nmr_data, "h_nmr_integration"):
+        coord_data.h_nmr_integration = nmr_data.h_nmr_integration
+    if hasattr(nmr_data, "h_nmr_integration_mask"):
+        coord_data.h_nmr_integration_mask = nmr_data.h_nmr_integration_mask
+    return coord_data
+
+
+def _load_torch(path: str | Path) -> Any:
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def load_nmr_split_index(
+    nmr_dir: str | Path,
+) -> Tuple[Dict[str, str], Dict[str, Dict[str, int]], Counter]:
+    """Load the authoritative split assignment from train/val/test.pt."""
+    split_for_smiles: Dict[str, str] = {}
+    indices: Dict[str, Dict[str, int]] = {}
+    audit: Counter = Counter()
+    for split in SPLITS:
+        path = Path(nmr_dir) / f"{split}.pt"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Missing authoritative NMR split file: {path}"
+            )
+        records = _load_torch(path)
+        split_index: Dict[str, int] = {}
+        for index, record in enumerate(records):
+            smiles = getattr(record, "isomeric_smiles", None)
+            if smiles is None:
+                smiles = getattr(record, "smiles", None)
+            key = canonical_smiles(str(smiles), isomeric=True)
+            if key is None:
+                audit[f"invalid_nmr_smiles/{split}"] += 1
+                continue
+            previous = split_for_smiles.get(key)
+            if previous is not None and previous != split:
+                raise ValueError(
+                    f"NMR split leakage for {key!r}: {previous} and {split}"
+                )
+            split_for_smiles[key] = split
+            split_index[key] = index
+            audit[f"nmr_records/{split}"] += 1
+        indices[split] = split_index
+    return split_for_smiles, indices, audit
+
+
+def preprocess_uspto_only_nmr_3d_coords(
+    nmr_dir: str,
+    target_dir: str,
+    coords_dir: str,
+) -> None:
+    """Reproduce the original PyG files using NMR .pt splits as authority.
+
+    Coordinate HDF5 split names are deliberately ignored for final assignment:
+    every coordinate SMILES is looked up in the already-created NMR
+    train/val/test files.
+    """
+    os.makedirs(target_dir, exist_ok=True)
+    _, split_indices, _ = load_nmr_split_index(nmr_dir)
+    compact_records: Dict[str, Sequence[Any]] = {}
+    size_info = {
+        "only_nmr": {split: 0 for split in SPLITS},
+        "coords_with_nmr": {split: 0 for split in SPLITS},
+    }
+    for split in SPLITS:
+        compact_path = Path(target_dir) / f"{split}_only_nmr.pt"
+        records = None
+        if compact_path.exists():
+            candidate = _load_torch(compact_path)
+            if not candidate or hasattr(candidate[0], "h_nmr_integration"):
+                records = candidate
+            else:
+                print(
+                    f"Rebuilding {compact_path}: the existing compact file "
+                    "does not contain h_nmr_integration."
+                )
+        if records is None:
+            records = [
+                compact_nmr_data(item)
+                for item in tqdm(
+                    _load_torch(Path(nmr_dir) / f"{split}.pt"),
+                    desc=f"Compacting {split} NMR",
+                )
+            ]
+            torch.save(records, compact_path)
+        compact_records[split] = records
+        size_info["only_nmr"][split] = len(records)
+
+    coordinate_data: Dict[str, List[Any]] = {split: [] for split in SPLITS}
+    for coordinate_split in SPLITS:
+        path = Path(coords_dir) / f"{coordinate_split}_molecules.h5"
+        if not path.exists():
+            continue
+        with h5py.File(path, "r") as handle:
+            for mol_idx in tqdm(
+                handle.keys(), desc=f"Matching {coordinate_split} coordinates"
+            ):
+                group = handle[mol_idx]
+                smiles = read_str(group.attrs["smiles"])
+                key = canonical_smiles(smiles, isomeric=True)
+                if key is None:
+                    continue
+                for nmr_split in SPLITS:
+                    if key not in split_indices[nmr_split]:
+                        continue
+                    data = convert_to_data(group, key)
+                    data = add_nmr_to_coord_data(
+                        data,
+                        compact_records[nmr_split],
+                        split_indices[nmr_split],
+                    )
+                    coordinate_data[nmr_split].append(data)
+
+    for split in SPLITS:
+        output_path = Path(target_dir) / f"{split}_with_nmr.pt"
+        torch.save(coordinate_data[split], output_path)
+        size_info["coords_with_nmr"][split] = len(coordinate_data[split])
+    (Path(target_dir) / "data_size_info.json").write_text(
+        json.dumps(size_info, indent=2), encoding="utf-8"
+    )
+
+
 def _carbon_class_count(
     atomic_numbers: torch.Tensor,
     classes: torch.Tensor,
@@ -529,6 +708,7 @@ class ShardWriter:
 
 def build_3d2shift_dataset(
     parquet_paths: Sequence[str | Path],
+    nmr_dir: str | Path,
     coords_dir: str | Path,
     output_dir: str | Path,
     hydrogen_policy: str = "exact",
@@ -540,6 +720,8 @@ def build_3d2shift_dataset(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     coordinate_index, audit = index_coordinates(coords_dir)
+    split_for_smiles, _, nmr_audit = load_nmr_split_index(nmr_dir)
+    audit.update(nmr_audit)
     writers = (
         {}
         if audit_only
@@ -562,16 +744,20 @@ def build_3d2shift_dataset(
             if key is None:
                 audit["invalid_parquet_smiles"] += 1
                 continue
+            output_split = split_for_smiles.get(key)
+            if output_split is None:
+                audit["spectrum_not_in_nmr_splits"] += 1
+                continue
             references = coordinate_index.get(key, [])
             if not references:
                 audit["spectrum_without_coordinates"] += 1
                 continue
-            for split, mol_idx in references:
-                record_key = (split, mol_idx, key)
+            for coordinate_split, mol_idx in references:
+                record_key = (coordinate_split, mol_idx, key)
                 if record_key in seen_coordinate_records:
                     audit["duplicate_spectrum_for_coordinate"] += 1
                     continue
-                group = handles[split][mol_idx]
+                group = handles[coordinate_split][mol_idx]
                 coordinate_smiles = read_str(group.attrs["smiles"])
                 structure, reason = molecule_from_h5(group, coordinate_smiles)
                 if structure is None:
@@ -609,16 +795,17 @@ def build_3d2shift_dataset(
                     audit[f"rejected/{reason}"] += 1
                     continue
                 seen_coordinate_records.add(record_key)
-                audit[f"accepted/{split}"] += 1
+                audit[f"accepted/{output_split}"] += 1
                 if audit_only:
                     continue
                 sample = {
-                    "id": f"{split}:{mol_idx}",
+                    "id": f"{output_split}:{coordinate_split}:{mol_idx}",
                     "smiles": coordinate_smiles,
+                    "coordinate_source_split": coordinate_split,
                     **structure,
                     **targets,
                 }
-                writers[split].add(sample)
+                writers[output_split].add(sample)
     finally:
         for handle in handles.values():
             handle.close()
@@ -629,6 +816,7 @@ def build_3d2shift_dataset(
     report = {
         "version": DATASET_VERSION,
         "parquet_paths": [str(Path(path)) for path in parquet_paths],
+        "nmr_dir": str(Path(nmr_dir)),
         "coords_dir": str(Path(coords_dir)),
         "hydrogen_policy": hydrogen_policy,
         "carbon_policy": carbon_policy,
@@ -652,8 +840,21 @@ def build_parser() -> argparse.ArgumentParser:
     split.add_argument("--output-dir", required=True)
     split.add_argument("--split-name", default="split_indices_dedup")
 
+    legacy = subparsers.add_parser(
+        "legacy-pt",
+        help="Build the original *_with_nmr.pt files using NMR .pt splits.",
+    )
+    legacy.add_argument("--nmr-dir", required=True)
+    legacy.add_argument("--coords-dir", required=True)
+    legacy.add_argument("--output-dir", required=True)
+
     build = subparsers.add_parser("build")
     build.add_argument("--parquet", nargs="+", required=True)
+    build.add_argument(
+        "--nmr-dir",
+        required=True,
+        help="Directory containing authoritative train.pt/val.pt/test.pt.",
+    )
     build.add_argument("--coords-dir", required=True)
     build.add_argument("--output-dir", required=True)
     build.add_argument(
@@ -677,8 +878,16 @@ def main() -> None:
             args.h5_path, args.output_dir, split_name=args.split_name
         )
         return
+    if args.command == "legacy-pt":
+        preprocess_uspto_only_nmr_3d_coords(
+            nmr_dir=args.nmr_dir,
+            target_dir=args.output_dir,
+            coords_dir=args.coords_dir,
+        )
+        return
     report = build_3d2shift_dataset(
         parquet_paths=args.parquet,
+        nmr_dir=args.nmr_dir,
         coords_dir=args.coords_dir,
         output_dir=args.output_dir,
         hydrogen_policy=args.hydrogen_policy,
