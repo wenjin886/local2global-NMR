@@ -8,8 +8,9 @@ match. Chirality-aware RDKit graph symmetry classes are stored as per-atom
 environment labels for an optional pretraining consistency loss.
 
 The output is deliberately independent from the fragment/NMR-to-graph
-datasets. Each molecule is stored once with all available RDKit conformers;
-the training dataloader chooses one conformer as geometry augmentation.
+datasets. Every available RDKit conformer is expanded offline into an
+independent sample; the training dataloader only loads and batches saved
+``[N, 3]`` coordinate tensors.
 """
 
 from __future__ import annotations
@@ -34,7 +35,10 @@ from tqdm import tqdm
 
 URL_USPTO = "https://zenodo.org/records/17766755/files/uspto.tar.gz?download=1"
 SPLITS = ("train", "val", "test")
-DATASET_VERSION = 2
+DATASET_VERSION = 3
+# Keep the expensive source index cache independent from the output schema.
+# Version 2 is the format already produced by the previous builder.
+INDEX_CACHE_VERSION = 2
 
 
 def read_str(value: Any) -> str:
@@ -613,7 +617,7 @@ def load_or_build_index_cache(
     ]
     nmr_paths = [Path(nmr_dir) / f"{split}.pt" for split in SPLITS]
     metadata = {
-        "version": DATASET_VERSION,
+        "version": INDEX_CACHE_VERSION,
         "coordinate_sources": _source_fingerprint(coordinate_paths),
         "nmr_sources": _source_fingerprint(nmr_paths),
     }
@@ -789,21 +793,28 @@ def build_3d2shift_dataset(
                 if targets is None:
                     audit[f"rejected/{reason}"] += 1
                     continue
-                audit[f"accepted/{output_split}"] += 1
+                conformers = structure.pop("positions")
+                conformer_count = int(conformers.size(0))
+                audit[f"accepted_molecules/{output_split}"] += 1
+                audit[f"written_conformers/{output_split}"] += conformer_count
                 if audit_only:
                     continue
-                sample = {
-                    "id": (
-                        f"{output_split}:{record_index}:"
-                        f"{coordinate_split}:{mol_idx}"
-                    ),
-                    "smiles": coordinate_smiles,
-                    "nmr_record_index": record_index,
-                    "coordinate_source_split": coordinate_split,
-                    **structure,
-                    **targets,
-                }
-                writers[output_split].add(sample)
+                for conformer_index, positions in enumerate(conformers):
+                    sample = {
+                        "id": (
+                            f"{output_split}:{record_index}:"
+                            f"{coordinate_split}:{mol_idx}:"
+                            f"conf{conformer_index}"
+                        ),
+                        "smiles": coordinate_smiles,
+                        "nmr_record_index": record_index,
+                        "coordinate_source_split": coordinate_split,
+                        "conformer_index": conformer_index,
+                        "positions": positions.contiguous(),
+                        **structure,
+                        **targets,
+                    }
+                    writers[output_split].add(sample)
     finally:
         for handle in handles.values():
             handle.close()

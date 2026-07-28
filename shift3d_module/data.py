@@ -5,11 +5,14 @@ from __future__ import annotations
 import bisect
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, Iterator, List, Mapping, Sequence
 
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
+
+
+OFFLINE_CONFORMER_DATASET_VERSION = 3
 
 
 def _load_torch(path: Path) -> Any:
@@ -24,21 +27,24 @@ class ShardedShiftDataset(Dataset):
         self,
         root: str | Path,
         split: str,
-        random_conformer: bool = False,
-        conformer_index: int = 0,
     ) -> None:
         self.directory = Path(root) / split
         manifest = json.loads(
             (self.directory / "manifest.json").read_text(encoding="utf-8")
         )
+        version = int(manifest.get("version", 0))
+        if version < OFFLINE_CONFORMER_DATASET_VERSION:
+            raise RuntimeError(
+                f"{self.directory} uses 3D2Shift dataset version {version}; "
+                "re-run `python -m preprocess.uspto_3d_nmr build` so every "
+                "conformer is stored as an independent sample."
+            )
         self.shards = list(manifest["shards"])
         self.ends: List[int] = []
         total = 0
         for shard in self.shards:
             total += int(shard["count"])
             self.ends.append(total)
-        self.random_conformer = random_conformer
-        self.conformer_index = conformer_index
         self._cached_shard = -1
         self._cached_samples: Sequence[Mapping[str, Any]] = []
 
@@ -58,18 +64,49 @@ class ShardedShiftDataset(Dataset):
             )
             self._cached_shard = shard_index
         source = self._cached_samples[index - offset]
-        conformers = source["positions"]
-        if self.random_conformer and conformers.size(0) > 1:
-            conformer_index = int(
-                torch.randint(conformers.size(0), size=()).item()
+        positions = source["positions"]
+        if positions.ndim != 2 or positions.size(-1) != 3:
+            raise RuntimeError(
+                f"Sample {source.get('id', index)!r} contains positions with "
+                f"shape {tuple(positions.shape)}; expected an offline "
+                "conformer with shape [N, 3]. Rebuild the dataset."
             )
-        else:
-            conformer_index = min(self.conformer_index, conformers.size(0) - 1)
-        return {
-            key: value.clone() if isinstance(value, torch.Tensor) else value
-            for key, value in source.items()
-            if key != "positions"
-        } | {"positions": conformers[conformer_index].clone()}
+        # Collation copies tensors into a new batch, so cloning every tensor
+        # here only adds CPU work and memory traffic.
+        return dict(source)
+
+    def shard_bounds(self) -> List[tuple[int, int]]:
+        starts = [0, *self.ends[:-1]]
+        return list(zip(starts, self.ends))
+
+
+class ShardShuffleSampler(Sampler[int]):
+    """Shuffle shards and samples without repeatedly reloading whole shards."""
+
+    def __init__(self, dataset: ShardedShiftDataset, seed: int = 0) -> None:
+        self.dataset = dataset
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __iter__(self) -> Iterator[int]:
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        bounds = self.dataset.shard_bounds()
+        shard_order = torch.randperm(
+            len(bounds), generator=generator
+        ).tolist()
+        for shard_index in shard_order:
+            start, end = bounds[shard_index]
+            within_shard = torch.randperm(
+                end - start, generator=generator
+            ).tolist()
+            yield from (start + offset for offset in within_shard)
 
 
 def collate_shift_samples(samples: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -129,8 +166,7 @@ class Shift3DDataModule(pl.LightningDataModule):
         num_workers: int = 4,
         pin_memory: bool = True,
         persistent_workers: bool = True,
-        train_random_conformer: bool = True,
-        eval_conformer_index: int = 0,
+        shuffle_seed: int = 0,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -141,26 +177,31 @@ class Shift3DDataModule(pl.LightningDataModule):
             self.datasets["train"] = ShardedShiftDataset(
                 self.hparams.data_dir,
                 "train",
-                random_conformer=self.hparams.train_random_conformer,
             )
             self.datasets["val"] = ShardedShiftDataset(
                 self.hparams.data_dir,
                 "val",
-                conformer_index=self.hparams.eval_conformer_index,
             )
         if stage in (None, "test", "predict"):
             self.datasets["test"] = ShardedShiftDataset(
                 self.hparams.data_dir,
                 "test",
-                conformer_index=self.hparams.eval_conformer_index,
             )
 
     def _loader(self, split: str, shuffle: bool) -> DataLoader:
         workers = int(self.hparams.num_workers)
+        sampler = (
+            ShardShuffleSampler(
+                self.datasets[split], seed=int(self.hparams.shuffle_seed)
+            )
+            if shuffle
+            else None
+        )
         return DataLoader(
             self.datasets[split],
             batch_size=int(self.hparams.batch_size),
-            shuffle=shuffle,
+            shuffle=False,
+            sampler=sampler,
             num_workers=workers,
             pin_memory=bool(self.hparams.pin_memory),
             persistent_workers=(

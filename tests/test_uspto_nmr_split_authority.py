@@ -85,19 +85,25 @@ def test_builder_uses_pt_split_and_keeps_raw_unequal_peak_sets(tmp_path):
         output_dir=output,
         shard_size=1,
     )
-    assert report["counts"]["accepted/val"] == 1
+    assert report["counts"]["accepted_molecules/val"] == 1
+    assert report["counts"]["written_conformers/val"] == 3
     assert report["splits"]["train"]["count"] == 0
-    assert report["splits"]["val"]["count"] == 1
-    samples = torch.load(
-        output / "val" / "shard_00000.pt",
-        map_location="cpu",
-        weights_only=False,
-    )
-    sample = samples[0]
-    assert sample["coordinate_source_split"] == "train"
-    assert sample["positions"].shape == (3, 8, 3)
-    assert sample["environment_ids"].shape == (8,)
-    assert torch.unique(sample["environment_ids"][:2]).numel() == 1
-    assert torch.unique(sample["environment_ids"][2:]).numel() == 1
-    assert sample["h_peak_shifts"].numel() == 1
-    assert sample["c_peak_shifts"].numel() == 3
+    assert report["splits"]["val"]["count"] == 3
+    samples = []
+    for shard in report["splits"]["val"]["shards"]:
+        samples.extend(
+            torch.load(
+                output / "val" / shard["path"],
+                map_location="cpu",
+                weights_only=False,
+            )
+        )
+    assert [sample["conformer_index"] for sample in samples] == [0, 1, 2]
+    for sample in samples:
+        assert sample["coordinate_source_split"] == "train"
+        assert sample["positions"].shape == (8, 3)
+        assert sample["environment_ids"].shape == (8,)
+        assert torch.unique(sample["environment_ids"][:2]).numel() == 1
+        assert torch.unique(sample["environment_ids"][2:]).numel() == 1
+        assert sample["h_peak_shifts"].numel() == 1
+        assert sample["c_peak_shifts"].numel() == 3

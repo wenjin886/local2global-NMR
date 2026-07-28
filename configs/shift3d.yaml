@@ -15,8 +15,7 @@ data:
   num_workers: 4
   pin_memory: true
   persistent_workers: true
-  train_random_conformer: true
-  eval_conformer_index: 0
+  shuffle_seed: ${seed}
 
 model:
   stats_path: ${data_path}/preprocessed/dataset_infos_train.json
