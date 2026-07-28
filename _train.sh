@@ -15,7 +15,8 @@ export HYDRA_FULL_ERROR=1
 
 # train data
 SRC_DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/download/data/multimodal_spectroscopic_dataset
-export DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/uspto/preprocessed
+SAVE_DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/uspto
+export DATA_PATH=${SAVE_DATA_PATH}/preprocessed
 
 # === Preprocesss Dataset ===
 # python -m preprocess.uspto_nmr_preprocess \
@@ -40,12 +41,14 @@ export DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/d
 
 # ==================================
 # === Preprocess 3D --> NMR dataset ===
-COORD_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/download/preprocessed
-python -m preprocess.uspto_3d_nmr build \
-  --parquet data/uspto/exp_data/*.parquet \
-  --nmr-dir data/uspto/preprocessed \
-  --coords-dir ${COORD_PATH} \
-  --output-dir data/uspto/3d2shift
+# COORD_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/download/preprocessed
+# python -m preprocess.uspto_3d_nmr build \
+#   --nmr-dir ${DATA_PATH} \
+#   --coords-dir ${COORD_PATH} \
+  # --output-dir ${SAVE_DATA_PATH}/3d2shift
+
+# === PreTrain ===
+python -m shift3d_module.train
 
 
 

@@ -1,10 +1,17 @@
 seed: 0
-output_dir: outputs/shift3d
 run_test: true
 
+data_name: uspto
+exp_name: dim512-bs64
+group: step-4-3d2nmr
+exp_save_dir_name: ${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${group}/${exp_save_dir_name}
+log_path: ${output_dir}/logs
+data_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/${data_name}
+
 data:
-  data_dir: data/uspto/3d2shift
-  batch_size: 32
+  data_dir: ${data_path}/3d2shift
+  batch_size: 64
   num_workers: 4
   pin_memory: true
   persistent_workers: true
@@ -12,8 +19,8 @@ data:
   eval_conformer_index: 0
 
 model:
-  stats_path: data/uspto/preprocessed/dataset_infos_train.json
-  hidden_dim: 128
+  stats_path: ${data_path}/preprocessed/dataset_infos_train.json
+  hidden_dim: 512
   num_interactions: 6
   num_rbf: 64
   cutoff: 6.0
@@ -22,7 +29,7 @@ model:
   weight_decay: 1.0e-5
   h_loss_weight: 1.0
   c_loss_weight: 1.0
-  equivalence_loss_weight: 0.1
+  equivalence_loss_weight: 0.5
   h_huber_delta: 0.2
   c_huber_delta: 2.0
   h_outlier_cap: 2.0
@@ -36,14 +43,13 @@ checkpoint:
 logger:
   enabled: true
   project: local2global-nmr-3d2shift
-  name: null
   mode: online
   log_model: false
+  name: ${exp_name}
 
 trainer:
   accelerator: auto
-  devices: auto
+  devices: 1
   max_epochs: 100
-  precision: 32-true
   gradient_clip_val: 5.0
   log_every_n_steps: 50

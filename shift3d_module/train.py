@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 import hydra
 import pytorch_lightning as pl
@@ -24,6 +25,7 @@ def main(config: DictConfig) -> None:
         **OmegaConf.to_container(config.model, resolve=True, throw_on_missing=True)
     )
     output_dir = Path(config.output_dir)
+    os.makedirs(output_dir, exist_ok=True)
     checkpoint = ModelCheckpoint(
         dirpath=output_dir / "checkpoints",
         filename="epoch={epoch:03d}-val_loss={val/loss:.4f}",
