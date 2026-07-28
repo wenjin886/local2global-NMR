@@ -70,5 +70,5 @@ python -m local2geo_module.eval_hybrid \
   --soft-stress-steps 96 \
   --soft-stress-heavy-fraction 0.65 \
   --soft-stress-hydrogen-fraction 0.20 \
-  --num-steps 0 \
-  --output-dir ${exp_path}/xyz_out
+  --num-steps 256 \
+  --output-dir ${exp_path}/xyz_out/nstep256
