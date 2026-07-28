@@ -47,9 +47,10 @@ logger:
   mode: online
   log_model: false
   name: ${exp_name}
+  save_dir: ${output_dir}
 
 trainer:
-  accelerator: auto
+  accelerator: gpu
   devices: 1
   max_epochs: 100
   gradient_clip_val: 5.0

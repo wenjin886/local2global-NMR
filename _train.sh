@@ -45,10 +45,10 @@ export DATA_PATH=${SAVE_DATA_PATH}/preprocessed
 # python -m preprocess.uspto_3d_nmr build \
 #   --nmr-dir ${DATA_PATH} \
 #   --coords-dir ${COORD_PATH} \
-  # --output-dir ${SAVE_DATA_PATH}/3d2shift
+#   --output-dir ${SAVE_DATA_PATH}/3d2shift
 
 # === PreTrain ===
-python -m shift3d_module.train
+# python -m shift3d_module.train
 
 
 
