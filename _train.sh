@@ -31,11 +31,11 @@ export DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/d
 # Train Model
 # python -m src.train -cn train_uspto_smiles
 
-# python -m src.train -cn train_uspto_fragment
+python -m src.train -cn train_uspto_fragment
 # python -m src.train -cn train_uspto_graph
 
 # === Pretrain Initializer ===
-python -m local2geo_module.train
+# python -m local2geo_module.train
 
 
 

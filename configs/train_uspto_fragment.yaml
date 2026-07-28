@@ -12,7 +12,7 @@ exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
-ckpt_path: null
+# ckpt_path: null
 # Supply the Stage-0 checkpoint on the command line.
 ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-0-nmr2smiles/joint-bixt-smiles-d512_2026-07-26_22-22-33/checkpoints/epoch=063.ckpt
 only_load_weights: true
