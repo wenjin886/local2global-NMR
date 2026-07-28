@@ -7,7 +7,8 @@ The encoder follows the continuous-filter distance message passing used by
 [SchNet](https://doi.org/10.1063/1.5019779) and the original
 [CASCADE](https://doi.org/10.1039/D1SC03343C) model. It deliberately does not
 perform conformer pooling: the builder writes every stored conformer as an
-independent `.pt` sample, and all conformers are visited in every epoch.
+independent entry in one `.pt` file per split, and all conformers are visited
+in every epoch.
 
 Build the dataset:
 
@@ -35,11 +36,13 @@ sequence is checked against the explicit-H RDKit molecule before these labels
 are accepted, so the environment IDs, atom types, and every stored conformer
 share one atom order.
 
-Dataset version 3 expands conformers offline: every saved sample contains one
+Dataset version 4 expands conformers offline: every saved sample contains one
 `positions: [N, 3]` tensor plus its `conformer_index`. Training never selects or
-generates conformers. A shard-aware sampler shuffles shard order and sample
-order within each shard every epoch, while keeping reads localized so a random
-sample does not trigger repeated loading of entire `.pt` shards.
+generates conformers. The builder produces `train.pt`, `val.pt`, and `test.pt`.
+Each complete split is loaded into CPU memory once during DataModule setup;
+epoch shuffling is then purely an in-memory index permutation with no shard
+I/O. The default uses `num_workers=0` so the loaded Python object graph is not
+replicated into worker processes.
 
 The expensive coordinate and NMR split indices are cached at
 `OUTPUT_DIR/index_cache.pt`. Subsequent dataset rebuilds reuse this file.

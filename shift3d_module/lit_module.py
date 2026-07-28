@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 
 import pytorch_lightning as pl
 import torch
@@ -189,19 +189,30 @@ class Shift3DModule(pl.LightningModule):
     ) -> torch.Tensor:
         if predictions.numel() == 0:
             return predictions.sum() * 0.0
-        class_losses: List[torch.Tensor] = []
-        for environment_id in torch.unique(environment_ids, sorted=True):
-            values = predictions[environment_ids.eq(environment_id)]
-            if values.numel() <= 1:
-                continue
-            mean = values.mean().expand_as(values)
-            class_losses.append(
-                F.smooth_l1_loss(values, mean, beta=delta)
-            )
-        if not class_losses:
-            return predictions.sum() * 0.0
+        _, inverse, counts = torch.unique(
+            environment_ids,
+            sorted=False,
+            return_inverse=True,
+            return_counts=True,
+        )
+        class_count = int(counts.numel())
+        sums = predictions.new_zeros(class_count)
+        sums.scatter_add_(0, inverse, predictions)
+        means = sums / counts.to(predictions.dtype)
+        atom_losses = F.smooth_l1_loss(
+            predictions,
+            means[inverse],
+            beta=delta,
+            reduction="none",
+        )
+        class_loss_sums = predictions.new_zeros(class_count)
+        class_loss_sums.scatter_add_(0, inverse, atom_losses)
+        class_losses = class_loss_sums / counts.to(predictions.dtype)
         # Every environment receives equal weight, independent of class size.
-        return torch.stack(class_losses).mean()
+        repeated = counts.gt(1).to(predictions.dtype)
+        return (
+            class_losses * repeated
+        ).sum() / repeated.sum().clamp_min(1.0)
 
     def _sample_losses(
         self,

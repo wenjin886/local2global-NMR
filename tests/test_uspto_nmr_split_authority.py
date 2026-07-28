@@ -83,21 +83,18 @@ def test_builder_uses_pt_split_and_keeps_raw_unequal_peak_sets(tmp_path):
         nmr_dir=nmr,
         coords_dir=coordinates,
         output_dir=output,
-        shard_size=1,
     )
     assert report["counts"]["accepted_molecules/val"] == 1
     assert report["counts"]["written_conformers/val"] == 3
     assert report["splits"]["train"]["count"] == 0
     assert report["splits"]["val"]["count"] == 3
-    samples = []
-    for shard in report["splits"]["val"]["shards"]:
-        samples.extend(
-            torch.load(
-                output / "val" / shard["path"],
-                map_location="cpu",
-                weights_only=False,
-            )
-        )
+    payload = torch.load(
+        output / "val.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert payload["version"] == 4
+    samples = payload["samples"]
     assert [sample["conformer_index"] for sample in samples] == [0, 1, 2]
     for sample in samples:
         assert sample["coordinate_source_split"] == "train"

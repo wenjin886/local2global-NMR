@@ -12,9 +12,11 @@ data_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/${
 data:
   data_dir: ${data_path}/3d2shift
   batch_size: 64
-  num_workers: 4
+  # Each complete split is already resident in the main process. Keeping
+  # workers at zero avoids copying a very large Python object graph.
+  num_workers: 0
   pin_memory: true
-  persistent_workers: true
+  persistent_workers: false
   shuffle_seed: ${seed}
 
 model:

@@ -1,4 +1,4 @@
-"""Build a compact, sharded USPTO 3D -> NMR pretraining dataset.
+"""Build compact, in-memory USPTO 3D -> NMR pretraining split files.
 
 The authoritative NMR records and split assignments come directly from
 ``uspto_nmr_preprocess.py`` outputs (``train.pt``, ``val.pt``, and
@@ -35,7 +35,7 @@ from tqdm import tqdm
 
 URL_USPTO = "https://zenodo.org/records/17766755/files/uspto.tar.gz?download=1"
 SPLITS = ("train", "val", "test")
-DATASET_VERSION = 3
+DATASET_VERSION = 4
 # Keep the expensive source index cache independent from the output schema.
 # Version 2 is the format already produced by the previous builder.
 INDEX_CACHE_VERSION = 2
@@ -373,7 +373,7 @@ def convert_to_data(mol_from_h5: h5py.Group, smiles: str):
     except ImportError as error:
         raise ImportError(
             "The legacy PyG output path requires torch_geometric. "
-            "The sharded 3D2Shift builder does not."
+            "The current 3D2Shift builder does not."
         ) from error
 
     data = Data(smiles=smiles)
@@ -651,42 +651,43 @@ def load_or_build_index_cache(
     return coordinate_index, coordinate_audit, split_for_smiles, nmr_audit
 
 
-class ShardWriter:
-    def __init__(self, root: Path, split: str, shard_size: int) -> None:
-        self.directory = root / split
-        self.directory.mkdir(parents=True, exist_ok=True)
+class SplitWriter:
+    """Accumulate one split and save it as one in-memory training file."""
+
+    def __init__(self, root: Path, split: str, shuffle_seed: int) -> None:
+        self.root = root
         self.split = split
-        self.shard_size = shard_size
+        self.shuffle_seed = int(shuffle_seed)
         self.buffer: List[Dict[str, Any]] = []
-        self.shards: List[Dict[str, Any]] = []
 
     def add(self, sample: Dict[str, Any]) -> None:
         self.buffer.append(sample)
-        if len(self.buffer) >= self.shard_size:
-            self.flush()
-
-    def flush(self) -> None:
-        if not self.buffer:
-            return
-        name = f"shard_{len(self.shards):05d}.pt"
-        path = self.directory / name
-        temporary = path.with_suffix(".pt.tmp")
-        torch.save(self.buffer, temporary)
-        os.replace(temporary, path)
-        self.shards.append({"path": name, "count": len(self.buffer)})
-        self.buffer = []
 
     def finish(self) -> Dict[str, Any]:
-        self.flush()
-        manifest = {
+        if self.split == "train" and len(self.buffer) > 1:
+            generator = torch.Generator()
+            generator.manual_seed(self.shuffle_seed)
+            order = torch.randperm(
+                len(self.buffer), generator=generator
+            ).tolist()
+            self.buffer = [self.buffer[index] for index in order]
+        payload = {
             "version": DATASET_VERSION,
             "split": self.split,
-            "count": sum(item["count"] for item in self.shards),
-            "shards": self.shards,
+            "samples": self.buffer,
         }
-        path = self.directory / "manifest.json"
-        path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        return manifest
+        path = self.root / f"{self.split}.pt"
+        temporary = path.with_suffix(".pt.tmp")
+        torch.save(payload, temporary)
+        os.replace(temporary, path)
+        count = len(self.buffer)
+        self.buffer = []
+        return {
+            "version": DATASET_VERSION,
+            "split": self.split,
+            "path": path.name,
+            "count": count,
+        }
 
 
 def targets_from_nmr_record(
@@ -728,7 +729,7 @@ def build_3d2shift_dataset(
     nmr_dir: str | Path,
     coords_dir: str | Path,
     output_dir: str | Path,
-    shard_size: int = 4096,
+    shuffle_seed: int = 0,
     audit_only: bool = False,
     index_cache: str | Path | None = None,
     rebuild_index_cache: bool = False,
@@ -749,13 +750,7 @@ def build_3d2shift_dataset(
         )
     )
     audit.update(nmr_audit)
-    writers = (
-        {}
-        if audit_only
-        else {
-            split: ShardWriter(output, split, shard_size) for split in SPLITS
-        }
-    )
+    manifests: Dict[str, Dict[str, Any]] = {}
     handles = {
         split: h5py.File(
             osp.join(str(coords_dir), f"{split}_molecules.h5"), "r"
@@ -765,6 +760,15 @@ def build_3d2shift_dataset(
     }
     try:
         for output_split in SPLITS:
+            writer = (
+                None
+                if audit_only
+                else SplitWriter(
+                    output,
+                    output_split,
+                    shuffle_seed=shuffle_seed,
+                )
+            )
             records = _load_torch(Path(nmr_dir) / f"{output_split}.pt")
             for record_index, record in enumerate(
                 tqdm(records, desc=f"Building {output_split} 3D2Shift")
@@ -814,14 +818,14 @@ def build_3d2shift_dataset(
                         **structure,
                         **targets,
                     }
-                    writers[output_split].add(sample)
+                    assert writer is not None
+                    writer.add(sample)
+            if writer is not None:
+                manifests[output_split] = writer.finish()
     finally:
         for handle in handles.values():
             handle.close()
 
-    manifests = {
-        split: writer.finish() for split, writer in writers.items()
-    }
     report = {
         "version": DATASET_VERSION,
         "nmr_dir": str(Path(nmr_dir)),
@@ -862,7 +866,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.add_argument("--coords-dir", required=True)
     build.add_argument("--output-dir", required=True)
-    build.add_argument("--shard-size", type=int, default=4096)
+    build.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=0,
+        help="Deterministic offline shuffle seed for train.pt.",
+    )
     build.add_argument("--audit-only", action="store_true")
     build.add_argument(
         "--index-cache",
@@ -891,7 +900,7 @@ def main() -> None:
         nmr_dir=args.nmr_dir,
         coords_dir=args.coords_dir,
         output_dir=args.output_dir,
-        shard_size=args.shard_size,
+        shuffle_seed=args.shuffle_seed,
         audit_only=args.audit_only,
         index_cache=args.index_cache,
         rebuild_index_cache=args.rebuild_index_cache,

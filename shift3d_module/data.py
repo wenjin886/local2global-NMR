@@ -1,18 +1,17 @@
-"""Sharded dataset and Lightning data module for 3D2Shift."""
+"""In-memory split dataset and Lightning data module for 3D2Shift."""
 
 from __future__ import annotations
 
-import bisect
-import json
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Sequence
+import time
+from typing import Any, Dict, Mapping, Sequence
 
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset
 
 
-OFFLINE_CONFORMER_DATASET_VERSION = 3
+IN_MEMORY_DATASET_VERSION = 4
 
 
 def _load_torch(path: Path) -> Any:
@@ -22,48 +21,50 @@ def _load_torch(path: Path) -> Any:
         return torch.load(path, map_location="cpu")
 
 
-class ShardedShiftDataset(Dataset):
+class ShiftDataset(Dataset):
+    """Load one complete, offline-expanded split into CPU memory once."""
+
     def __init__(
         self,
         root: str | Path,
         split: str,
     ) -> None:
-        self.directory = Path(root) / split
-        manifest = json.loads(
-            (self.directory / "manifest.json").read_text(encoding="utf-8")
+        self.path = Path(root) / f"{split}.pt"
+        size_gib = self.path.stat().st_size / (1024**3)
+        started = time.perf_counter()
+        print(
+            f"Loading complete {split} split from {self.path} "
+            f"({size_gib:.2f} GiB) into CPU memory..."
         )
-        version = int(manifest.get("version", 0))
-        if version < OFFLINE_CONFORMER_DATASET_VERSION:
+        payload = _load_torch(self.path)
+        elapsed = time.perf_counter() - started
+        if not isinstance(payload, Mapping):
             raise RuntimeError(
-                f"{self.directory} uses 3D2Shift dataset version {version}; "
-                "re-run `python -m preprocess.uspto_3d_nmr build` so every "
-                "conformer is stored as an independent sample."
+                f"{self.path} is not a versioned 3D2Shift split. Rebuild it."
             )
-        self.shards = list(manifest["shards"])
-        self.ends: List[int] = []
-        total = 0
-        for shard in self.shards:
-            total += int(shard["count"])
-            self.ends.append(total)
-        self._cached_shard = -1
-        self._cached_samples: Sequence[Mapping[str, Any]] = []
+        version = int(payload.get("version", 0))
+        if version < IN_MEMORY_DATASET_VERSION:
+            raise RuntimeError(
+                f"{self.path} uses 3D2Shift dataset version {version}; re-run "
+                "`python -m preprocess.uspto_3d_nmr build` to create one "
+                "in-memory PT file per split."
+            )
+        if payload.get("split") != split:
+            raise RuntimeError(
+                f"{self.path} contains split {payload.get('split')!r}, "
+                f"expected {split!r}"
+            )
+        self.samples: Sequence[Mapping[str, Any]] = payload["samples"]
+        print(
+            f"Loaded {len(self.samples):,} {split} conformer samples "
+            f"in {elapsed:.1f}s; no further dataset disk reads are required."
+        )
 
     def __len__(self) -> int:
-        return self.ends[-1] if self.ends else 0
+        return len(self.samples)
 
-    def __getitem__(self, index: int) -> Dict[str, Any]:
-        if index < 0:
-            index += len(self)
-        shard_index = bisect.bisect_right(self.ends, index)
-        if shard_index >= len(self.shards):
-            raise IndexError(index)
-        offset = 0 if shard_index == 0 else self.ends[shard_index - 1]
-        if shard_index != self._cached_shard:
-            self._cached_samples = _load_torch(
-                self.directory / self.shards[shard_index]["path"]
-            )
-            self._cached_shard = shard_index
-        source = self._cached_samples[index - offset]
+    def __getitem__(self, index: int) -> Mapping[str, Any]:
+        source = self.samples[index]
         positions = source["positions"]
         if positions.ndim != 2 or positions.size(-1) != 3:
             raise RuntimeError(
@@ -73,40 +74,7 @@ class ShardedShiftDataset(Dataset):
             )
         # Collation copies tensors into a new batch, so cloning every tensor
         # here only adds CPU work and memory traffic.
-        return dict(source)
-
-    def shard_bounds(self) -> List[tuple[int, int]]:
-        starts = [0, *self.ends[:-1]]
-        return list(zip(starts, self.ends))
-
-
-class ShardShuffleSampler(Sampler[int]):
-    """Shuffle shards and samples without repeatedly reloading whole shards."""
-
-    def __init__(self, dataset: ShardedShiftDataset, seed: int = 0) -> None:
-        self.dataset = dataset
-        self.seed = int(seed)
-        self.epoch = 0
-
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-    def set_epoch(self, epoch: int) -> None:
-        self.epoch = int(epoch)
-
-    def __iter__(self) -> Iterator[int]:
-        generator = torch.Generator()
-        generator.manual_seed(self.seed + self.epoch)
-        bounds = self.dataset.shard_bounds()
-        shard_order = torch.randperm(
-            len(bounds), generator=generator
-        ).tolist()
-        for shard_index in shard_order:
-            start, end = bounds[shard_index]
-            within_shard = torch.randperm(
-                end - start, generator=generator
-            ).tolist()
-            yield from (start + offset for offset in within_shard)
+        return source
 
 
 def collate_shift_samples(samples: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -170,38 +138,35 @@ class Shift3DDataModule(pl.LightningDataModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.datasets: Dict[str, ShardedShiftDataset] = {}
+        self.datasets: Dict[str, ShiftDataset] = {}
 
     def setup(self, stage: str | None = None) -> None:
         if stage in (None, "fit"):
-            self.datasets["train"] = ShardedShiftDataset(
+            self.datasets["train"] = ShiftDataset(
                 self.hparams.data_dir,
                 "train",
             )
-            self.datasets["val"] = ShardedShiftDataset(
+            self.datasets["val"] = ShiftDataset(
                 self.hparams.data_dir,
                 "val",
             )
         if stage in (None, "test", "predict"):
-            self.datasets["test"] = ShardedShiftDataset(
+            self.datasets["test"] = ShiftDataset(
                 self.hparams.data_dir,
                 "test",
             )
 
     def _loader(self, split: str, shuffle: bool) -> DataLoader:
         workers = int(self.hparams.num_workers)
-        sampler = (
-            ShardShuffleSampler(
-                self.datasets[split], seed=int(self.hparams.shuffle_seed)
-            )
-            if shuffle
-            else None
-        )
+        generator = None
+        if shuffle:
+            generator = torch.Generator()
+            generator.manual_seed(int(self.hparams.shuffle_seed))
         return DataLoader(
             self.datasets[split],
             batch_size=int(self.hparams.batch_size),
-            shuffle=False,
-            sampler=sampler,
+            shuffle=shuffle,
+            generator=generator,
             num_workers=workers,
             pin_memory=bool(self.hparams.pin_memory),
             persistent_workers=(
