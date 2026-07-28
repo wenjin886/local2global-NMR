@@ -17,7 +17,7 @@ export HYDRA_FULL_ERROR=1
 SRC_DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/download/data/multimodal_spectroscopic_dataset
 export DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/uspto/preprocessed
 
-# Preprocesss Dataset
+# === Preprocesss Dataset ===
 # python -m preprocess.uspto_nmr_preprocess \
 #   --parquet_dir $SRC_DATA_PATH \
 #   --save_dir $DATA_PATH \
@@ -28,14 +28,24 @@ export DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/d
 #   --data_dir $DATA_PATH \
 #   --output $DATA_PATH/graph_connectivity_stats.json
 # echo "Data Preprocessing Done. Starting Training..."
-# Train Model
-# python -m src.train -cn train_uspto_smiles
 
-python -m src.train -cn train_uspto_fragment
+
+# === Train NMR-->2D ===
+# python -m src.train -cn train_uspto_smiles
+# python -m src.train -cn train_uspto_fragment
 # python -m src.train -cn train_uspto_graph
 
 # === Pretrain Initializer ===
 # python -m local2geo_module.train
+
+# ==================================
+# === Preprocess 3D --> NMR dataset ===
+COORD_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/download/preprocessed
+python -m preprocess.uspto_3d_nmr build \
+  --parquet data/uspto/exp_data/*.parquet \
+  --nmr-dir data/uspto/preprocessed \
+  --coords-dir ${COORD_PATH} \
+  --output-dir data/uspto/3d2shift
 
 
 
