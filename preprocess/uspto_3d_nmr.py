@@ -165,7 +165,10 @@ def _integer_integration(peak: Mapping[str, Any]) -> Optional[int]:
         value = float(peak.get("nH"))
     except (TypeError, ValueError):
         return None
-    if not np.isfinite(value) or abs(value - round(value)) > 1e-4 or value <= 0:
+    # MestreNova occasionally emits zero-integration artefact peaks. They do
+    # not contribute an atom to the expanded multiset and should be ignored,
+    # rather than invalidating the entire molecule.
+    if not np.isfinite(value) or abs(value - round(value)) > 1e-4 or value < 0:
         return None
     return int(round(value))
 
@@ -549,6 +552,7 @@ def _hydrogen_training_mask(
     molecule: Chem.Mol,
     policy: str,
     target_count: int,
+    max_missing_hydrogens: int,
 ) -> Optional[torch.Tensor]:
     atomic_numbers = torch.tensor(
         [atom.GetAtomicNum() for atom in molecule.GetAtoms()]
@@ -566,6 +570,11 @@ def _hydrogen_training_mask(
         return all_h
     if policy == "exact_or_carbon_bound" and target_count == int(carbon_h.sum()):
         return carbon_h
+    if (
+        policy == "partial_missing"
+        and 0 < int(all_h.sum()) - target_count <= max_missing_hydrogens
+    ):
+        return all_h
     return None
 
 
@@ -576,6 +585,7 @@ def targets_from_row(
     hydrogen_policy: str,
     carbon_policy: str,
     max_carbon_cluster_span: float,
+    max_missing_hydrogens: int,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     molecule = _explicit_molecule(structure_smiles)
     if molecule is None:
@@ -586,7 +596,10 @@ def targets_from_row(
     if h_targets is None or h_targets.numel() == 0:
         return None, "invalid_hydrogen_integration"
     h_mask = _hydrogen_training_mask(
-        molecule, hydrogen_policy, int(h_targets.numel())
+        molecule,
+        hydrogen_policy,
+        int(h_targets.numel()),
+        max_missing_hydrogens=max_missing_hydrogens,
     )
     if h_mask is None:
         return None, "hydrogen_count_mismatch"
@@ -668,6 +681,75 @@ def index_coordinates(
     return index, audit
 
 
+def _source_fingerprint(paths: Sequence[Path]) -> List[Dict[str, Any]]:
+    fingerprint = []
+    for path in paths:
+        resolved = path.resolve()
+        if not resolved.exists():
+            fingerprint.append({"path": str(resolved), "missing": True})
+            continue
+        stat = resolved.stat()
+        fingerprint.append(
+            {
+                "path": str(resolved),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        )
+    return fingerprint
+
+
+def load_or_build_index_cache(
+    coords_dir: str | Path,
+    nmr_dir: str | Path,
+    cache_path: str | Path,
+    rebuild: bool = False,
+) -> Tuple[
+    Dict[str, List[Tuple[str, str]]],
+    Counter,
+    Dict[str, str],
+    Counter,
+]:
+    """Cache the expensive coordinate and authoritative NMR split indices."""
+    coordinate_paths = [
+        Path(coords_dir) / f"{split}_molecules.h5" for split in SPLITS
+    ]
+    nmr_paths = [Path(nmr_dir) / f"{split}.pt" for split in SPLITS]
+    metadata = {
+        "version": DATASET_VERSION,
+        "coordinate_sources": _source_fingerprint(coordinate_paths),
+        "nmr_sources": _source_fingerprint(nmr_paths),
+    }
+    cache_path = Path(cache_path)
+    if cache_path.exists() and not rebuild:
+        cached = _load_torch(cache_path)
+        if cached.get("metadata") == metadata:
+            print(f"Loading reusable indices from {cache_path}")
+            return (
+                cached["coordinate_index"],
+                Counter(cached["coordinate_audit"]),
+                cached["split_for_smiles"],
+                Counter(cached["nmr_audit"]),
+            )
+        print(f"Ignoring stale index cache at {cache_path}")
+
+    coordinate_index, coordinate_audit = index_coordinates(coords_dir)
+    split_for_smiles, _, nmr_audit = load_nmr_split_index(nmr_dir)
+    payload = {
+        "metadata": metadata,
+        "coordinate_index": coordinate_index,
+        "coordinate_audit": dict(coordinate_audit),
+        "split_for_smiles": split_for_smiles,
+        "nmr_audit": dict(nmr_audit),
+    }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    torch.save(payload, temporary)
+    os.replace(temporary, cache_path)
+    print(f"Saved reusable indices to {cache_path}")
+    return coordinate_index, coordinate_audit, split_for_smiles, nmr_audit
+
+
 class ShardWriter:
     def __init__(self, root: Path, split: str, shard_size: int) -> None:
         self.directory = root / split
@@ -714,13 +796,27 @@ def build_3d2shift_dataset(
     hydrogen_policy: str = "exact",
     carbon_policy: str = "exact",
     max_carbon_cluster_span: float = 15.0,
+    max_missing_hydrogens: int = 2,
     shard_size: int = 4096,
     audit_only: bool = False,
+    index_cache: str | Path | None = None,
+    rebuild_index_cache: bool = False,
 ) -> Dict[str, Any]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    coordinate_index, audit = index_coordinates(coords_dir)
-    split_for_smiles, _, nmr_audit = load_nmr_split_index(nmr_dir)
+    cache_path = (
+        output / "index_cache.pt"
+        if index_cache is None
+        else Path(index_cache)
+    )
+    coordinate_index, audit, split_for_smiles, nmr_audit = (
+        load_or_build_index_cache(
+            coords_dir=coords_dir,
+            nmr_dir=nmr_dir,
+            cache_path=cache_path,
+            rebuild=rebuild_index_cache,
+        )
+    )
     audit.update(nmr_audit)
     writers = (
         {}
@@ -790,6 +886,7 @@ def build_3d2shift_dataset(
                     hydrogen_policy=hydrogen_policy,
                     carbon_policy=carbon_policy,
                     max_carbon_cluster_span=max_carbon_cluster_span,
+                    max_missing_hydrogens=max_missing_hydrogens,
                 )
                 if targets is None:
                     audit[f"rejected/{reason}"] += 1
@@ -821,6 +918,8 @@ def build_3d2shift_dataset(
         "hydrogen_policy": hydrogen_policy,
         "carbon_policy": carbon_policy,
         "max_carbon_cluster_span": max_carbon_cluster_span,
+        "max_missing_hydrogens": max_missing_hydrogens,
+        "index_cache": str(cache_path),
         "audit_only": audit_only,
         "counts": dict(sorted(audit.items())),
         "splits": manifests,
@@ -859,15 +958,22 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--output-dir", required=True)
     build.add_argument(
         "--hydrogen-policy",
-        choices=("exact", "exact_or_carbon_bound"),
+        choices=("exact", "exact_or_carbon_bound", "partial_missing"),
         default="exact",
     )
     build.add_argument(
         "--carbon-policy", choices=("exact", "collapse"), default="exact"
     )
     build.add_argument("--max-carbon-cluster-span", type=float, default=15.0)
+    build.add_argument("--max-missing-hydrogens", type=int, default=2)
     build.add_argument("--shard-size", type=int, default=4096)
     build.add_argument("--audit-only", action="store_true")
+    build.add_argument(
+        "--index-cache",
+        default=None,
+        help="Reusable index cache; defaults to OUTPUT_DIR/index_cache.pt.",
+    )
+    build.add_argument("--rebuild-index-cache", action="store_true")
     return parser
 
 
@@ -893,8 +999,11 @@ def main() -> None:
         hydrogen_policy=args.hydrogen_policy,
         carbon_policy=args.carbon_policy,
         max_carbon_cluster_span=args.max_carbon_cluster_span,
+        max_missing_hydrogens=args.max_missing_hydrogens,
         shard_size=args.shard_size,
         audit_only=args.audit_only,
+        index_cache=args.index_cache,
+        rebuild_index_cache=args.rebuild_index_cache,
     )
     print(json.dumps(report["counts"], indent=2))
 

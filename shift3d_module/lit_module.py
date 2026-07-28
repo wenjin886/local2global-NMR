@@ -54,6 +54,38 @@ class Shift3DModule(pl.LightningModule):
             expanded[classes.eq(item)] = mean
         return means, expanded
 
+    @staticmethod
+    def _match_multiset(
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Match scalar multisets, including optional missing target atoms."""
+        if predictions.numel() < targets.numel():
+            raise RuntimeError(
+                "There are fewer atom predictions than shift targets"
+            )
+        if predictions.numel() == targets.numel():
+            return predictions.sort().values, targets.sort().values
+
+        # A rectangular assignment selects the prediction subset that best
+        # explains the observed peaks. Assignment indices are discrete, while
+        # the selected prediction values retain their gradients.
+        from scipy.optimize import linear_sum_assignment
+
+        cost = (
+            predictions.detach()[:, None] - targets.detach()[None, :]
+        ).abs()
+        prediction_indices, target_indices = linear_sum_assignment(
+            cost.cpu().numpy()
+        )
+        prediction_indices = torch.as_tensor(
+            prediction_indices, device=predictions.device, dtype=torch.long
+        )
+        target_indices = torch.as_tensor(
+            target_indices, device=targets.device, dtype=torch.long
+        )
+        return predictions[prediction_indices], targets[target_indices]
+
     def _sample_losses(
         self,
         batch: Dict[str, torch.Tensor],
@@ -66,10 +98,9 @@ class Shift3DModule(pl.LightningModule):
         h_classes = classes[h_mask]
         _, h_aggregated = self._class_means(h_raw, h_classes)
         h_target = batch["h_targets"][index, batch["h_target_mask"][index]]
-        if h_aggregated.numel() != h_target.numel():
-            raise RuntimeError("Hydrogen prediction/target cardinality mismatch")
-        h_sorted = h_aggregated.sort().values
-        h_target_sorted = h_target.sort().values
+        h_matched, h_target_matched = self._match_multiset(
+            h_aggregated, h_target
+        )
 
         c_mask = batch["atomic_numbers"][index].eq(6) & batch["atom_mask"][index]
         c_raw = output["c_shifts"][index, c_mask]
@@ -81,7 +112,7 @@ class Shift3DModule(pl.LightningModule):
         c_sorted = c_aggregated.sort().values
         c_target_sorted = c_target.sort().values
 
-        h_loss = F.smooth_l1_loss(h_sorted, h_target_sorted)
+        h_loss = F.smooth_l1_loss(h_matched, h_target_matched)
         c_loss = F.smooth_l1_loss(c_sorted, c_target_sorted)
         equivalence = 0.5 * (
             F.smooth_l1_loss(h_raw, h_aggregated)
@@ -91,7 +122,7 @@ class Shift3DModule(pl.LightningModule):
             "h_loss": h_loss,
             "c_loss": c_loss,
             "equivalence_loss": equivalence,
-            "h_mae": (h_sorted - h_target_sorted).abs().mean(),
+            "h_mae": (h_matched - h_target_matched).abs().mean(),
             "c_mae": (c_sorted - c_target_sorted).abs().mean(),
         }
 

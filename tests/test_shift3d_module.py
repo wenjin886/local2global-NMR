@@ -56,3 +56,16 @@ def test_lightning_loss_matches_equal_cardinality_symmetry_multisets():
     total = sum(losses.values())
     total.backward()
     assert any(parameter.grad is not None for parameter in module.parameters())
+
+
+def test_partial_hydrogen_matching_selects_observed_subset():
+    predictions = torch.tensor([1.0, 2.0, 8.0], requires_grad=True)
+    targets = torch.tensor([1.1, 7.9])
+    matched, matched_targets = Shift3DModule._match_multiset(
+        predictions, targets
+    )
+    loss = torch.nn.functional.l1_loss(matched, matched_targets)
+    loss.backward()
+    assert torch.isclose(loss, torch.tensor(0.1), atol=1e-6)
+    assert predictions.grad is not None
+    assert predictions.grad[1].eq(0)

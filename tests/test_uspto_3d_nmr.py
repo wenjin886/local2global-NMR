@@ -23,6 +23,12 @@ def test_hydrogen_integrations_form_an_equal_cardinality_multiset():
     )
     assert torch.equal(shifts, torch.tensor([1.2, 7.1]))
     assert torch.equal(counts, torch.tensor([3, 2]))
+    targets_with_zero_artifact = expand_hydrogen_shifts(
+        [{"delta": 0.0, "nH": 0}, {"delta": 1.2, "nH": 3}]
+    )
+    assert torch.equal(
+        targets_with_zero_artifact, torch.tensor([1.2, 1.2, 1.2])
+    )
 
 
 def test_carbon_multiplet_lines_are_collapsed_to_known_class_count():

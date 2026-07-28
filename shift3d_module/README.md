@@ -30,6 +30,14 @@ matches the number of chirality-aware carbon symmetry classes. Run the same
 command with `--audit-only` first on the full source collection and inspect
 `audit.json`. `--hydrogen-policy exact_or_carbon_bound` and
 `--carbon-policy collapse` are explicit, less conservative alternatives.
+For simulated spectra with one or two missing proton labels, use
+`--hydrogen-policy partial_missing --max-missing-hydrogens 2`; training then
+uses a rectangular Hungarian assignment to select the observed subset.
+
+The expensive coordinate and NMR split indices are cached at
+`OUTPUT_DIR/index_cache.pt`. Subsequent policy experiments reuse this file.
+The cache is invalidated automatically when any source HDF5/PT size or
+modification time changes; `--rebuild-index-cache` forces regeneration.
 
 `h_peak_counts` preserves the source integration for every proton peak.
 Carbon integrals are not treated as atom counts; `c_equivalence_class_sizes`
