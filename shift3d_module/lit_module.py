@@ -331,11 +331,16 @@ class Shift3DModule(pl.LightningModule):
             + self.hparams.equivalence_loss_weight
             * metrics["equivalence_loss"]
         )
+        if stage == "train":
+            on_step, on_epoch = True, False
+        else:
+            on_step, on_epoch = True, True
+
         self.log(
             f"{stage}/loss",
             loss,
-            on_step=stage == "train",
-            on_epoch=True,
+            on_step=on_step,
+            on_epoch=on_epoch,
             prog_bar=True,
             batch_size=batch["atomic_numbers"].size(0),
         )
@@ -343,8 +348,8 @@ class Shift3DModule(pl.LightningModule):
             self.log(
                 f"{stage}/{key}",
                 value,
-                on_step=False,
-                on_epoch=True,
+                on_step=on_step,
+                on_epoch=on_epoch,
                 batch_size=batch["atomic_numbers"].size(0),
             )
         return loss

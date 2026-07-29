@@ -9,12 +9,13 @@ output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/lo
 log_path: ${output_dir}/logs
 data_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/${data_name}
 
+val_check_interval: 0.1
 data:
   data_dir: ${data_path}/3d2shift
   batch_size: 64
   # Each complete split is already resident in the main process. Keeping
   # workers at zero avoids copying a very large Python object graph.
-  num_workers: 0
+  num_workers: 1
   pin_memory: true
   persistent_workers: false
   shuffle_seed: ${seed}
@@ -55,3 +56,4 @@ trainer:
   max_epochs: 100
   gradient_clip_val: 5.0
   log_every_n_steps: 50
+  val_check_interval: ${val_check_interval}
