@@ -184,4 +184,4 @@ def test_shift_stick_plot_renders_target_above_prediction_below():
     )
     assert image.ndim == 3
     assert image.shape[-1] == 4
-    assert image.shape[1] > image.shape[0]
+    assert image.shape[0] > image.shape[1]

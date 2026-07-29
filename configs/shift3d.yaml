@@ -39,7 +39,7 @@ model:
   h_softmin_temperature: 0.05
   c_softmin_temperature: 0.5
   log_prediction_plots: true
-  prediction_plot_samples: 10
+  prediction_plot_samples: 9
   h_plot_ppm_min: 0.0
   h_plot_ppm_max: 10.0
   c_plot_ppm_min: 0.0

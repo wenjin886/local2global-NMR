@@ -86,8 +86,10 @@ Hydra overrides work normally, for example
 When W&B logging is enabled, every validation run records
 `val/shift_target_vs_prediction`. The two-row stick plot shows raw target peaks
 upward in blue and de-normalized per-atom model predictions downward in red,
-with separate ppm ranges for 1H and 13C. By default each plot contains ten
-different SMILES, so the three conformers of one molecule do not fill the
+with separate ppm ranges for 1H and 13C. By default each plot uses a 3-by-3
+molecule layout containing nine different SMILES. Each molecule card stacks
+its 1H and 13C plots, and long SMILES wrap across lines instead of being
+truncated. The three conformers of one molecule therefore do not fill the
 plot. Sample count and ppm limits are controlled by
 `model.prediction_plot_samples`, `model.h_plot_ppm_*`, and
 `model.c_plot_ppm_*`. Each subplot title includes its per-sample symmetric

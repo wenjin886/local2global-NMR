@@ -45,7 +45,7 @@ class Shift3DModule(pl.LightningModule):
         c_shift_mean: float | None = None,
         c_shift_std: float | None = None,
         log_prediction_plots: bool = True,
-        prediction_plot_samples: int = 10,
+        prediction_plot_samples: int = 9,
         h_plot_ppm_min: float = 0.0,
         h_plot_ppm_max: float = 10.0,
         c_plot_ppm_min: float = 0.0,
@@ -558,26 +558,49 @@ class Shift3DModule(pl.LightningModule):
         c_limits: tuple[float, float] = (0.0, 230.0),
     ):
         import numpy as np
+        import textwrap
         from matplotlib.backends.backend_agg import FigureCanvasAgg
         from matplotlib.figure import Figure
         from matplotlib.lines import Line2D
 
-        columns = len(examples)
         figure = Figure(
-            figsize=(max(4.0, 3.1 * columns), 6.0),
+            figsize=(15.0, 16.0),
             dpi=120,
         )
         canvas = FigureCanvasAgg(figure)
-        axes = figure.subplots(2, columns, squeeze=False)
+        outer_grid = figure.add_gridspec(
+            3,
+            3,
+            left=0.065,
+            right=0.985,
+            top=0.975,
+            bottom=0.075,
+            hspace=0.52,
+            wspace=0.24,
+        )
         target_color = "#4C78A8"
         prediction_color = "#E02020"
 
-        for column, example in enumerate(examples):
-            for row, (
+        for example_index, example in enumerate(examples[:9]):
+            molecule_row, molecule_column = divmod(example_index, 3)
+            molecule_grid = outer_grid[
+                molecule_row, molecule_column
+            ].subgridspec(2, 1, hspace=0.38)
+            wrapped_smiles = "\n".join(
+                textwrap.wrap(
+                    str(example["smiles"]),
+                    width=48,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+            )
+            for spectrum_row, (
                 target_key,
                 prediction_key,
                 limits,
                 nucleus,
+                mae_key,
+                precision,
             ) in enumerate(
                 (
                     (
@@ -585,16 +608,22 @@ class Shift3DModule(pl.LightningModule):
                         "h_prediction",
                         h_limits,
                         r"$^1$H NMR",
+                        "h_nearest_mae_ppm",
+                        3,
                     ),
                     (
                         "c_target",
                         "c_prediction",
                         c_limits,
                         r"$^{13}$C NMR",
+                        "c_nearest_mae_ppm",
+                        2,
                     ),
                 )
             ):
-                axis = axes[row, column]
+                axis = figure.add_subplot(
+                    molecule_grid[spectrum_row, 0]
+                )
                 targets = torch.as_tensor(
                     example[target_key]
                 ).reshape(-1).numpy()
@@ -619,31 +648,29 @@ class Shift3DModule(pl.LightningModule):
                 axis.set_xlim(*limits)
                 axis.set_ylim(-1.08, 1.08)
                 axis.set_yticks((-1.0, 0.0, 1.0))
+                mae = example.get(mae_key)
+                spectrum_title = nucleus
+                if mae is not None:
+                    spectrum_title += (
+                        f" | symmetric MAE={mae:.{precision}f} ppm"
+                    )
                 axis.set_title(
                     (
-                        (
-                            f"{nucleus}\n{example['smiles'][:28]}"
-                            f"\nMAE={example['h_nearest_mae_ppm']:.3f} ppm"
-                        )
-                        if row == 0
-                        and example.get("h_nearest_mae_ppm") is not None
-                        else (
-                            f"{nucleus}\n{example['smiles'][:28]}"
-                            if row == 0
-                            else (
-                                f"{nucleus}\n"
-                                f"MAE={example['c_nearest_mae_ppm']:.2f} ppm"
-                                if example.get("c_nearest_mae_ppm") is not None
-                                else nucleus
-                            )
-                        )
+                        f"{wrapped_smiles}\n{spectrum_title}"
+                        if spectrum_row == 0
+                        else spectrum_title
                     ),
-                    fontsize=9,
+                    fontsize=8.5,
+                    pad=5.0,
                 )
-                axis.tick_params(labelsize=8)
+                axis.tick_params(labelsize=7.5)
 
-        figure.supxlabel("Chemical Shift (ppm)", fontsize=12)
-        figure.supylabel("NMR stick intensity", fontsize=12)
+        figure.supxlabel(
+            "Chemical Shift (ppm)", fontsize=12, y=0.025
+        )
+        figure.supylabel(
+            "NMR stick intensity", fontsize=12, x=0.015
+        )
         figure.legend(
             handles=[
                 Line2D([0], [0], color=target_color, label="target"),
@@ -657,15 +684,7 @@ class Shift3DModule(pl.LightningModule):
             loc="lower center",
             ncol=2,
             frameon=False,
-            bbox_to_anchor=(0.5, -0.015),
-        )
-        figure.subplots_adjust(
-            left=0.07,
-            right=0.99,
-            top=0.91,
-            bottom=0.14,
-            hspace=0.34,
-            wspace=0.28,
+            bbox_to_anchor=(0.5, 0.005),
         )
         canvas.draw()
         return np.asarray(canvas.buffer_rgba()).copy()
