@@ -92,4 +92,6 @@ plot. Sample count and ppm limits are controlled by
 `model.prediction_plot_samples`, `model.h_plot_ppm_*`, and
 `model.c_plot_ppm_*`. Each subplot title includes its per-sample symmetric
 nearest MAE. The companion `val/shift_examples` W&B table records the SMILES,
-raw target/prediction ppm lists, and separate 1H/13C nearest MAE values.
+raw target/prediction ppm lists, and separate 1H/13C symmetric,
+atom-to-peak, and peak-to-atom nearest MAE values. Validation metrics also log
+`h/c_atom_to_peak_mae_ppm` and `h/c_peak_to_atom_mae_ppm` separately.

@@ -295,32 +295,54 @@ class Shift3DModule(pl.LightningModule):
 
         h_predictions_ppm = output["h_shifts"][index, h_atom_mask]
         c_predictions_ppm = output["c_shifts"][index, c_atom_mask]
-        h_nearest_mae_ppm = self._nearest_mae(
+        h_nearest = self._nearest_mae_components(
             h_predictions_ppm, h_peaks_ppm
         )
-        c_nearest_mae_ppm = self._nearest_mae(
+        c_nearest = self._nearest_mae_components(
             c_predictions_ppm, c_peaks_ppm
         )
         return {
             "h_set_loss": h_set["loss"],
             "c_set_loss": c_set["loss"],
             "equivalence_loss": equivalence,
-            "h_nearest_mae_ppm": h_nearest_mae_ppm,
-            "c_nearest_mae_ppm": c_nearest_mae_ppm,
+            "h_nearest_mae_ppm": h_nearest["symmetric"],
+            "h_atom_to_peak_mae_ppm": h_nearest["atom_to_peak"],
+            "h_peak_to_atom_mae_ppm": h_nearest["peak_to_atom"],
+            "c_nearest_mae_ppm": c_nearest["symmetric"],
+            "c_atom_to_peak_mae_ppm": c_nearest["atom_to_peak"],
+            "c_peak_to_atom_mae_ppm": c_nearest["peak_to_atom"],
         }
 
     @staticmethod
+    def _nearest_mae_components(
+        predictions: torch.Tensor,
+        peaks: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        if predictions.numel() == 0 or peaks.numel() == 0:
+            zero = predictions.sum() * 0.0
+            return {
+                "atom_to_peak": zero,
+                "peak_to_atom": zero,
+                "symmetric": zero,
+            }
+        absolute = (predictions[:, None] - peaks[None, :]).abs()
+        atom_to_peak = absolute.min(dim=1).values.mean()
+        peak_to_atom = absolute.min(dim=0).values.mean()
+        return {
+            "atom_to_peak": atom_to_peak,
+            "peak_to_atom": peak_to_atom,
+            "symmetric": 0.5 * (atom_to_peak + peak_to_atom),
+        }
+
+    @classmethod
     def _nearest_mae(
+        cls,
         predictions: torch.Tensor,
         peaks: torch.Tensor,
     ) -> torch.Tensor:
-        if predictions.numel() == 0 or peaks.numel() == 0:
-            return predictions.sum() * 0.0
-        absolute = (predictions[:, None] - peaks[None, :]).abs()
-        return 0.5 * (
-            absolute.min(dim=1).values.mean()
-            + absolute.min(dim=0).values.mean()
-        )
+        return cls._nearest_mae_components(
+            predictions, peaks
+        )["symmetric"]
 
     def _shared_step(
         self, batch: Dict[str, torch.Tensor], stage: str
@@ -356,6 +378,11 @@ class Shift3DModule(pl.LightningModule):
             batch_size=batch["atomic_numbers"].size(0),
         )
         for key, value in metrics.items():
+            if stage == "train" and (
+                "_atom_to_peak_mae_ppm" in key
+                or "_peak_to_atom_mae_ppm" in key
+            ):
+                continue
             self.log(
                 f"{stage}/{key}",
                 value,
@@ -405,21 +432,51 @@ class Shift3DModule(pl.LightningModule):
             c_prediction = output["c_shifts"][
                 index, c_atoms
             ].detach().cpu()
+            h_nearest = (
+                self._nearest_mae_components(h_prediction, h_target)
+                if h_prediction.numel() and h_target.numel()
+                else None
+            )
+            c_nearest = (
+                self._nearest_mae_components(c_prediction, c_target)
+                if c_prediction.numel() and c_target.numel()
+                else None
+            )
             example = {
                 "id": str(batch["id"][index]),
                 "smiles": smiles,
                 "h_target": h_target,
                 "h_prediction": h_prediction,
                 "h_nearest_mae_ppm": (
-                    float(self._nearest_mae(h_prediction, h_target))
-                    if h_prediction.numel() and h_target.numel()
+                    float(h_nearest["symmetric"])
+                    if h_nearest is not None
+                    else None
+                ),
+                "h_atom_to_peak_mae_ppm": (
+                    float(h_nearest["atom_to_peak"])
+                    if h_nearest is not None
+                    else None
+                ),
+                "h_peak_to_atom_mae_ppm": (
+                    float(h_nearest["peak_to_atom"])
+                    if h_nearest is not None
                     else None
                 ),
                 "c_target": c_target,
                 "c_prediction": c_prediction,
                 "c_nearest_mae_ppm": (
-                    float(self._nearest_mae(c_prediction, c_target))
-                    if c_prediction.numel() and c_target.numel()
+                    float(c_nearest["symmetric"])
+                    if c_nearest is not None
+                    else None
+                ),
+                "c_atom_to_peak_mae_ppm": (
+                    float(c_nearest["atom_to_peak"])
+                    if c_nearest is not None
+                    else None
+                ),
+                "c_peak_to_atom_mae_ppm": (
+                    float(c_nearest["peak_to_atom"])
+                    if c_nearest is not None
                     else None
                 ),
             }
@@ -463,9 +520,13 @@ class Shift3DModule(pl.LightningModule):
                         "h_target_ppm",
                         "h_prediction_ppm",
                         "h_nearest_mae_ppm",
+                        "h_atom_to_peak_mae_ppm",
+                        "h_peak_to_atom_mae_ppm",
                         "c_target_ppm",
                         "c_prediction_ppm",
                         "c_nearest_mae_ppm",
+                        "c_atom_to_peak_mae_ppm",
+                        "c_peak_to_atom_mae_ppm",
                     ],
                     data=[
                         [
@@ -476,9 +537,13 @@ class Shift3DModule(pl.LightningModule):
                             example["h_target"].tolist(),
                             example["h_prediction"].tolist(),
                             example["h_nearest_mae_ppm"],
+                            example["h_atom_to_peak_mae_ppm"],
+                            example["h_peak_to_atom_mae_ppm"],
                             example["c_target"].tolist(),
                             example["c_prediction"].tolist(),
                             example["c_nearest_mae_ppm"],
+                            example["c_atom_to_peak_mae_ppm"],
+                            example["c_peak_to_atom_mae_ppm"],
                         ]
                         for example in self._validation_shift_examples
                     ],

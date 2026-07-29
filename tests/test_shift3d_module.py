@@ -54,7 +54,11 @@ def test_lightning_loss_supports_unequal_atom_and_peak_cardinalities():
         "c_set_loss",
         "equivalence_loss",
         "h_nearest_mae_ppm",
+        "h_atom_to_peak_mae_ppm",
+        "h_peak_to_atom_mae_ppm",
         "c_nearest_mae_ppm",
+        "c_atom_to_peak_mae_ppm",
+        "c_peak_to_atom_mae_ppm",
     }
     total = (
         losses["h_set_loss"]
@@ -64,6 +68,23 @@ def test_lightning_loss_supports_unequal_atom_and_peak_cardinalities():
     assert torch.isfinite(total)
     total.backward()
     assert any(parameter.grad is not None for parameter in module.parameters())
+
+
+def test_nearest_mae_reports_both_directions_separately():
+    predictions = torch.tensor([1.0, 1.0, 8.0])
+    targets = torch.tensor([1.0, 7.0])
+    components = Shift3DModule._nearest_mae_components(
+        predictions, targets
+    )
+    assert torch.isclose(
+        components["atom_to_peak"], torch.tensor(1.0 / 3.0)
+    )
+    assert torch.isclose(
+        components["peak_to_atom"], torch.tensor(0.5)
+    )
+    assert torch.isclose(
+        components["symmetric"], torch.tensor(5.0 / 12.0)
+    )
 
 
 def test_bidirectional_set_loss_is_differentiable_with_extra_predictions():
