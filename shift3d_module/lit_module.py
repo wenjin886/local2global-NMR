@@ -367,14 +367,14 @@ class Shift3DModule(pl.LightningModule):
         if stage == "train":
             on_step, on_epoch = True, False
         else:
-            on_step, on_epoch = True, True
+            on_step, on_epoch = False, True
 
         self.log(
             f"{stage}/loss",
             loss,
             on_step=on_step,
             on_epoch=on_epoch,
-            prog_bar=True,
+            prog_bar=False,
             batch_size=batch["atomic_numbers"].size(0),
         )
         for key, value in metrics.items():

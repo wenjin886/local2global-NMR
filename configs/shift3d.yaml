@@ -9,6 +9,8 @@ output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/lo
 log_path: ${output_dir}/logs
 data_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/${data_name}
 
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-4-3d2nmr/dim512-bs64_2026-07-29_10-36-29/checkpoints/last.ckpt
+
 val_check_interval: 0.1
 data:
   data_dir: ${data_path}/3d2shift
@@ -40,14 +42,13 @@ model:
   c_softmin_temperature: 0.5
   log_prediction_plots: true
   prediction_plot_samples: 9
-  h_plot_ppm_min: 0.0
+  h_plot_ppm_min: -2.0
   h_plot_ppm_max: 10.0
-  c_plot_ppm_min: 0.0
+  c_plot_ppm_min: -16.0
   c_plot_ppm_max: 230.0
 
 checkpoint:
   save_top_k: 3
-
 logger:
   enabled: true
   project: local2global-nmr-3d2shift
@@ -63,3 +64,8 @@ trainer:
   gradient_clip_val: 5.0
   log_every_n_steps: 50
   val_check_interval: ${val_check_interval}
+
+
+hydra:
+  run:
+    dir: ${log_path}

@@ -52,5 +52,6 @@ COORD_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/downl
 # === PreTrain ===
 python -m shift3d_module.train
 
-
+# For Portal
+# ps -fu $USER | grep -E "python|wandb"
 

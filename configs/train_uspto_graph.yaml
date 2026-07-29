@@ -156,4 +156,4 @@ optimized_metric: val_inference/graph_score
 
 hydra:
   run:
-    dir: ${log_path}/uspto_graph/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}
+    dir: ${log_path}

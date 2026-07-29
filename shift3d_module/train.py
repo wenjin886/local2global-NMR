@@ -28,12 +28,12 @@ def main(config: DictConfig) -> None:
     os.makedirs(output_dir, exist_ok=True)
     checkpoint = ModelCheckpoint(
         dirpath=output_dir / "checkpoints",
-        filename="epoch={epoch:03d}-val_loss={val/loss:.4f}",
+        filename="epoch={epoch:03d}-{step}",
         monitor="val/loss",
         mode="min",
         save_top_k=int(config.checkpoint.save_top_k),
         save_last=True,
-        auto_insert_metric_name=False,
+        auto_insert_metric_name=True,
     )
     callbacks = [checkpoint]
     logger = False
@@ -56,7 +56,7 @@ def main(config: DictConfig) -> None:
             config.trainer, resolve=True, throw_on_missing=True
         ),
     )
-    trainer.fit(model, datamodule=datamodule)
+    trainer.fit(model, datamodule=datamodule, ckpt_path=config.get("ckpt_path"))
     if bool(config.run_test):
         trainer.test(model=model, datamodule=datamodule, ckpt_path="best")
     print(f"Best checkpoint: {checkpoint.best_model_path}")
