@@ -136,3 +136,31 @@ def test_shift_normalization_uses_training_statistics_and_returns_ppm(tmp_path):
         module._to_ppm(torch.tensor([-1.0, 0.0, 1.0]), nucleus=1),
         c_ppm,
     )
+
+
+def test_shift_stick_plot_renders_target_above_prediction_below():
+    image = Shift3DModule._render_shift_stick_plot(
+        [
+            {
+                "smiles": "CCO",
+                "h_target": torch.tensor([1.0, 3.5]),
+                "h_prediction": torch.tensor([1.1, 1.2, 3.4]),
+                "h_nearest_mae_ppm": 0.1,
+                "c_target": torch.tensor([20.0, 60.0]),
+                "c_prediction": torch.tensor([21.0, 59.0]),
+                "c_nearest_mae_ppm": 1.0,
+            },
+            {
+                "smiles": "CC",
+                "h_target": torch.tensor([1.0]),
+                "h_prediction": torch.tensor([0.9] * 6),
+                "h_nearest_mae_ppm": 0.1,
+                "c_target": torch.tensor([10.0]),
+                "c_prediction": torch.tensor([11.0, 11.0]),
+                "c_nearest_mae_ppm": 1.0,
+            },
+        ]
+    )
+    assert image.ndim == 3
+    assert image.shape[-1] == 4
+    assert image.shape[1] > image.shape[0]

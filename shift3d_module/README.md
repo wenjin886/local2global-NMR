@@ -82,3 +82,14 @@ python -m shift3d_module.eval \
 
 Hydra overrides work normally, for example
 `logger.mode=offline data.batch_size=64`.
+
+When W&B logging is enabled, every validation run records
+`val/shift_target_vs_prediction`. The two-row stick plot shows raw target peaks
+upward in blue and de-normalized per-atom model predictions downward in red,
+with separate ppm ranges for 1H and 13C. By default each plot contains ten
+different SMILES, so the three conformers of one molecule do not fill the
+plot. Sample count and ppm limits are controlled by
+`model.prediction_plot_samples`, `model.h_plot_ppm_*`, and
+`model.c_plot_ppm_*`. Each subplot title includes its per-sample symmetric
+nearest MAE. The companion `val/shift_examples` W&B table records the SMILES,
+raw target/prediction ppm lists, and separate 1H/13C nearest MAE values.

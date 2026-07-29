@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, List
 
 import pytorch_lightning as pl
 import torch
@@ -44,6 +44,12 @@ class Shift3DModule(pl.LightningModule):
         h_shift_std: float | None = None,
         c_shift_mean: float | None = None,
         c_shift_std: float | None = None,
+        log_prediction_plots: bool = True,
+        prediction_plot_samples: int = 10,
+        h_plot_ppm_min: float = 0.0,
+        h_plot_ppm_max: float = 10.0,
+        c_plot_ppm_min: float = 0.0,
+        c_plot_ppm_max: float = 230.0,
     ) -> None:
         super().__init__()
         supplied_stats = (
@@ -84,6 +90,9 @@ class Shift3DModule(pl.LightningModule):
             cutoff=cutoff,
             dropout=dropout,
         )
+        self._validation_shift_examples: List[Dict[str, Any]] = []
+        self._validation_shift_smiles: set[str] = set()
+        self._collect_validation_shift_examples = False
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         normalized = self.model(
@@ -317,6 +326,8 @@ class Shift3DModule(pl.LightningModule):
         self, batch: Dict[str, torch.Tensor], stage: str
     ) -> torch.Tensor:
         output = self(batch)
+        if stage == "val":
+            self._collect_shift_examples(batch, output)
         per_sample = [
             self._sample_losses(batch, output, index)
             for index in range(batch["atomic_numbers"].size(0))
@@ -353,6 +364,246 @@ class Shift3DModule(pl.LightningModule):
                 batch_size=batch["atomic_numbers"].size(0),
             )
         return loss
+
+    def on_validation_epoch_start(self) -> None:
+        self._validation_shift_examples = []
+        self._validation_shift_smiles = set()
+        self._collect_validation_shift_examples = bool(
+            self.hparams.log_prediction_plots
+            and int(self.hparams.prediction_plot_samples) > 0
+            and not self.trainer.sanity_checking
+            and self.trainer.is_global_zero
+        )
+
+    def _collect_shift_examples(
+        self,
+        batch: Dict[str, torch.Tensor],
+        output: Dict[str, torch.Tensor],
+    ) -> None:
+        if not self._collect_validation_shift_examples:
+            return
+        limit = int(self.hparams.prediction_plot_samples)
+        for index, smiles in enumerate(batch["smiles"]):
+            if len(self._validation_shift_examples) >= limit:
+                return
+            smiles = str(smiles)
+            if smiles in self._validation_shift_smiles:
+                continue
+            valid_atoms = batch["atom_mask"][index]
+            atomic_numbers = batch["atomic_numbers"][index]
+            h_atoms = valid_atoms & atomic_numbers.eq(1)
+            c_atoms = valid_atoms & atomic_numbers.eq(6)
+            h_target = batch["h_peak_shifts"][
+                index, batch["h_peak_mask"][index]
+            ].detach().cpu()
+            h_prediction = output["h_shifts"][
+                index, h_atoms
+            ].detach().cpu()
+            c_target = batch["c_peak_shifts"][
+                index, batch["c_peak_mask"][index]
+            ].detach().cpu()
+            c_prediction = output["c_shifts"][
+                index, c_atoms
+            ].detach().cpu()
+            example = {
+                "id": str(batch["id"][index]),
+                "smiles": smiles,
+                "h_target": h_target,
+                "h_prediction": h_prediction,
+                "h_nearest_mae_ppm": (
+                    float(self._nearest_mae(h_prediction, h_target))
+                    if h_prediction.numel() and h_target.numel()
+                    else None
+                ),
+                "c_target": c_target,
+                "c_prediction": c_prediction,
+                "c_nearest_mae_ppm": (
+                    float(self._nearest_mae(c_prediction, c_target))
+                    if c_prediction.numel() and c_target.numel()
+                    else None
+                ),
+            }
+            self._validation_shift_examples.append(example)
+            self._validation_shift_smiles.add(smiles)
+
+    def on_validation_epoch_end(self) -> None:
+        if (
+            not self._collect_validation_shift_examples
+            or not self._validation_shift_examples
+            or self.trainer.sanity_checking
+            or not self.trainer.is_global_zero
+        ):
+            return
+        image = self._render_shift_stick_plot(
+            self._validation_shift_examples,
+            h_limits=(
+                float(self.hparams.h_plot_ppm_min),
+                float(self.hparams.h_plot_ppm_max),
+            ),
+            c_limits=(
+                float(self.hparams.c_plot_ppm_min),
+                float(self.hparams.c_plot_ppm_max),
+            ),
+        )
+        for logger in self.trainer.loggers:
+            if hasattr(logger, "log_image"):
+                logger.log_image(
+                    key="val/shift_target_vs_prediction",
+                    images=[image],
+                    step=self.global_step,
+                )
+            if hasattr(logger, "log_table"):
+                logger.log_table(
+                    key="val/shift_examples",
+                    columns=[
+                        "epoch",
+                        "global_step",
+                        "id",
+                        "smiles",
+                        "h_target_ppm",
+                        "h_prediction_ppm",
+                        "h_nearest_mae_ppm",
+                        "c_target_ppm",
+                        "c_prediction_ppm",
+                        "c_nearest_mae_ppm",
+                    ],
+                    data=[
+                        [
+                            int(self.current_epoch),
+                            int(self.global_step),
+                            example["id"],
+                            example["smiles"],
+                            example["h_target"].tolist(),
+                            example["h_prediction"].tolist(),
+                            example["h_nearest_mae_ppm"],
+                            example["c_target"].tolist(),
+                            example["c_prediction"].tolist(),
+                            example["c_nearest_mae_ppm"],
+                        ]
+                        for example in self._validation_shift_examples
+                    ],
+                    step=self.global_step,
+                )
+        self._collect_validation_shift_examples = False
+
+    @staticmethod
+    def _render_shift_stick_plot(
+        examples: List[Dict[str, Any]],
+        h_limits: tuple[float, float] = (0.0, 10.0),
+        c_limits: tuple[float, float] = (0.0, 230.0),
+    ):
+        import numpy as np
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+        from matplotlib.lines import Line2D
+
+        columns = len(examples)
+        figure = Figure(
+            figsize=(max(4.0, 3.1 * columns), 6.0),
+            dpi=120,
+        )
+        canvas = FigureCanvasAgg(figure)
+        axes = figure.subplots(2, columns, squeeze=False)
+        target_color = "#4C78A8"
+        prediction_color = "#E02020"
+
+        for column, example in enumerate(examples):
+            for row, (
+                target_key,
+                prediction_key,
+                limits,
+                nucleus,
+            ) in enumerate(
+                (
+                    (
+                        "h_target",
+                        "h_prediction",
+                        h_limits,
+                        r"$^1$H NMR",
+                    ),
+                    (
+                        "c_target",
+                        "c_prediction",
+                        c_limits,
+                        r"$^{13}$C NMR",
+                    ),
+                )
+            ):
+                axis = axes[row, column]
+                targets = torch.as_tensor(
+                    example[target_key]
+                ).reshape(-1).numpy()
+                predictions = torch.as_tensor(
+                    example[prediction_key]
+                ).reshape(-1).numpy()
+                axis.vlines(
+                    targets,
+                    0.0,
+                    1.0,
+                    color=target_color,
+                    linewidth=1.4,
+                )
+                axis.vlines(
+                    predictions,
+                    -1.0,
+                    0.0,
+                    color=prediction_color,
+                    linewidth=1.2,
+                )
+                axis.axhline(0.0, color="black", linewidth=1.0)
+                axis.set_xlim(*limits)
+                axis.set_ylim(-1.08, 1.08)
+                axis.set_yticks((-1.0, 0.0, 1.0))
+                axis.set_title(
+                    (
+                        (
+                            f"{nucleus}\n{example['smiles'][:28]}"
+                            f"\nMAE={example['h_nearest_mae_ppm']:.3f} ppm"
+                        )
+                        if row == 0
+                        and example.get("h_nearest_mae_ppm") is not None
+                        else (
+                            f"{nucleus}\n{example['smiles'][:28]}"
+                            if row == 0
+                            else (
+                                f"{nucleus}\n"
+                                f"MAE={example['c_nearest_mae_ppm']:.2f} ppm"
+                                if example.get("c_nearest_mae_ppm") is not None
+                                else nucleus
+                            )
+                        )
+                    ),
+                    fontsize=9,
+                )
+                axis.tick_params(labelsize=8)
+
+        figure.supxlabel("Chemical Shift (ppm)", fontsize=12)
+        figure.supylabel("NMR stick intensity", fontsize=12)
+        figure.legend(
+            handles=[
+                Line2D([0], [0], color=target_color, label="target"),
+                Line2D(
+                    [0],
+                    [0],
+                    color=prediction_color,
+                    label="model prediction",
+                ),
+            ],
+            loc="lower center",
+            ncol=2,
+            frameon=False,
+            bbox_to_anchor=(0.5, -0.015),
+        )
+        figure.subplots_adjust(
+            left=0.07,
+            right=0.99,
+            top=0.91,
+            bottom=0.14,
+            hspace=0.34,
+            wspace=0.28,
+        )
+        canvas.draw()
+        return np.asarray(canvas.buffer_rgba()).copy()
 
     def training_step(
         self, batch: Dict[str, torch.Tensor], batch_index: int
