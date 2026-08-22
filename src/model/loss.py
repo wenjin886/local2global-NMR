@@ -27,6 +27,7 @@ class NMRGraphLoss(nn.Module):
             edge_none_class_weight: float = 1.0,
             edge_bond_class_weight: float = 1.0,
             edge_total_neighbor_count_weight: float = 0.0,
+            carbon_valence_weight: float = 0.0,
             fragment_edge_consistency_weight: float = 0.25,
             smiles_weight: float = 0.0,
             edge_class_weights: Optional[torch.Tensor] = None,
@@ -76,6 +77,7 @@ class NMRGraphLoss(nn.Module):
         self.edge_total_neighbor_count_weight = (
             edge_total_neighbor_count_weight
         )
+        self.carbon_valence_weight = carbon_valence_weight
         self.fragment_edge_consistency_weight = fragment_edge_consistency_weight
         self.smiles_weight = smiles_weight
         self.permutation_invariant_hydrogens = permutation_invariant_hydrogens
@@ -447,6 +449,36 @@ class NMRGraphLoss(nn.Module):
         return normalized_overflow[valid].square().mean()
 
     @staticmethod
+    def carbon_valence_loss(
+            outputs: Mapping[str, object],
+            atom_types: torch.Tensor,
+    ) -> torch.Tensor:
+        """Constrain the soft bond-order valence of every carbon to four."""
+        edge_probabilities = torch.softmax(
+            outputs["heavy_edge_logits"], dim=-1
+        )
+        bond_orders = edge_probabilities.new_tensor(
+            [0.0, 1.0, 2.0, 3.0, 1.5]
+        )
+        expected_pair_orders = (
+            edge_probabilities * bond_orders
+        ).sum(dim=-1)
+        expected_pair_orders = expected_pair_orders * outputs[
+            "heavy_edge_mask"
+        ].to(dtype=expected_pair_orders.dtype)
+        expected_heavy_valence = expected_pair_orders.sum(dim=-1)
+        expected_h_valence = outputs[
+            "h_attachment_probabilities"
+        ].sum(dim=1)
+        expected_valence = expected_heavy_valence + expected_h_valence
+
+        carbon_mask = outputs["heavy_mask"] & atom_types.eq(6)
+        if not carbon_mask.any():
+            return expected_valence.sum() * 0.0
+        normalized_error = (expected_valence[carbon_mask] - 4.0) / 4.0
+        return normalized_error.square().mean()
+
+    @staticmethod
     def realized_fragment_counts(
             outputs: Mapping[str, object],
             atom_types: torch.Tensor,
@@ -496,6 +528,7 @@ class NMRGraphLoss(nn.Module):
             self.h_count_weight,
             self.h_entropy_weight,
             self.edge_total_neighbor_count_weight,
+            self.carbon_valence_weight,
         ))
         if attachment_required and outputs.get("h_attachment_probabilities") is None:
             raise ValueError(
@@ -504,6 +537,7 @@ class NMRGraphLoss(nn.Module):
         edge_required = (
             self.edge_weight != 0
             or self.edge_total_neighbor_count_weight != 0
+            or self.carbon_valence_weight != 0
             or self.fragment_edge_consistency_weight != 0
         )
         if edge_required and outputs.get("heavy_edge_logits") is None:
@@ -597,6 +631,11 @@ class NMRGraphLoss(nn.Module):
             if self.edge_total_neighbor_count_weight != 0
             else zero
         )
+        losses["carbon_valence"] = (
+            self.carbon_valence_loss(outputs, atom_types)
+            if self.carbon_valence_weight != 0
+            else zero
+        )
         losses["fragment_edge_consistency"] = (
             self.fragment_edge_consistency_loss(outputs, atom_types)
             if self.fragment_edge_consistency_weight != 0
@@ -632,6 +671,7 @@ class NMRGraphLoss(nn.Module):
             + self.edge_weight * losses["edge"]
             + self.edge_total_neighbor_count_weight
             * losses["edge_total_neighbor_count_overflow"]
+            + self.carbon_valence_weight * losses["carbon_valence"]
             + self.fragment_edge_consistency_weight
             * losses["fragment_edge_consistency"]
             + self.smiles_weight * losses["smiles"]

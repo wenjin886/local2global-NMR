@@ -288,6 +288,48 @@ def test_edge_total_neighbor_count_includes_soft_edges_and_h_attachments():
     assert torch.count_nonzero(edge_logits.grad) > 0
 
 
+def test_carbon_valence_counts_aromatic_bonds_as_one_and_a_half():
+    atom_types = torch.tensor([[1, 6, 7, 8]])
+    heavy_mask = torch.tensor([[False, True, True, True]])
+    edge_mask = torch.zeros((1, 4, 4), dtype=torch.bool)
+    edge_mask[0, 1, 2] = edge_mask[0, 2, 1] = True
+    edge_mask[0, 1, 3] = edge_mask[0, 3, 1] = True
+
+    edge_logits = torch.full((1, 4, 4, 5), -20.0)
+    edge_logits[..., 0] = 20.0
+    for neighbor in (2, 3):
+        edge_logits[0, 1, neighbor, 0] = -20.0
+        edge_logits[0, neighbor, 1, 0] = -20.0
+        edge_logits[0, 1, neighbor, 4] = 20.0
+        edge_logits[0, neighbor, 1, 4] = 20.0
+    edge_logits.requires_grad_()
+
+    attachment_probabilities = torch.zeros((1, 4, 4))
+    attachment_probabilities[0, 0, 1] = 1.0
+    outputs = {
+        "heavy_edge_logits": edge_logits,
+        "heavy_edge_mask": edge_mask,
+        "h_attachment_probabilities": attachment_probabilities,
+        "heavy_mask": heavy_mask,
+    }
+    criterion = NMRGraphLoss(carbon_valence_weight=1.0)
+
+    exact = criterion.carbon_valence_loss(outputs, atom_types)
+    assert exact.item() < 1e-8
+
+    # Replacing one aromatic bond (order 1.5) with a triple bond makes the
+    # carbon valence 5.5 while its number of neighbours remains unchanged.
+    with torch.no_grad():
+        edge_logits[0, 1, 3, 4] = -20.0
+        edge_logits[0, 3, 1, 4] = -20.0
+        edge_logits[0, 1, 3, 3] = 20.0
+        edge_logits[0, 3, 1, 3] = 20.0
+    invalid = criterion.carbon_valence_loss(outputs, atom_types)
+    assert invalid.item() > 0.0
+    invalid.backward()
+    assert torch.count_nonzero(edge_logits.grad) > 0
+
+
 def test_edge_loss_uses_shared_none_and_bond_class_weights():
     logits = torch.tensor(
         [[

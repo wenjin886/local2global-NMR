@@ -207,6 +207,12 @@ counts every non-none heavy bond as one neighbor irrespective of bond order,
 and uses soft H assignments rather than supplementing hydrogens from valence.
 `train_uspto_graph.yaml` enables it with weight `0.1`.
 
+Full-graph training additionally constrains the expected bond-order valence of
+every carbon atom to four. Single, double, triple, and aromatic heavy bonds
+contribute `1`, `2`, `3`, and `1.5`, respectively, while every soft H
+attachment contributes `1`. `carbon_valence_weight` controls the normalized
+squared error and `train_uspto_graph.yaml` enables it with weight `0.1`.
+
 Heavy-edge cross entropy separately weights non-bonds and bonds. Edge class
 zero (`none`) uses `criterion.edge_none_class_weight`; every non-zero bond
 class uses the shared `criterion.edge_bond_class_weight`. The graph-training

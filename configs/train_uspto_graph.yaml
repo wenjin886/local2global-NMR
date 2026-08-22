@@ -109,6 +109,7 @@ lit_module:
     edge_none_class_weight: 0.4
     edge_bond_class_weight: 1.0
     edge_total_neighbor_count_weight: 0.1
+    carbon_valence_weight: 0.1
     fragment_edge_consistency_weight: 0.25
     smiles_weight: 0.25
     permutation_invariant_hydrogens: true
