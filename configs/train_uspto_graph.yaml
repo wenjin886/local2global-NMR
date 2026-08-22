@@ -7,8 +7,9 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-2-nmr2graph-edge
-exp_name: dim512-nonebondw0.4-graphjoinencoder-finetunefromepoch38-bs64
+# exp_name: dim512-nonebondw0.4-graphjoinencoder-finetunefromepoch38-bs64
 # exp_name: dim256-finetunefromepoch42
+exp_name: joint-bixt-graph-d512-nonebondw0.8-smiw1.0
 
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
@@ -17,12 +18,14 @@ log_path: ${output_dir}/logs
 
 load_weights_strict: false
 
-only_load_weights: true
-ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2graph/refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1_2026-07-23_12-14-26/checkpoints/epoch=038.ckpt
+# only_load_weights: true
+# ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2graph/refined_atom_nmr-neighborcountloss0.1-fragment_smiles-d512-run1_2026-07-23_12-14-26/checkpoints/epoch=038.ckpt
 
 # only_load_weights: true
 # ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-2-nmr2graph-edge/dim512-finetunefromepoch38_bs64_2026-07-26_00-17-30/checkpoints/last.ckpt
 
+only_load_weights: true
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2fragment/joint-bixt-fragment-d512_2026-07-28_23-39-06/checkpoints/epoch=030.ckpt
 
 hidden_dim: 512
 num_heads: 8
@@ -106,12 +109,12 @@ lit_module:
     h_count_weight: 0.25
     h_entropy_weight: 0.0
     edge_weight: 1.0
-    edge_none_class_weight: 0.4
+    edge_none_class_weight: 0.8
     edge_bond_class_weight: 1.0
     edge_total_neighbor_count_weight: 0.1
     carbon_valence_weight: 0.1
     fragment_edge_consistency_weight: 0.25
-    smiles_weight: 0.25
+    smiles_weight: 1.0
     permutation_invariant_hydrogens: true
   lr: 2e-4
   weight_decay: 1e-12
