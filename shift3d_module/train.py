@@ -30,6 +30,7 @@ def main(config: DictConfig) -> None:
         dirpath=output_dir / "checkpoints",
         filename="epoch={epoch:03d}-{step}",
         monitor="val/loss",
+        save_on_train_epoch_end=False,
         mode="min",
         save_top_k=int(config.checkpoint.save_top_k),
         save_last=True,
@@ -38,7 +39,7 @@ def main(config: DictConfig) -> None:
     callbacks = [checkpoint]
     logger = False
     if bool(config.logger.enabled):
-        from pytorch_lightning.loggers import WandbLogger
+        from pytorch_lightning.loggers.wandb import WandbLogger
 
         logger = WandbLogger(
             project=str(config.logger.project),

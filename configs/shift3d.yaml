@@ -9,7 +9,7 @@ output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/lo
 log_path: ${output_dir}/logs
 data_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/${data_name}
 
-ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-4-3d2nmr/dim512-bs64_2026-07-29_10-36-29/checkpoints/last.ckpt
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-4-3d2nmr/dim512-bs64_2026-07-29_22-23-29/checkpoints/last.ckpt
 
 val_check_interval: 0.1
 data:
