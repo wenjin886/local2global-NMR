@@ -5,9 +5,12 @@ unset SLURM_NTASKS
 unset SLURM_NTASKS_PER_NODE
 unset SLURM_TASKS_PER_NODE
 
+export TMPDIR=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/tmp
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 export CUDA_LAUNCH_BLOCKING=1
 export HYDRA_FULL_ERROR=1
+
+python -c "import matplotlib; print(matplotlib.__version__)"
 
 # test data
 # SRC_DATA_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/local2global/data/uspto/exp_data
@@ -50,7 +53,14 @@ COORD_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/downl
 #   --index-cache /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/uspto/3d2shift/index_cache.pt
 
 # === PreTrain ===
-python -m shift3d_module.train
+# python -m shift3d_module.train
+
+# === END2END ===
+export NMR2GRAPH_CKPT=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-2-nmr2graph-edge/joint-bixt-graph-d512-nonebondw0.8-smiw1.0-neighborw1.0-Cvalw0.1_2026-08-22_20-07-09/checkpoints/epoch=007-step=84416.ckpt
+export TOPOLOGY_PRIOR_CKPT=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-3-geoinit/dim512-bs32-fixnumatomsbug_2026-07-27_19-23-13/checkpoints/last.ckpt
+export SHIFT3D_CKPT=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-4-3d2nmr/dim512-bs64_2026-08-22_12-19-26/checkpoints/last.ckpt
+
+python -m end2end_module.train
 
 # For Portal
 # ps -fu $USER | grep -E "python|wandb"

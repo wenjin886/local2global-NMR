@@ -1,10 +1,13 @@
 seed: 42
-project: local2global-nmr
-group: step-5-end2end
-exp_name: pooled-spectrum-residual-egnn
+project: end2end-NMR
 
 data_path: ${oc.env:DATA_PATH}
-output_dir: ${oc.env:OUTPUT_DIR,outputs}/${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+data_name: uspto
+
+group: step-5-end2end
+exp_name: test-dim512-pooled-spectrum-residual-egnn
+exp_save_dir_name: ${oc.env:OUTPUT_DIR,outputs}/${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 ckpt_path: null
 test: false
@@ -52,7 +55,7 @@ lit_module:
   freeze_shift_model: true
   input_shifts_are_normalized: true
   graph_loss_weight: 1.0
-  nmr_loss_weight: 0.01
+  nmr_loss_weight: 1.0
   chemistry_loss_weight: 0.1
   displacement_loss_weight: 0.01
   learning_rate: 1.0e-4
@@ -112,7 +115,7 @@ lit_module:
 
   topology_prior:
     _target_: local2geo_module.topology_prior.SoftTopologyPrior
-    hidden_dim: 128
+    hidden_dim: ${hidden_dim}
     num_layers: 3
     dropout: 0.05
     residual_scale: 6.0
@@ -138,7 +141,7 @@ lit_module:
     edge_dim: 5
     num_layers: 4
     num_rbf: 32
-    distance_cutoff: 8.0
+    distance_cutoff: 8.0 # rbf_max_distance; RBF centers = linspace(0, distance_cutoff, num_rbf)
     max_coordinate_step: 0.5
     dropout: 0.0
 
@@ -187,11 +190,10 @@ trainer:
   _target_: pytorch_lightning.Trainer
   accelerator: auto
   devices: 1
-  precision: bf16-mixed
   max_epochs: 100
   gradient_clip_val: 1.0
   log_every_n_steps: 20
-  val_check_interval: 0.5
+  val_check_interval: 0.01
   num_sanity_val_steps: 0
 
 hydra:
