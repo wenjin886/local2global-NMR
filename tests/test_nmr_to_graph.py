@@ -288,7 +288,7 @@ def test_edge_total_neighbor_count_includes_soft_edges_and_h_attachments():
     assert torch.count_nonzero(edge_logits.grad) > 0
 
 
-def test_carbon_valence_counts_aromatic_bonds_as_one_and_a_half():
+def test_carbon_valence_handles_substituted_aromatic_carbon():
     atom_types = torch.tensor([[1, 6, 7, 8]])
     heavy_mask = torch.tensor([[False, True, True, True]])
     edge_mask = torch.zeros((1, 4, 4), dtype=torch.bool)
@@ -317,8 +317,8 @@ def test_carbon_valence_counts_aromatic_bonds_as_one_and_a_half():
     exact = criterion.carbon_valence_loss(outputs, atom_types)
     assert exact.item() < 1e-8
 
-    # Replacing one aromatic bond (order 1.5) with a triple bond makes the
-    # carbon valence 5.5 while its number of neighbours remains unchanged.
+    # Replacing one aromatic sigma bond with a triple bond makes the carbon
+    # valence six while its number of neighbours remains unchanged.
     with torch.no_grad():
         edge_logits[0, 1, 3, 4] = -20.0
         edge_logits[0, 3, 1, 4] = -20.0
@@ -328,6 +328,30 @@ def test_carbon_valence_counts_aromatic_bonds_as_one_and_a_half():
     assert invalid.item() > 0.0
     invalid.backward()
     assert torch.count_nonzero(edge_logits.grad) > 0
+
+
+def test_carbon_valence_treats_three_aromatic_bonds_as_fused_carbon():
+    atom_types = torch.tensor([[6, 7, 8, 16]])
+    heavy_mask = torch.ones((1, 4), dtype=torch.bool)
+    edge_mask = torch.zeros((1, 4, 4), dtype=torch.bool)
+    edge_logits = torch.full((1, 4, 4, 5), -20.0)
+    edge_logits[..., 0] = 20.0
+    for neighbor in (1, 2, 3):
+        edge_mask[0, 0, neighbor] = edge_mask[0, neighbor, 0] = True
+        edge_logits[0, 0, neighbor, 0] = -20.0
+        edge_logits[0, neighbor, 0, 0] = -20.0
+        edge_logits[0, 0, neighbor, 4] = 20.0
+        edge_logits[0, neighbor, 0, 4] = 20.0
+    outputs = {
+        "heavy_edge_logits": edge_logits,
+        "heavy_edge_mask": edge_mask,
+        "h_attachment_probabilities": torch.zeros((1, 4, 4)),
+        "heavy_mask": heavy_mask,
+    }
+
+    loss = NMRGraphLoss.carbon_valence_loss(outputs, atom_types)
+
+    assert loss.item() < 1e-8
 
 
 def test_edge_loss_uses_shared_none_and_bond_class_weights():

@@ -208,10 +208,29 @@ and uses soft H assignments rather than supplementing hydrogens from valence.
 `train_uspto_graph.yaml` enables it with weight `0.1`.
 
 Full-graph training additionally constrains the expected bond-order valence of
-every carbon atom to four. Single, double, triple, and aromatic heavy bonds
-contribute `1`, `2`, `3`, and `1.5`, respectively, while every soft H
-attachment contributes `1`. `carbon_valence_weight` controls the normalized
-squared error and `train_uspto_graph.yaml` enables it with weight `0.1`.
+every carbon atom to four. Single, double, and triple heavy bonds contribute
+`1`, `2`, and `3`, while aromatic bonds each contribute one sigma bond plus one
+soft pi contribution per carbon with any incident aromatic bond. This keeps a
+three-aromatic-bond fused carbon at valence four. Every soft H attachment
+contributes `1`. `carbon_valence_weight` controls the normalized squared error
+and `train_uspto_graph.yaml` enables it with weight `0.1`.
+
+Fragment checkpoint carbon valence can be audited without new dataset labels:
+
+```bash
+python -m preprocess.audit_fragment_carbon_valence \
+  --config configs/train_uspto_fragment.yaml \
+  --checkpoint /path/to/fragment.ckpt \
+  --data-dir /path/to/materialized/uspto \
+  --split val \
+  --output fragment_carbon_valence_val.json
+```
+
+The report includes carbon-level valence accuracy, the fraction of
+carbon-containing molecules in which every predicted carbon has valence four,
+and the average number of invalid carbons per molecule. By default the model
+uses its inference-time, non-teacher-forced SMILES path; pass
+`--teacher-force-smiles` only for a teacher-forced diagnostic.
 
 Heavy-edge cross entropy separately weights non-bonds and bonds. Edge class
 zero (`none`) uses `criterion.edge_none_class_weight`; every non-zero bond

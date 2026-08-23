@@ -457,16 +457,31 @@ class NMRGraphLoss(nn.Module):
         edge_probabilities = torch.softmax(
             outputs["heavy_edge_logits"], dim=-1
         )
-        bond_orders = edge_probabilities.new_tensor(
-            [0.0, 1.0, 2.0, 3.0, 1.5]
+        pair_mask = outputs["heavy_edge_mask"].to(
+            dtype=edge_probabilities.dtype
         )
-        expected_pair_orders = (
-            edge_probabilities * bond_orders
-        ).sum(dim=-1)
-        expected_pair_orders = expected_pair_orders * outputs[
-            "heavy_edge_mask"
-        ].to(dtype=expected_pair_orders.dtype)
-        expected_heavy_valence = expected_pair_orders.sum(dim=-1)
+        # RDKit's aromatic representation does not assign order 1.5 to every
+        # incident bond when computing carbon valence: a fused carbon with
+        # three aromatic neighbours still has valence four, not 4.5. Treat
+        # aromatic bonds as sigma bonds and add one pi contribution per carbon
+        # with at least one aromatic bond. The soft union is the differentiable
+        # probability that any incident aromatic bond is present.
+        non_aromatic_orders = edge_probabilities.new_tensor(
+            [0.0, 1.0, 2.0, 3.0, 0.0]
+        )
+        expected_non_aromatic_valence = (
+            edge_probabilities * non_aromatic_orders
+        ).sum(dim=-1) * pair_mask
+        aromatic_probabilities = edge_probabilities[..., 4] * pair_mask
+        expected_aromatic_degree = aromatic_probabilities.sum(dim=-1)
+        aromatic_presence = 1.0 - (
+            1.0 - aromatic_probabilities
+        ).prod(dim=-1)
+        expected_heavy_valence = (
+            expected_non_aromatic_valence.sum(dim=-1)
+            + expected_aromatic_degree
+            + aromatic_presence
+        )
         expected_h_valence = outputs[
             "h_attachment_probabilities"
         ].sum(dim=1)
