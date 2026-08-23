@@ -58,6 +58,16 @@ lit_module:
   nmr_loss_weight: 1.0
   chemistry_loss_weight: 0.1
   displacement_loss_weight: 0.01
+  # Initial phase: start=end=0 keeps every training batch teacher-forced.
+  # On a later resume set greedy_probability_end=1.0; the resumed run first
+  # receives teacher_only_steps and then begins the transition automatically.
+  smiles_loss_weight: 1.0
+  greedy_probability_start: 0.0
+  greedy_probability_end: 0.0
+  teacher_only_steps: 1000
+  greedy_transition_steps: 9000
+  greedy_schedule: cosine
+  greedy_sampling_seed: ${seed}
   learning_rate: 1.0e-4
   weight_decay: 1.0e-5
   validation_examples: 9
@@ -109,7 +119,7 @@ lit_module:
     edge_total_neighbor_count_weight: 1.0
     carbon_valence_weight: 0.25
     fragment_edge_consistency_weight: 0.25
-    # Greedy SMILES is logged, but sequence CE is left to its pretrained task.
+    # End-to-end module applies its separate SMILES CE only on teacher batches.
     smiles_weight: 0.0
     permutation_invariant_hydrogens: true
 
@@ -189,7 +199,8 @@ logger:
 trainer:
   _target_: pytorch_lightning.Trainer
   accelerator: auto
-  devices: 1
+  devices: 2
+  strategy: ddp
   max_epochs: 100
   gradient_clip_val: 1.0
   log_every_n_steps: 20

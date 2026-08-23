@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import math
+import random
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import pytorch_lightning as pl
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from local2geo_module.geometry_solver import DifferentiableGeometrySolver
@@ -78,6 +81,13 @@ class EndToEndNMRModule(pl.LightningModule):
         nmr_loss_weight: float = 0.01,
         chemistry_loss_weight: float = 0.1,
         displacement_loss_weight: float = 0.01,
+        smiles_loss_weight: float = 1.0,
+        greedy_probability_start: float = 0.0,
+        greedy_probability_end: float = 0.0,
+        teacher_only_steps: int = 1000,
+        greedy_transition_steps: int = 9000,
+        greedy_schedule: str = "cosine",
+        greedy_sampling_seed: int = 42,
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-5,
         validation_examples: int = 9,
@@ -87,6 +97,14 @@ class EndToEndNMRModule(pl.LightningModule):
             raise ValueError(
                 "The first end-to-end stage requires freeze_shift_model=true"
             )
+        if not 0.0 <= greedy_probability_start <= 1.0:
+            raise ValueError("greedy_probability_start must be in [0, 1]")
+        if not 0.0 <= greedy_probability_end <= 1.0:
+            raise ValueError("greedy_probability_end must be in [0, 1]")
+        if teacher_only_steps < 0 or greedy_transition_steps < 0:
+            raise ValueError("curriculum step counts must be non-negative")
+        if greedy_schedule not in {"linear", "cosine"}:
+            raise ValueError("greedy_schedule must be 'linear' or 'cosine'")
         self.nmr_to_graph = nmr_to_graph
         self.graph_criterion = graph_criterion
         self.topology_prior = topology_prior
@@ -124,6 +142,7 @@ class EndToEndNMRModule(pl.LightningModule):
         self._set_frozen(self.shift_model, True)
         self._set_frozen(self.topology_prior, freeze_topology_prior)
         self._validation_examples: List[Dict[str, Any]] = []
+        self._curriculum_origin_step = 0
 
     @staticmethod
     def _set_frozen(module: nn.Module, frozen: bool) -> None:
@@ -164,16 +183,19 @@ class EndToEndNMRModule(pl.LightningModule):
             ),
         }
 
-    def forward(self, batch: GraphBatch) -> Dict[str, Any]:
-        # Greedy/inference mode prevents target-SMILES teacher forcing from
-        # entering graph_atom_features or the clean spectral memory.
+    def forward(
+        self,
+        batch: GraphBatch,
+        teacher_force_smiles: bool = False,
+    ) -> Dict[str, Any]:
         graph_inputs = batch.model_inputs()
-        # Do not expose target tokens or even target sequence length to greedy
-        # generation. SMILES labels are used only by supervised metrics/losses.
-        graph_inputs["smiles_input_ids"] = None
-        graph_inputs["smiles_input_mask"] = None
+        if not teacher_force_smiles:
+            # Do not expose target tokens or even target sequence length to
+            # greedy generation.
+            graph_inputs["smiles_input_ids"] = None
+            graph_inputs["smiles_input_mask"] = None
         graph_output = self.nmr_to_graph(
-            **graph_inputs, teacher_force_smiles=False
+            **graph_inputs, teacher_force_smiles=teacher_force_smiles
         )
         if (
             graph_output.get("heavy_edge_logits") is None
@@ -226,6 +248,7 @@ class EndToEndNMRModule(pl.LightningModule):
             "refined": refined,
             "shift_batch": shift_batch,
             "shift": shift_output,
+            "teacher_force_smiles": teacher_force_smiles,
         }
 
     def _shift_batch(
@@ -247,7 +270,10 @@ class EndToEndNMRModule(pl.LightningModule):
         }
 
     def _losses(
-        self, batch: GraphBatch, output: Mapping[str, Any]
+        self,
+        batch: GraphBatch,
+        output: Mapping[str, Any],
+        include_smiles_loss: bool = False,
     ) -> Dict[str, torch.Tensor]:
         graph_loss, graph_parts = self.graph_criterion(
             outputs=output["graph"],
@@ -275,6 +301,23 @@ class EndToEndNMRModule(pl.LightningModule):
             + float(self.shift_model.hparams.c_loss_weight)
             * shift_metrics["c_set_loss"]
         )
+        smiles_loss = nmr_loss.sum() * 0.0
+        if include_smiles_loss and float(self.hparams.smiles_loss_weight) > 0:
+            smiles_logits = output["graph"].get("smiles_logits")
+            if smiles_logits is None:
+                raise ValueError(
+                    "Teacher-forced SMILES loss requires an enabled decoder"
+                )
+            if smiles_logits.shape[:2] != batch.smiles_target_ids.shape:
+                raise ValueError(
+                    "Teacher-forced SMILES logits and targets have "
+                    "incompatible shapes"
+                )
+            smiles_loss = F.cross_entropy(
+                smiles_logits.reshape(-1, smiles_logits.size(-1)),
+                batch.smiles_target_ids.reshape(-1),
+                ignore_index=SMILES_PAD_INDEX,
+            )
         geometry = output["geometry"]
         refined_terms = self.geometry_solver.terms(
             positions=output["refined"]["coordinates"].float(),
@@ -294,6 +337,7 @@ class EndToEndNMRModule(pl.LightningModule):
         total = (
             float(self.hparams.graph_loss_weight) * graph_loss
             + float(self.hparams.nmr_loss_weight) * nmr_loss
+            + float(self.hparams.smiles_loss_weight) * smiles_loss
             + float(self.hparams.chemistry_loss_weight) * chemistry_loss
             + float(self.hparams.displacement_loss_weight) * displacement_loss
         )
@@ -301,6 +345,7 @@ class EndToEndNMRModule(pl.LightningModule):
             "loss": total,
             "loss_graph": graph_loss,
             "loss_nmr": nmr_loss,
+            "loss_smiles": smiles_loss,
             "loss_chemistry": chemistry_loss,
             "loss_displacement": displacement_loss,
             "h_nearest_mae_ppm": shift_metrics["h_nearest_mae_ppm"],
@@ -314,9 +359,18 @@ class EndToEndNMRModule(pl.LightningModule):
         )
         return values
 
-    def _shared_step(self, batch: GraphBatch, stage: str) -> torch.Tensor:
-        output = self(batch)
-        losses = self._losses(batch, output)
+    def _shared_step(
+        self,
+        batch: GraphBatch,
+        stage: str,
+        teacher_force_smiles: bool = False,
+    ) -> torch.Tensor:
+        output = self(batch, teacher_force_smiles=teacher_force_smiles)
+        losses = self._losses(
+            batch,
+            output,
+            include_smiles_loss=teacher_force_smiles,
+        )
         self.log_dict(
             {f"{stage}/{key}": value for key, value in losses.items()},
             on_step=stage == "train",
@@ -327,7 +381,78 @@ class EndToEndNMRModule(pl.LightningModule):
         return losses["loss"]
 
     def training_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
-        return self._shared_step(batch, "train")
+        greedy_probability = self._greedy_probability()
+        use_greedy = self._sample_greedy_batch(greedy_probability)
+        self.log(
+            "train/greedy_probability",
+            greedy_probability,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=True,
+        )
+        self.log(
+            "train/is_greedy_batch",
+            float(use_greedy),
+            on_step=True,
+            on_epoch=False,
+        )
+        self.log(
+            "train/realized_greedy_ratio",
+            float(use_greedy),
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        self.log(
+            "train/realized_teacher_ratio",
+            float(not use_greedy),
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
+        return self._shared_step(
+            batch,
+            "train",
+            teacher_force_smiles=not use_greedy,
+        )
+
+    def on_train_start(self) -> None:
+        # Deliberately reset on every fit/resume. A resumed phase receives a
+        # fresh teacher-only warm-up before its configured transition.
+        self._curriculum_origin_step = int(self.global_step)
+
+    def _greedy_probability_for_elapsed(self, elapsed_steps: int) -> float:
+        start = float(self.hparams.greedy_probability_start)
+        end = float(self.hparams.greedy_probability_end)
+        teacher_steps = int(self.hparams.teacher_only_steps)
+        transition_steps = int(self.hparams.greedy_transition_steps)
+        if elapsed_steps < teacher_steps:
+            return start
+        if transition_steps == 0:
+            return end
+        progress = min(
+            1.0,
+            max(0.0, (elapsed_steps - teacher_steps) / transition_steps),
+        )
+        if str(self.hparams.greedy_schedule) == "cosine":
+            progress = 0.5 * (1.0 - math.cos(math.pi * progress))
+        return start + (end - start) * progress
+
+    def _greedy_probability(self) -> float:
+        elapsed = max(0, int(self.global_step) - self._curriculum_origin_step)
+        return self._greedy_probability_for_elapsed(elapsed)
+
+    def _sample_greedy_batch(self, probability: float) -> bool:
+        if probability <= 0.0:
+            return False
+        if probability >= 1.0:
+            return True
+        # global_step and seed are identical on every DDP rank, so every rank
+        # follows the same teacher/greedy computation branch.
+        generator = random.Random(
+            int(self.hparams.greedy_sampling_seed) + int(self.global_step)
+        )
+        return generator.random() < probability
 
     def validation_step(
         self,
@@ -335,7 +460,9 @@ class EndToEndNMRModule(pl.LightningModule):
         batch_idx: int,
         dataloader_idx: int = 0,
     ) -> Optional[torch.Tensor]:
-        output = self(batch)
+        # Validation always follows the deployment path, independently of the
+        # current training curriculum.
+        output = self(batch, teacher_force_smiles=False)
         if dataloader_idx == 0:
             losses = self._losses(batch, output)
             self.log_dict(
@@ -344,6 +471,7 @@ class EndToEndNMRModule(pl.LightningModule):
                 on_epoch=True,
                 batch_size=batch.atom_types.size(0),
                 add_dataloader_idx=False,
+                sync_dist=True,
             )
             if len(getattr(self.trainer, "val_dataloaders", [])) == 1:
                 self._collect_validation_examples(batch, output)
@@ -530,18 +658,19 @@ class EndToEndNMRModule(pl.LightningModule):
         return image
 
     def on_validation_epoch_end(self) -> None:
-        if (
-            not self._validation_examples
-            or self.trainer.sanity_checking
-            or not self.trainer.is_global_zero
-        ):
+        if self.trainer.sanity_checking:
+            return
+        examples = self._gather_validation_examples()
+        # Every rank must participate in the collective above. Rendering and
+        # W&B writes remain global-zero-only after the gather completes.
+        if not self.trainer.is_global_zero or not examples:
             return
         try:
             import wandb
         except ImportError:
             return
         rows = []
-        for example in self._validation_examples:
+        for example in examples:
             target_bonds = self._all_atom_bonds(
                 example["atom_types"],
                 example["target_edges"],
@@ -604,6 +733,26 @@ class EndToEndNMRModule(pl.LightningModule):
                     data=rows,
                     step=self.global_step,
                 )
+
+    def _gather_validation_examples(self) -> List[Dict[str, Any]]:
+        """Collect the deterministic validation panel from every DDP rank."""
+        local_examples = self._validation_examples
+        if not (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        ):
+            return local_examples[: int(self.hparams.validation_examples)]
+        gathered: List[Optional[List[Dict[str, Any]]]] = [
+            None for _ in range(torch.distributed.get_world_size())
+        ]
+        torch.distributed.all_gather_object(gathered, local_examples)
+        merged = [
+            example
+            for rank_examples in gathered
+            if rank_examples is not None
+            for example in rank_examples
+        ]
+        return merged[: int(self.hparams.validation_examples)]
 
     def configure_optimizers(self):
         parameters = [

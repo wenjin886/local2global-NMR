@@ -38,13 +38,13 @@ def _batch() -> GraphBatch:
         heavy_fragment_labels=fragments,
         h_parent_fragment_labels=fragments.clone(),
         h_parent_types=torch.full((1, 4), -100, dtype=torch.long),
-        smiles_input_ids=torch.zeros((1, 1), dtype=torch.long),
-        smiles_input_mask=torch.zeros((1, 1), dtype=torch.bool),
-        smiles_target_ids=torch.zeros((1, 1), dtype=torch.long),
+        smiles_input_ids=torch.ones((1, 1), dtype=torch.long),
+        smiles_input_mask=torch.ones((1, 1), dtype=torch.bool),
+        smiles_target_ids=torch.full((1, 1), 2, dtype=torch.long),
     )
 
 
-def _module() -> EndToEndNMRModule:
+def _module(use_smiles_decoder=False, **curriculum) -> EndToEndNMRModule:
     hidden_dim = 32
     graph_model = NMRToGraph(
         hidden_dim=hidden_dim,
@@ -58,7 +58,11 @@ def _module() -> EndToEndNMRModule:
         use_h_integration=False,
         use_h_multiplicity=False,
         use_h_j=False,
-        use_smiles_loss=False,
+        use_smiles_loss=use_smiles_decoder,
+        use_smiles_joint_bixt=use_smiles_decoder,
+        num_smiles_layers=1,
+        max_smiles_length=4,
+        smiles_vocab_size=8 if use_smiles_decoder else None,
         predict_attachments=True,
         predict_edges=True,
         use_graph_joint_encoder=False,
@@ -104,6 +108,7 @@ def _module() -> EndToEndNMRModule:
         freeze_topology_prior=True,
         freeze_shift_model=True,
         input_shifts_are_normalized=False,
+        **curriculum,
     )
 
 
@@ -157,3 +162,24 @@ def test_refiner_is_translation_equivariant():
     # The refiner centres every molecule, so translated inputs produce the
     # same centred output (translation invariance under the chosen gauge).
     assert torch.allclose(first, second, atol=1e-5, rtol=1e-5)
+
+
+def test_teacher_forced_smiles_loss_and_greedy_curriculum_schedule():
+    module = _module(
+        use_smiles_decoder=True,
+        greedy_probability_start=0.0,
+        greedy_probability_end=1.0,
+        teacher_only_steps=2,
+        greedy_transition_steps=4,
+        greedy_schedule="linear",
+    )
+    assert module._greedy_probability_for_elapsed(0) == 0.0
+    assert module._greedy_probability_for_elapsed(2) == 0.0
+    assert module._greedy_probability_for_elapsed(4) == 0.5
+    assert module._greedy_probability_for_elapsed(6) == 1.0
+
+    batch = _batch()
+    output = module(batch, teacher_force_smiles=True)
+    losses = module._losses(batch, output, include_smiles_loss=True)
+    assert torch.isfinite(losses["loss_smiles"])
+    assert float(losses["loss_smiles"]) > 0.0

@@ -543,3 +543,13 @@ validation run writes a W&B table containing generated 3D structures, raw and
 SoftTopologyPrior-corrected predicted graphs, target graphs, predicted/target
 SMILES, and predicted/target H/C NMR values. There is intentionally no target
 3D structure in the table.
+
+Training supports a teacher-to-greedy SMILES curriculum. Every new fit or
+resumed fit records its first restored `global_step` as the curriculum origin,
+runs `teacher_only_steps`, and then changes the batch-level greedy probability
+over `greedy_transition_steps`. Setting both probabilities to zero keeps the
+entire phase teacher-forced; on a later resume, changing only
+`greedy_probability_end` to one starts a fresh teacher-only warm-up followed by
+the configured transition. Teacher batches receive the separate SMILES CE;
+greedy batches do not. Validation is always greedy, and W&B records both the
+scheduled and realized greedy ratios.
