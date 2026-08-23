@@ -22,7 +22,7 @@ dependencies = [
 test = ["pytest"]
 
 [tool.setuptools.packages.find]
-include = ["src*", "local2geo_module*", "shift3d_module*"]
+include = ["src*", "local2geo_module*", "shift3d_module*", "end2end_module*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,199 @@
+seed: 42
+project: local2global-nmr
+group: step-5-end2end
+exp_name: pooled-spectrum-residual-egnn
+
+data_path: ${oc.env:DATA_PATH}
+output_dir: ${oc.env:OUTPUT_DIR,outputs}/${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+log_path: ${output_dir}/logs
+ckpt_path: null
+test: false
+optimized_metric: val/loss
+
+# Component checkpoints are loaded into their explicit module boundaries.
+nmr_to_graph_checkpoint: ${oc.env:NMR2GRAPH_CKPT}
+topology_prior_checkpoint: ${oc.env:TOPOLOGY_PRIOR_CKPT}
+shift_model_checkpoint: ${oc.env:SHIFT3D_CKPT}
+
+hidden_dim: 512
+max_num_atoms: 101
+
+datamodule:
+  _target_: src.data.datamodule.NMRGraphDataModule
+  train_path: ${data_path}/train.pt
+  val_path: ${data_path}/val.pt
+  test_path: ${data_path}/test.pt
+  train_batch_size: 16
+  val_batch_size: 16
+  num_workers: 1
+  pin_memory: true
+  # This deterministic subset supplies the same nine W&B examples each time.
+  val_generation_size: 9
+  val_generation_seed: 0
+  inference_only_validation: false
+  batch_transform:
+    _target_: src.data.transforms.NormalizeNMR
+    stats_path: ${data_path}/dataset_infos_train.json
+    normalize_h_shift: true
+    normalize_c_shift: true
+    normalize_h_integration: true
+    normalize_h_j: true
+    encode_multiplicity: false
+    encode_smiles: false
+    max_multiplicity_classes: 122
+
+lit_module:
+  _target_: end2end_module.lit_module.EndToEndNMRModule
+  nmr_to_graph_checkpoint: ${nmr_to_graph_checkpoint}
+  topology_prior_checkpoint: ${topology_prior_checkpoint}
+  shift_model_checkpoint: ${shift_model_checkpoint}
+  checkpoint_strict: true
+  freeze_topology_prior: true
+  freeze_shift_model: true
+  input_shifts_are_normalized: true
+  graph_loss_weight: 1.0
+  nmr_loss_weight: 0.01
+  chemistry_loss_weight: 0.1
+  displacement_loss_weight: 0.01
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  validation_examples: 9
+
+  nmr_to_graph:
+    _target_: src.model.nmr_to_graph.NMRToGraph
+    hidden_dim: ${hidden_dim}
+    num_heads: 8
+    num_joint_layers: 6
+    num_atom_interaction_layers: 2
+    num_fourier_features: 64
+    max_num_atoms: ${max_num_atoms}
+    num_bond_types: 5
+    max_fragment_count: 4
+    attachment_dim: 128
+    attachment_temperature: 0.1
+    use_h_integration: true
+    use_h_multiplicity: true
+    use_h_j: true
+    max_multiplicity_classes: 122
+    use_smiles_loss: true
+    use_smiles_conditioning: false
+    use_smiles_joint_bixt: true
+    smiles_memory: joint
+    num_smiles_layers: 5
+    max_smiles_length: 75
+    smiles_vocab_path: ${data_path}/dataset_infos_train.json
+    teacher_force_smiles_during_eval: false
+    predict_attachments: true
+    predict_edges: true
+    use_graph_joint_encoder: true
+    num_graph_joint_layers: 1
+    dropout: 0.1
+
+  graph_criterion:
+    _target_: src.model.loss.NMRGraphLoss
+    heavy_fragment_weight: 1.0
+    heavy_fragment_presence_weight: 0.25
+    heavy_neighbor_count_weight: 0.1
+    h_parent_fragment_weight: 1.0
+    h_parent_presence_weight: 0.25
+    h_parent_type_weight: 0.25
+    h_attachment_weight: 1.0
+    h_count_weight: 0.25
+    h_entropy_weight: 0.0
+    edge_weight: 1.0
+    edge_none_class_weight: 0.8
+    edge_bond_class_weight: 1.0
+    edge_total_neighbor_count_weight: 1.0
+    carbon_valence_weight: 0.25
+    fragment_edge_consistency_weight: 0.25
+    # Greedy SMILES is logged, but sequence CE is left to its pretrained task.
+    smiles_weight: 0.0
+    permutation_invariant_hydrogens: true
+
+  topology_prior:
+    _target_: local2geo_module.topology_prior.SoftTopologyPrior
+    hidden_dim: 128
+    num_layers: 3
+    dropout: 0.05
+    residual_scale: 6.0
+
+  geometry_solver:
+    _target_: local2geo_module.geometry_solver.DifferentiableGeometrySolver
+    seed_mode: soft_stress
+    soft_stress_steps: 96
+    soft_stress_step_size: 0.06
+    soft_stress_heavy_fraction: 0.65
+    soft_stress_hydrogen_fraction: 0.20
+    num_steps: 32
+    step_size: 0.02
+    bond_weight: 20.0
+    angle_weight: 4.0
+    planar_weight: 0.5
+    clash_weight: 2.0
+
+  coordinate_refiner:
+    _target_: end2end_module.refiner.SpectrumConditionedEGNNRefiner
+    input_dim: ${hidden_dim}
+    hidden_dim: 256
+    edge_dim: 5
+    num_layers: 4
+    num_rbf: 32
+    distance_cutoff: 8.0
+    max_coordinate_step: 0.5
+    dropout: 0.0
+
+  shift_model:
+    _target_: shift3d_module.lit_module.Shift3DModule
+    stats_path: ${data_path}/dataset_infos_train.json
+    hidden_dim: 512
+    num_interactions: 6
+    num_rbf: 64
+    cutoff: 6.0
+    dropout: 0.0
+    h_loss_weight: 1.0
+    c_loss_weight: 1.0
+    equivalence_loss_weight: 0.5
+    h_huber_delta: 0.2
+    c_huber_delta: 2.0
+    h_outlier_cap: 2.0
+    c_outlier_cap: 20.0
+    h_softmin_temperature: 0.05
+    c_softmin_temperature: 0.5
+    log_prediction_plots: false
+
+callbacks:
+  model_checkpoint:
+    _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    dirpath: ${output_dir}/checkpoints
+    filename: "{epoch:03d}-{step}"
+    monitor: val/loss
+    mode: min
+    save_last: true
+    save_top_k: 3
+  learning_rate_monitor:
+    _target_: pytorch_lightning.callbacks.LearningRateMonitor
+    logging_interval: epoch
+
+logger:
+  wandb:
+    _target_: pytorch_lightning.loggers.wandb.WandbLogger
+    save_dir: ${output_dir}
+    project: ${project}
+    group: ${group}
+    name: ${exp_name}
+    log_model: false
+
+trainer:
+  _target_: pytorch_lightning.Trainer
+  accelerator: auto
+  devices: 1
+  precision: bf16-mixed
+  max_epochs: 100
+  gradient_clip_val: 1.0
+  log_every_n_steps: 20
+  val_check_interval: 0.5
+  num_sanity_val_steps: 0
+
+hydra:
+  run:
+    dir: ${log_path}

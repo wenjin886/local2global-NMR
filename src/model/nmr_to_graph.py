@@ -344,6 +344,15 @@ class NMRToGraph(nn.Module):
 
         num_atoms = atom_types.size(1)
         num_h_peaks = h_nmr.size(1)
+        # Preserve a spectrum-only contextual memory before optional SMILES
+        # BiXT updates. Downstream geometry can read the observed spectra
+        # directly without target- or generated-SMILES representations.
+        h_peak_features_clean = joint_features[
+            :, num_atoms:num_atoms + num_h_peaks
+        ]
+        c_peak_features_clean = joint_features[
+            :, num_atoms + num_h_peaks:
+        ]
         smiles_outputs = None
         if self.smiles_memory == "joint":
             smiles_outputs = self._run_smiles_decoder(
@@ -483,6 +492,8 @@ class NMRToGraph(nn.Module):
             "peak_features": peak_features,
             "h_peak_features": h_peak_features,
             "c_peak_features": c_peak_features,
+            "h_peak_features_clean": h_peak_features_clean,
+            "c_peak_features_clean": c_peak_features_clean,
             "smiles_logits": (
                 smiles_outputs["logits"] if smiles_outputs is not None else None
             ),

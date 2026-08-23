@@ -498,3 +498,48 @@ prediction.
 pip install -e '.[test]'
 python -m pytest -q
 ```
+
+# End-to-end NMR cycle training
+
+The first end-to-end stage is implemented in `end2end_module` and configured
+by `configs/train_end2end.yaml`:
+
+```text
+NMRToGraph
+  -> pretrained SoftTopologyPrior
+  -> differentiable geometry solver
+  -> pooled-spectrum residual EGNN coordinate refiner
+  -> frozen Shift3DModule
+  -> NMR set loss
+```
+
+This path consumes `GraphBatch`, which has no coordinate field. Dataset XYZ is
+therefore neither loaded nor available to the model. The topology prior is the
+only graph-correction module; the EGNN changes coordinates only. Its minimal
+inputs are generated coordinates, `graph_atom_features`, separately
+masked-mean-pooled H/C peak features, and corrected all-atom soft bond
+probabilities. Dense pair communication keeps a low-confidence or missed bond
+from making two fragments invisible to the refiner.
+
+The Shift3D checkpoint remains in evaluation mode with all parameters frozen,
+but its forward pass is deliberately not wrapped in `torch.no_grad()`. NMR loss
+gradients therefore flow through predicted shifts to refined coordinates and
+the trainable upstream modules. Normalized graph-dataset peak shifts are
+converted back to ppm with the statistics embedded in `Shift3DModule` before
+the set loss is evaluated.
+
+Set the component checkpoints and launch with:
+
+```bash
+export DATA_PATH=/path/to/uspto/preprocessed
+export NMR2GRAPH_CKPT=/path/to/nmr2graph.ckpt
+export TOPOLOGY_PRIOR_CKPT=/path/to/local2geo_prior.ckpt
+export SHIFT3D_CKPT=/path/to/shift3d.ckpt
+python -m end2end_module.train
+```
+
+The validation datamodule deterministically selects nine molecules. Every
+validation run writes a W&B table containing generated 3D structures, raw and
+SoftTopologyPrior-corrected predicted graphs, target graphs, predicted/target
+SMILES, and predicted/target H/C NMR values. There is intentionally no target
+3D structure in the table.
