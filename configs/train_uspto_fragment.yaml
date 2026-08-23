@@ -7,15 +7,15 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-1-nmr2fragment
-exp_name: joint-bixt-fragment-d512
+exp_name: joint-bixt-fragment-Cvalw0.1-d512
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
 # ckpt_path: null
 # Supply the Stage-0 checkpoint on the command line.
-ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2fragment/joint-bixt-fragment-d512_2026-07-28_13-31-09/checkpoints/epoch=000.ckpt
-only_load_weights: false
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-0-nmr2smiles/joint-bixt-smiles-d512_2026-07-26_22-22-33/checkpoints/epoch=078.ckpt
+only_load_weights: true
 load_weights_strict: true
 
 hidden_dim: 512
