@@ -9,8 +9,9 @@ from typing import Any, Dict, Optional, Sequence
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from src.data.constants import BOND_TYPE_CANDIDATES, parse_bond_type_candidates
+from src.data.constants import BOND_TYPE_CANDIDATES
 from src.data.dataset import NMRGraphDataset, TransformingCollator
+from src.model.loss import NMRGraphLoss
 
 
 def fragment_carbon_valences(fragment_predictions: torch.Tensor) -> torch.Tensor:
@@ -20,20 +21,9 @@ def fragment_carbon_valences(fragment_predictions: torch.Tensor) -> torch.Tensor
             "fragment_predictions last dimension must match "
             f"BOND_TYPE_CANDIDATES ({len(BOND_TYPE_CANDIDATES)})"
         )
-    candidates = parse_bond_type_candidates()
-    bond_weights = fragment_predictions.new_tensor([
-        1 if bond_type in {1, 4} else bond_type
-        for _, bond_type in candidates
-    ])
-    base_valence = (fragment_predictions * bond_weights).sum(dim=-1)
-    aromatic_indices = [
-        index for index, (_, bond_type) in enumerate(candidates)
-        if bond_type == 4
-    ]
-    aromatic_present = fragment_predictions[..., aromatic_indices].sum(
-        dim=-1
-    ).gt(0)
-    return base_valence + aromatic_present.to(dtype=base_valence.dtype)
+    return NMRGraphLoss.fragment_carbon_valences_from_counts(
+        fragment_predictions
+    )
 
 
 @dataclass

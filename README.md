@@ -232,6 +232,15 @@ and the average number of invalid carbons per molecule. By default the model
 uses its inference-time, non-teacher-forced SMILES path; pass
 `--teacher-force-smiles` only for a teacher-forced diagnostic.
 
+Fragment training applies the same chemistry directly to the soft count
+distributions with `fragment_carbon_valence_weight`. Expected single, double,
+triple, and aromatic port counts contribute `1`, `2`, `3`, and `1`; the soft
+probability that any aromatic port is present adds one further pi contribution.
+`train_uspto_fragment.yaml` enables the normalized squared error with weight
+`0.1`. Validation logs argmax carbon-valence accuracy, the all-carbon-valid
+molecule rate, and the average invalid-carbon count per molecule on both the
+full teacher-forced path and the inference subset.
+
 Heavy-edge cross entropy separately weights non-bonds and bonds. Edge class
 zero (`none`) uses `criterion.edge_none_class_weight`; every non-zero bond
 class uses the shared `criterion.edge_bond_class_weight`. The graph-training

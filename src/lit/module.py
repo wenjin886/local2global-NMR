@@ -103,6 +103,10 @@ class LitNMRToGraph(pl.LightningModule):
                 batch_size=batch.atom_types.size(0),
                 add_dataloader_idx=False,
             )
+            if self.validation_stage in {"fragment", "graph"}:
+                self._log_fragment_carbon_valence_metrics(
+                    stage, outputs, batch
+                )
         return loss
 
     def training_step(self, batch: GraphBatch, batch_idx: int) -> torch.Tensor:
@@ -116,7 +120,7 @@ class LitNMRToGraph(pl.LightningModule):
     ):
         if self.inference_only_validation:
             if dataloader_idx == 0:
-                loss, losses, _ = self.basic_step(
+                loss, losses, outputs = self.basic_step(
                     batch, teacher_force_smiles=True
                 )
                 self.log_dict(
@@ -129,6 +133,10 @@ class LitNMRToGraph(pl.LightningModule):
                     batch_size=batch.atom_types.size(0),
                     add_dataloader_idx=False,
                 )
+                if self.validation_stage in {"fragment", "graph"}:
+                    self._log_fragment_carbon_valence_metrics(
+                        "val", outputs, batch
+                    )
                 return loss
 
             outputs = self(batch, teacher_force_smiles=False)
@@ -143,6 +151,10 @@ class LitNMRToGraph(pl.LightningModule):
                 batch_size=batch.atom_types.size(0),
                 add_dataloader_idx=False,
             )
+            if self.validation_stage in {"fragment", "graph"}:
+                self._log_fragment_carbon_valence_metrics(
+                    "val_inference", outputs, batch
+                )
             self._collect_validation_examples(outputs, batch)
             self._collect_graph_validation_examples(outputs, batch)
             return None
@@ -190,6 +202,67 @@ class LitNMRToGraph(pl.LightningModule):
             ):
                 metrics[key] = graph_metrics[key]
         return metrics
+
+    @staticmethod
+    def _fragment_carbon_valence_metrics(
+            outputs: Dict[str, object],
+            batch: GraphBatch,
+    ) -> Dict[str, Tuple[torch.Tensor, int]]:
+        fragment_counts = outputs["fragment_logits"].argmax(dim=-1)
+        valences = NMRGraphLoss.fragment_carbon_valences_from_counts(
+            fragment_counts
+        )
+        carbon_mask = outputs["heavy_mask"] & batch.atom_types.eq(6)
+        valid_carbon = carbon_mask & valences.eq(4)
+        dtype = outputs["fragment_logits"].dtype
+
+        num_carbons = int(carbon_mask.sum().item())
+        num_valid_carbons = valid_carbon.sum().to(dtype=dtype)
+        carbons_per_molecule = carbon_mask.sum(dim=-1)
+        valid_per_molecule = valid_carbon.sum(dim=-1)
+        carbon_containing = carbons_per_molecule.gt(0)
+        num_carbon_molecules = int(carbon_containing.sum().item())
+        num_all_valid_molecules = (
+            valid_per_molecule.eq(carbons_per_molecule) & carbon_containing
+        ).sum().to(dtype=dtype)
+        invalid_carbons = (
+            carbons_per_molecule - valid_per_molecule
+        ).sum().to(dtype=dtype)
+        num_molecules = batch.atom_types.size(0)
+
+        return {
+            "fragment_carbon_valence_accuracy": (
+                num_valid_carbons / max(num_carbons, 1), num_carbons
+            ),
+            "fragment_molecule_all_carbon_valid_rate": (
+                num_all_valid_molecules / max(num_carbon_molecules, 1),
+                num_carbon_molecules,
+            ),
+            "fragment_average_invalid_carbons_per_molecule": (
+                invalid_carbons / max(num_molecules, 1), num_molecules
+            ),
+        }
+
+    def _log_fragment_carbon_valence_metrics(
+            self,
+            stage: str,
+            outputs: Dict[str, object],
+            batch: GraphBatch,
+    ) -> None:
+        metrics = self._fragment_carbon_valence_metrics(outputs, batch)
+        for name, (value, denominator) in metrics.items():
+            if denominator == 0:
+                continue
+            # Weight epoch reduction by the metric's true denominator. This
+            # gives exact carbon-level and molecule-level rates across batches.
+            self.log(
+                f"{stage}/{name}",
+                value,
+                on_step=False,
+                on_epoch=True,
+                batch_size=denominator,
+                add_dataloader_idx=False,
+            )
 
     @staticmethod
     def _heavy_fragment_score(

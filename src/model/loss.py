@@ -17,6 +17,7 @@ class NMRGraphLoss(nn.Module):
             heavy_fragment_weight: float = 1.0,
             heavy_fragment_presence_weight: float = 0.25,
             heavy_neighbor_count_weight: Optional[float] = None,
+            fragment_carbon_valence_weight: float = 0.0,
             h_parent_fragment_weight: float = 1.0,
             h_parent_presence_weight: float = 0.25,
             h_parent_type_weight: float = 0.25,
@@ -61,6 +62,7 @@ class NMRGraphLoss(nn.Module):
         self.heavy_fragment_weight = heavy_fragment_weight
         self.heavy_fragment_presence_weight = heavy_fragment_presence_weight
         self.heavy_neighbor_count_weight = heavy_neighbor_count_weight
+        self.fragment_carbon_valence_weight = fragment_carbon_valence_weight
         self.h_parent_fragment_weight = h_parent_fragment_weight
         self.h_parent_presence_weight = h_parent_presence_weight
         self.h_parent_type_weight = h_parent_type_weight
@@ -209,6 +211,71 @@ class NMRGraphLoss(nn.Module):
             torch.relu(expected_neighbor_count - caps) / caps.clamp_min(1.0)
         )
         return normalized_overflow[valid].square().mean()
+
+    @staticmethod
+    def fragment_carbon_valences_from_counts(
+            fragment_counts: torch.Tensor,
+    ) -> torch.Tensor:
+        """Carbon valence implied by discrete factorized fragment counts."""
+        candidates = parse_bond_type_candidates()
+        if fragment_counts.size(-1) != len(candidates):
+            raise ValueError(
+                "fragment_counts last dimension must match the configured "
+                f"fragment candidates ({len(candidates)})"
+            )
+        weights = fragment_counts.new_tensor([
+            1 if bond_type in {1, 4} else bond_type
+            for _, bond_type in candidates
+        ])
+        valence = (fragment_counts * weights).sum(dim=-1)
+        aromatic_indices = [
+            index for index, (_, bond_type) in enumerate(candidates)
+            if bond_type == 4
+        ]
+        aromatic_present = fragment_counts[..., aromatic_indices].sum(
+            dim=-1
+        ).gt(0)
+        return valence + aromatic_present.to(dtype=valence.dtype)
+
+    @staticmethod
+    def fragment_carbon_valence_loss(
+            fragment_logits: torch.Tensor,
+            atom_types: torch.Tensor,
+            heavy_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Constrain soft factorized-fragment carbon valence to four."""
+        probabilities = torch.softmax(fragment_logits, dim=-1)
+        count_values = torch.arange(
+            fragment_logits.size(-1),
+            dtype=fragment_logits.dtype,
+            device=fragment_logits.device,
+        )
+        expected_counts = (probabilities * count_values).sum(dim=-1)
+        candidates = parse_bond_type_candidates()
+        if expected_counts.size(-1) != len(candidates):
+            raise ValueError(
+                "fragment logits do not match the configured fragment "
+                f"candidates ({len(candidates)})"
+            )
+        weights = expected_counts.new_tensor([
+            1 if bond_type in {1, 4} else bond_type
+            for _, bond_type in candidates
+        ])
+        expected_valence = (expected_counts * weights).sum(dim=-1)
+        aromatic_indices = [
+            index for index, (_, bond_type) in enumerate(candidates)
+            if bond_type == 4
+        ]
+        no_aromatic_probability = probabilities[
+            ..., aromatic_indices, 0
+        ].prod(dim=-1)
+        expected_valence = expected_valence + 1.0 - no_aromatic_probability
+
+        carbon_mask = heavy_mask & atom_types.eq(6)
+        if not carbon_mask.any():
+            return expected_valence.sum() * 0.0
+        normalized_error = (expected_valence[carbon_mask] - 4.0) / 4.0
+        return normalized_error.square().mean()
 
     @staticmethod
     def _parent_type_indices(
@@ -585,6 +652,13 @@ class NMRGraphLoss(nn.Module):
             if self.heavy_neighbor_count_weight != 0
             else self._zero_like(outputs)
         )
+        losses["fragment_carbon_valence"] = (
+            self.fragment_carbon_valence_loss(
+                outputs["fragment_logits"], atom_types, outputs["heavy_mask"]
+            )
+            if self.fragment_carbon_valence_weight != 0
+            else zero
+        )
         if any(weight != 0 for weight in (
                 self.h_parent_fragment_weight,
                 self.h_parent_type_weight,
@@ -677,6 +751,8 @@ class NMRGraphLoss(nn.Module):
             + self.heavy_fragment_presence_weight * losses["heavy_fragment_presence"]
             + self.heavy_neighbor_count_weight
             * losses["heavy_neighbor_count_overflow"]
+            + self.fragment_carbon_valence_weight
+            * losses["fragment_carbon_valence"]
             + self.h_parent_fragment_weight * losses["h_parent_fragment"]
             + self.h_parent_presence_weight * losses["h_parent_presence"]
             + self.h_parent_type_weight * losses["h_parent_type"]

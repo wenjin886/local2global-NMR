@@ -201,6 +201,7 @@ def test_fragment_only_stage_has_no_edge_or_attachment_gradient():
     batch = collate_nmr_graph([make_sample()])
     model = make_model(predict_attachments=False, predict_edges=False)
     criterion = NMRGraphLoss(
+        fragment_carbon_valence_weight=0.1,
         h_attachment_weight=0.0,
         h_count_weight=0.0,
         edge_weight=0.0,
@@ -210,7 +211,7 @@ def test_fragment_only_stage_has_no_edge_or_attachment_gradient():
     assert outputs["h_attachment_logits"] is None
     assert outputs["heavy_edge_logits"] is None
     assert outputs["graph_atom_features"] is outputs["atom_features"]
-    loss, _ = criterion(
+    loss, losses = criterion(
         outputs=outputs,
         atom_types=batch.atom_types,
         bond_types=batch.bond_types,
@@ -221,6 +222,7 @@ def test_fragment_only_stage_has_no_edge_or_attachment_gradient():
     )
     loss.backward()
 
+    assert torch.isfinite(losses["fragment_carbon_valence"])
     assert model.fragment_readout.readout[-1].weight.grad is not None
     edge_gradient = model.edge_readout.mlp[-1].weight.grad
     assert edge_gradient is None or torch.count_nonzero(edge_gradient) == 0
@@ -248,6 +250,36 @@ def test_heavy_neighbor_count_loss_penalizes_only_neighbor_overflow():
     assert criterion.heavy_neighbor_count_overflow_loss(
         logits, atom_types, heavy_mask
     ).item() > 0
+
+
+def test_soft_fragment_carbon_valence_handles_fused_aromatic_carbon():
+    atom_types = torch.tensor([[6]])
+    heavy_mask = torch.tensor([[True]])
+    logits = torch.full(
+        (1, 1, len(BOND_TYPE_CANDIDATES), 5), -20.0
+    )
+    logits[..., 0] = 20.0
+    aromatic_index = BOND_TYPE_CANDIDATES.index("6-4")
+    logits[0, 0, aromatic_index, 0] = -20.0
+    logits[0, 0, aromatic_index, 3] = 20.0
+    logits.requires_grad_()
+
+    exact = NMRGraphLoss.fragment_carbon_valence_loss(
+        logits, atom_types, heavy_mask
+    )
+    assert exact.item() < 1e-8
+
+    # Two aromatic neighbours contribute two sigma bonds plus one shared pi
+    # contribution, leaving the carbon under-valent at three.
+    with torch.no_grad():
+        logits[0, 0, aromatic_index, 3] = -20.0
+        logits[0, 0, aromatic_index, 2] = 20.0
+    invalid = NMRGraphLoss.fragment_carbon_valence_loss(
+        logits, atom_types, heavy_mask
+    )
+    assert invalid.item() > 0.0
+    invalid.backward()
+    assert torch.count_nonzero(logits.grad) > 0
 
 
 def test_edge_total_neighbor_count_includes_soft_edges_and_h_attachments():

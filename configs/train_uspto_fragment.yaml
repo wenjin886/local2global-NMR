@@ -82,6 +82,7 @@ lit_module:
     heavy_fragment_weight: 1.0
     heavy_fragment_presence_weight: 0.25
     heavy_neighbor_count_weight: 0.1
+    fragment_carbon_valence_weight: 0.1
     max_heavy_neighbor_counts:
       6: 4
       7: 4
