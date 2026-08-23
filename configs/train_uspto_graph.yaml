@@ -9,7 +9,7 @@ data_name: uspto
 group: step-2-nmr2graph-edge
 # exp_name: dim512-nonebondw0.4-graphjoinencoder-finetunefromepoch38-bs64
 # exp_name: dim256-finetunefromepoch42
-exp_name: joint-bixt-graph-d512-nonebondw0.8-smiw1.0
+exp_name: joint-bixt-graph-d512-nonebondw0.8-smiw1.0-neighborw1.0-Cvalw0.25
 
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
@@ -111,8 +111,8 @@ lit_module:
     edge_weight: 1.0
     edge_none_class_weight: 0.8
     edge_bond_class_weight: 1.0
-    edge_total_neighbor_count_weight: 0.1
-    carbon_valence_weight: 0.1
+    edge_total_neighbor_count_weight: 1.0
+    carbon_valence_weight: 0.25
     fragment_edge_consistency_weight: 0.25
     smiles_weight: 1.0
     permutation_invariant_hydrogens: true
