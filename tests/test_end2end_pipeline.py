@@ -1,6 +1,14 @@
+from pathlib import Path
+
 import torch
 
 from end2end_module.lit_module import EndToEndNMRModule
+from end2end_module.metrics import (
+    geometry_quality,
+    graph_to_canonical_smiles,
+    rdkit_graph_quality,
+    write_xyz,
+)
 from end2end_module.refiner import SpectrumConditionedEGNNRefiner
 from local2geo_module.geometry_solver import DifferentiableGeometrySolver
 from local2geo_module.topology_prior import SoftTopologyPrior
@@ -47,6 +55,7 @@ def _batch() -> GraphBatch:
 def _module(
     use_smiles_decoder=False,
     criterion_smiles_weight=0.0,
+    freeze_topology_prior=True,
     **curriculum,
 ) -> EndToEndNMRModule:
     hidden_dim = 32
@@ -109,7 +118,7 @@ def _module(
             equivalence_loss_weight=0.0,
             log_prediction_plots=False,
         ),
-        freeze_topology_prior=True,
+        freeze_topology_prior=freeze_topology_prior,
         freeze_shift_model=True,
         input_shifts_are_normalized=False,
         **curriculum,
@@ -195,3 +204,43 @@ def test_teacher_forced_smiles_loss_and_greedy_curriculum_schedule():
     losses = module._losses(batch, output, include_smiles_loss=True)
     assert torch.isfinite(losses["loss_smiles"])
     assert float(losses["loss_smiles"]) > 0.0
+
+
+def test_corrected_graph_supervision_reaches_trainable_prior():
+    module = _module(freeze_topology_prior=False)
+    batch = _batch()
+    output = module(batch)
+    losses = module._losses(batch, output)
+    assert torch.isfinite(losses["loss_corrected_edge"])
+    assert torch.isfinite(losses["loss_corrected_attachment"])
+    assert 0.0 <= float(losses["corrected_graph_exact_match"]) <= 1.0
+    losses["loss"].backward()
+    assert any(
+        parameter.grad is not None
+        for parameter in module.topology_prior.parameters()
+    )
+
+
+def test_generated_structure_metrics_smiles_and_xyz(tmp_path: Path):
+    atom_types = torch.tensor([6, 6, 1, 1, 1, 1, 1, 1])
+    bonds = torch.zeros((8, 8), dtype=torch.long)
+    bonds[0, 1] = bonds[1, 0] = 1
+    for hydrogen, parent in zip(range(2, 8), [0, 0, 0, 1, 1, 1]):
+        bonds[hydrogen, parent] = bonds[parent, hydrogen] = 1
+    coordinates = torch.tensor(
+        [
+            [-0.77, 0.00, 0.00], [0.77, 0.00, 0.00],
+            [-1.15, 1.00, 0.00], [-1.15, -0.50, 0.87],
+            [-1.15, -0.50, -0.87], [1.15, 1.00, 0.00],
+            [1.15, -0.50, 0.87], [1.15, -0.50, -0.87],
+        ]
+    )
+    covalent = torch.tensor([0.76, 0.76] + [0.31] * 6)
+    vdw = torch.tensor([1.70, 1.70] + [1.20] * 6)
+    assert graph_to_canonical_smiles(atom_types, bonds) == "CC"
+    assert rdkit_graph_quality(atom_types, bonds)["validity"] == 1.0
+    quality = geometry_quality(atom_types, coordinates, bonds, covalent, vdw)
+    assert quality["finite_coordinate_fraction"] == 1.0
+    path = tmp_path / "ethane.xyz"
+    write_xyz(path, atom_types, coordinates, "ethane")
+    assert path.read_text().splitlines()[0] == "8"

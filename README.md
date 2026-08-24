@@ -540,9 +540,13 @@ python -m end2end_module.train
 
 The validation datamodule deterministically selects nine molecules. Every
 validation run writes a W&B table containing generated 3D structures, raw and
-SoftTopologyPrior-corrected predicted graphs, target graphs, predicted/target
-SMILES, and predicted/target H/C NMR values. There is intentionally no target
-3D structure in the table.
+SoftTopologyPrior-corrected predicted graphs, target graphs, decoder and
+corrected-graph canonical SMILES, predicted/target H/C NMR values, graph exact
+match, RDKit validity/valence stability, bond-length deviation and non-local
+clash metrics. The nine XYZ files are retained under
+`validation_xyz/epoch_*_step_*` and uploaded with the W&B run. These metrics do
+not use target coordinates; they measure chemical/geometric plausibility, not
+conformer accuracy.
 
 Training supports a teacher-to-greedy SMILES curriculum. Every new fit or
 resumed fit records its first restored `global_step` as the curriculum origin,
@@ -554,13 +558,13 @@ the configured transition. Teacher batches receive the separate SMILES CE;
 greedy batches do not. Validation is always greedy, and W&B records both the
 scheduled and realized greedy ratios.
 
-The default first stage freezes all pretrained components
-(`NMRToGraph`, `SoftTopologyPrior`, and `Shift3DModule`) and optimizes only the
-coordinate refiner. Teacher-forced target SMILES still conditions the BiXT
-joint memory, while graph and SMILES losses remain in the reported objective;
-because their producing module is frozen, those two losses do not update the
-refiner until NMRToGraph is later unfrozen. Geometry initialization retains its
-normal differentiable mode independently of freeze policy. Gradients pass
-through the frozen Shift3D model from NMR loss to refined coordinates. Start
-this stage from the original component checkpoints rather than a drifted
-end-to-end checkpoint.
+The initial refiner-only stage freezes all pretrained components. The checked-in
+configuration now represents the next stage: `NMRToGraph` and `Shift3DModule`
+remain frozen while `SoftTopologyPrior` and the coordinate refiner train at
+separate learning rates. Corrected heavy-edge and permutation-invariant H
+attachment cross-entropy directly supervise correction; entropy/confidence are
+logged but entropy is not independently minimized. The solver has no learned
+parameters and remains differentiable, allowing coordinate, chemistry and NMR
+gradients to reach the prior. At this stage boundary use
+`weights_only_checkpoint=/path/to/refiner-stage.ckpt` with `ckpt_path=null` so
+model weights are restored without the old optimizer parameter groups.

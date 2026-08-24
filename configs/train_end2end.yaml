@@ -10,6 +10,9 @@ exp_save_dir_name: ${oc.env:OUTPUT_DIR,outputs}/${group}/${exp_name}_${now:%Y-%m
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 ckpt_path: null
+# At a stage boundary, set this to the previous end-to-end checkpoint and keep
+# ckpt_path=null. This restores weights without its incompatible optimizer.
+weights_only_checkpoint: null
 test: false
 optimized_metric: val/loss
 
@@ -51,16 +54,22 @@ lit_module:
   topology_prior_checkpoint: ${topology_prior_checkpoint}
   shift_model_checkpoint: ${shift_model_checkpoint}
   checkpoint_strict: true
-  # Stage 1 trains only coordinate_refiner. Resume from the original component
-  # checkpoints, not from an end-to-end checkpoint whose graph model drifted.
+  # Stage 2 trains graph correction plus coordinate refinement. The solver has
+  # no parameters, but stays differentiable so coordinate/NMR gradients can
+  # reach SoftTopologyPrior.
   freeze_nmr_to_graph: true
-  freeze_topology_prior: true
+  freeze_topology_prior: false
   freeze_shift_model: true
   input_shifts_are_normalized: true
   graph_loss_weight: 1.0
   nmr_loss_weight: 1.0
   chemistry_loss_weight: 0.1
   displacement_loss_weight: 0.01
+  # Correct-class cross entropy also sharpens confidence. We deliberately do
+  # not minimize entropy alone, which could reinforce a confidently wrong edge.
+  corrected_edge_loss_weight: 1.0
+  corrected_attachment_loss_weight: 1.0
+  topology_residual_loss_weight: 1.0e-3
   # Initial phase: start=end=0 keeps every training batch teacher-forced.
   # On a later resume set greedy_probability_end=1.0; the resumed run first
   # receives teacher_only_steps and then begins the transition automatically.
@@ -72,8 +81,11 @@ lit_module:
   greedy_schedule: cosine
   greedy_sampling_seed: ${seed}
   learning_rate: 1.0e-4
+  topology_learning_rate: 1.0e-5
+  refiner_learning_rate: 1.0e-4
   weight_decay: 1.0e-5
   validation_examples: 9
+  validation_xyz_dir: ${output_dir}/validation_xyz
 
   nmr_to_graph:
     _target_: src.model.nmr_to_graph.NMRToGraph

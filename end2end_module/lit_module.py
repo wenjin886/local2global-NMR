@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import random
 import warnings
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import pytorch_lightning as pl
@@ -25,6 +26,12 @@ from src.model.loss import NMRGraphLoss
 from src.model.nmr_to_graph import NMRToGraph
 
 from .refiner import SpectrumConditionedEGNNRefiner
+from .metrics import (
+    geometry_quality,
+    graph_to_canonical_smiles,
+    rdkit_graph_quality,
+    write_xyz,
+)
 
 
 def _load_component_checkpoint(
@@ -84,6 +91,9 @@ class EndToEndNMRModule(pl.LightningModule):
         chemistry_loss_weight: float = 0.1,
         displacement_loss_weight: float = 0.01,
         smiles_loss_weight: float = 1.0,
+        corrected_edge_loss_weight: float = 1.0,
+        corrected_attachment_loss_weight: float = 1.0,
+        topology_residual_loss_weight: float = 1e-3,
         greedy_probability_start: float = 0.0,
         greedy_probability_end: float = 0.0,
         teacher_only_steps: int = 1000,
@@ -91,8 +101,11 @@ class EndToEndNMRModule(pl.LightningModule):
         greedy_schedule: str = "cosine",
         greedy_sampling_seed: int = 42,
         learning_rate: float = 1e-4,
+        topology_learning_rate: Optional[float] = None,
+        refiner_learning_rate: Optional[float] = None,
         weight_decay: float = 1e-5,
         validation_examples: int = 9,
+        validation_xyz_dir: Optional[str] = None,
     ) -> None:
         super().__init__()
         if not freeze_shift_model:
@@ -271,6 +284,9 @@ class EndToEndNMRModule(pl.LightningModule):
             ),
             local_geometry_priors=prior_output,
         )
+        # Expose the shared masks alongside solver outputs so losses and
+        # metrics use exactly the same graph support as coordinate generation.
+        geometry.update(masks)
         refined = self.coordinate_refiner(
             coordinates=geometry["coordinates"],
             graph_atom_features=graph_output["graph_atom_features"],
@@ -376,12 +392,84 @@ class EndToEndNMRModule(pl.LightningModule):
         displacement_loss = output["refined"]["displacement"].square().sum(
             dim=-1
         )[batch.atom_mask].mean()
+        corrected = output["topology"]
+        heavy_pair_mask = output["geometry"]["heavy_pair_mask"]
+        upper = torch.triu(
+            torch.ones_like(heavy_pair_mask, dtype=torch.bool), diagonal=1
+        )
+        edge_mask = heavy_pair_mask & upper & batch.bond_types.ge(0)
+        corrected_edge_logits = corrected["corrected_heavy_edge_logits"]
+        if edge_mask.any():
+            class_weights = corrected_edge_logits.new_full(
+                (corrected_edge_logits.size(-1),),
+                float(self.graph_criterion.edge_bond_class_weight),
+            )
+            class_weights[0] = float(
+                self.graph_criterion.edge_none_class_weight
+            )
+            corrected_edge_loss = F.cross_entropy(
+                corrected_edge_logits[edge_mask],
+                batch.bond_types[edge_mask].long(),
+                weight=class_weights,
+            )
+            edge_probabilities = torch.softmax(
+                corrected_edge_logits[edge_mask], dim=-1
+            )
+            corrected_edge_entropy = -(
+                edge_probabilities
+                * edge_probabilities.clamp_min(1e-12).log()
+            ).sum(-1).mean()
+            corrected_edge_confidence = edge_probabilities.max(-1).values.mean()
+        else:
+            corrected_edge_loss = corrected_edge_logits.sum() * 0.0
+            corrected_edge_entropy = corrected_edge_loss
+            corrected_edge_confidence = corrected_edge_loss
+        corrected_attachment_probabilities = output["geometry"][
+            "h_attachment_probabilities"
+        ]
+        corrected_attachment_loss = (
+            self.graph_criterion._permutation_invariant_attachment_loss(
+                corrected_attachment_probabilities,
+                output["geometry"]["hydrogen_mask"],
+                batch.h_attachment,
+            )
+        )
+        attachment_mask = output["geometry"]["hydrogen_mask"]
+        attachment_entropy = -(
+            corrected_attachment_probabilities.clamp_min(1e-12).log()
+            * corrected_attachment_probabilities
+        ).sum(-1)
+        corrected_attachment_entropy = (
+            attachment_entropy[attachment_mask].mean()
+            if attachment_mask.any()
+            else corrected_attachment_loss * 0.0
+        )
+        edge_residual = corrected["edge_residual"][heavy_pair_mask]
+        attachment_residual = corrected["attachment_residual"][
+            output["geometry"]["attachment_mask"]
+        ]
+        residual_terms = []
+        if edge_residual.numel():
+            residual_terms.append(edge_residual.square().mean())
+        if attachment_residual.numel():
+            residual_terms.append(attachment_residual.square().mean())
+        topology_residual_loss = (
+            torch.stack(residual_terms).mean()
+            if residual_terms
+            else corrected_edge_logits.sum() * 0.0
+        )
         total = (
             float(self.hparams.graph_loss_weight) * graph_loss
             + float(self.hparams.nmr_loss_weight) * nmr_loss
             + float(self.hparams.smiles_loss_weight) * smiles_loss
             + float(self.hparams.chemistry_loss_weight) * chemistry_loss
             + float(self.hparams.displacement_loss_weight) * displacement_loss
+            + float(self.hparams.corrected_edge_loss_weight)
+            * corrected_edge_loss
+            + float(self.hparams.corrected_attachment_loss_weight)
+            * corrected_attachment_loss
+            + float(self.hparams.topology_residual_loss_weight)
+            * topology_residual_loss
         )
         values = {
             "loss": total,
@@ -390,6 +478,12 @@ class EndToEndNMRModule(pl.LightningModule):
             "loss_smiles": smiles_loss,
             "loss_chemistry": chemistry_loss,
             "loss_displacement": displacement_loss,
+            "loss_corrected_edge": corrected_edge_loss,
+            "loss_corrected_attachment": corrected_attachment_loss,
+            "loss_topology_residual": topology_residual_loss,
+            "corrected_edge_entropy": corrected_edge_entropy,
+            "corrected_edge_confidence": corrected_edge_confidence,
+            "corrected_attachment_entropy": corrected_attachment_entropy,
             "h_nearest_mae_ppm": shift_metrics["h_nearest_mae_ppm"],
             "c_nearest_mae_ppm": shift_metrics["c_nearest_mae_ppm"],
         }
@@ -399,7 +493,70 @@ class EndToEndNMRModule(pl.LightningModule):
         values.update(
             {f"geometry_{key}": value for key, value in refined_terms.items()}
         )
+        values.update(self._corrected_graph_metrics(batch, output))
         return values
+
+    @staticmethod
+    def _corrected_graph_metrics(
+        batch: GraphBatch, output: Mapping[str, Any]
+    ) -> Dict[str, torch.Tensor]:
+        """Permutation-invariant molecule exact match for explicit H graphs."""
+        predicted_edges = output["topology"][
+            "corrected_heavy_edge_logits"
+        ].argmax(dim=-1)
+        target_edges = batch.bond_types
+        heavy_mask = output["geometry"]["heavy_mask"]
+        hydrogen_mask = output["geometry"]["hydrogen_mask"]
+        pair = heavy_mask[:, :, None] & heavy_mask[:, None, :]
+        upper = torch.triu(torch.ones_like(pair), diagonal=1)
+        valid_pair = pair & upper & target_edges.ge(0)
+        attachment_probabilities = output["geometry"][
+            "h_attachment_probabilities"
+        ]
+        target_counts = torch.zeros_like(attachment_probabilities.sum(dim=1))
+        for sample_index in range(target_counts.size(0)):
+            valid_h = hydrogen_mask[sample_index] & batch.h_attachment[
+                sample_index
+            ].ge(0)
+            parents = batch.h_attachment[sample_index, valid_h].long()
+            if parents.numel():
+                target_counts[sample_index].scatter_add_(
+                    0, parents, torch.ones_like(parents, dtype=target_counts.dtype)
+                )
+        predicted_counts = torch.zeros_like(target_counts)
+        predicted_parents = attachment_probabilities.argmax(dim=-1)
+        for sample_index in range(target_counts.size(0)):
+            parents = predicted_parents[sample_index, hydrogen_mask[sample_index]]
+            if parents.numel():
+                predicted_counts[sample_index].scatter_add_(
+                    0, parents, torch.ones_like(parents, dtype=target_counts.dtype)
+                )
+        exact = []
+        edge_accuracies = []
+        for sample_index in range(target_counts.size(0)):
+            sample_pairs = valid_pair[sample_index]
+            edge_equal = predicted_edges[sample_index, sample_pairs].eq(
+                target_edges[sample_index, sample_pairs]
+            )
+            edges_exact = edge_equal.all() if edge_equal.numel() else torch.tensor(
+                True, device=target_counts.device
+            )
+            counts_exact = predicted_counts[sample_index, heavy_mask[sample_index]].eq(
+                target_counts[sample_index, heavy_mask[sample_index]]
+            ).all()
+            exact.append((edges_exact & counts_exact).float())
+            edge_accuracies.append(
+                edge_equal.float().mean()
+                if edge_equal.numel()
+                else target_counts.new_tensor(1.0)
+            )
+        zero = predicted_edges.sum() * 0.0
+        return {
+            "corrected_graph_exact_match": torch.stack(exact).mean() if exact else zero,
+            "corrected_edge_accuracy": (
+                torch.stack(edge_accuracies).mean() if edge_accuracies else zero
+            ),
+        }
 
     def _shared_step(
         self,
@@ -571,6 +728,12 @@ class EndToEndNMRModule(pl.LightningModule):
                     "coordinates": output["refined"]["coordinates"][
                         index, mask
                     ].detach().cpu(),
+                    "covalent_radii": output["geometry"]["covalent_radii"][
+                        index, mask
+                    ].detach().cpu(),
+                    "vdw_radii": output["geometry"]["vdw_radii"][
+                        index, mask
+                    ].detach().cpu(),
                     "target_edges": batch.bond_types[
                         index, :atom_count, :atom_count
                     ].detach().cpu(),
@@ -712,7 +875,14 @@ class EndToEndNMRModule(pl.LightningModule):
         except ImportError:
             return
         rows = []
-        for example in examples:
+        quality_rows = []
+        xyz_root = None
+        if self.hparams.validation_xyz_dir:
+            xyz_root = (
+                Path(str(self.hparams.validation_xyz_dir))
+                / f"epoch_{int(self.current_epoch):03d}_step_{int(self.global_step)}"
+            )
+        for sample_index, example in enumerate(examples):
             target_bonds = self._all_atom_bonds(
                 example["atom_types"],
                 example["target_edges"],
@@ -728,11 +898,51 @@ class EndToEndNMRModule(pl.LightningModule):
                 example["raw_edges"],
                 example["predicted_attachments"],
             )
+            graph_smiles = graph_to_canonical_smiles(
+                example["atom_types"], predicted_bonds
+            )
+            graph_quality = rdkit_graph_quality(
+                example["atom_types"], predicted_bonds
+            )
+            geometric_quality = geometry_quality(
+                example["atom_types"],
+                example["coordinates"],
+                predicted_bonds,
+                example["covalent_radii"],
+                example["vdw_radii"],
+            )
+            quality = {**graph_quality, **geometric_quality}
+            quality_rows.append(quality)
+            graph_exact = self._example_graph_exact(example)
+            xyz_path = "<disabled>"
+            if xyz_root is not None:
+                path = xyz_root / f"sample_{sample_index:02d}.xyz"
+                write_xyz(
+                    path,
+                    example["atom_types"],
+                    example["coordinates"],
+                    comment=(
+                        f"target_smiles={example['target_smiles']} "
+                        f"predicted_smiles={example['predicted_smiles']} "
+                        f"graph_smiles={graph_smiles or '<invalid>'}"
+                    ),
+                )
+                xyz_path = str(path)
             rows.append(
                 [
                     int(self.current_epoch),
                     example["target_smiles"],
                     example["predicted_smiles"],
+                    graph_smiles or "<invalid-graph>",
+                    graph_exact,
+                    quality["validity"],
+                    quality["connected"],
+                    quality["atom_stability"],
+                    quality["molecule_stability"],
+                    quality["clash_free"],
+                    quality["bond_length_mae_angstrom"],
+                    quality["min_nonbond_vdw_ratio"],
+                    xyz_path,
                     wandb.Image(
                         self._render_structure(
                             example["atom_types"],
@@ -763,6 +973,16 @@ class EndToEndNMRModule(pl.LightningModule):
                         "epoch",
                         "target_smiles",
                         "predicted_smiles",
+                        "corrected_graph_smiles",
+                        "corrected_graph_exact_match",
+                        "3d_validity",
+                        "connected",
+                        "atom_stability",
+                        "molecule_stability",
+                        "clash_free",
+                        "bond_length_mae_angstrom",
+                        "min_nonbond_vdw_ratio",
+                        "xyz_path",
                         "generated_3d",
                         "target_graph",
                         "predicted_graph_raw",
@@ -775,6 +995,47 @@ class EndToEndNMRModule(pl.LightningModule):
                     data=rows,
                     step=self.global_step,
                 )
+            experiment = getattr(logger, "experiment", None)
+            if experiment is not None and quality_rows:
+                panel_metrics = {}
+                for key in quality_rows[0]:
+                    finite_values = [
+                        row[key]
+                        for row in quality_rows
+                        if math.isfinite(float(row[key]))
+                    ]
+                    if finite_values:
+                        panel_metrics[f"val_3d/{key}"] = sum(finite_values) / len(
+                            finite_values
+                        )
+                experiment.log(panel_metrics, step=self.global_step)
+                if xyz_root is not None:
+                    for path in sorted(xyz_root.glob("*.xyz")):
+                        experiment.save(
+                            str(path), base_path=str(xyz_root), policy="now"
+                        )
+
+    @staticmethod
+    def _example_graph_exact(example: Mapping[str, Any]) -> bool:
+        atom_types = example["atom_types"]
+        heavy = atom_types.ne(1)
+        upper = torch.triu(torch.ones_like(example["target_edges"]), diagonal=1).bool()
+        pairs = heavy[:, None] & heavy[None, :] & upper
+        if not torch.equal(
+            example["corrected_edges"][pairs], example["target_edges"][pairs]
+        ):
+            return False
+        heavy_indices = heavy.nonzero(as_tuple=False).flatten()
+        for parent in heavy_indices.tolist():
+            target_count = int(
+                (example["target_attachments"][atom_types.eq(1)] == parent).sum()
+            )
+            predicted_count = int(
+                (example["predicted_attachments"][atom_types.eq(1)] == parent).sum()
+            )
+            if target_count != predicted_count:
+                return False
+        return True
 
     def _gather_validation_examples(self) -> List[Dict[str, Any]]:
         """Collect the deterministic validation panel from every DDP rank."""
@@ -797,13 +1058,53 @@ class EndToEndNMRModule(pl.LightningModule):
         return merged[: int(self.hparams.validation_examples)]
 
     def configure_optimizers(self):
-        parameters = [
-            parameter for parameter in self.parameters() if parameter.requires_grad
+        groups = []
+        assigned = set()
+        module_groups = (
+            (
+                "topology_prior",
+                self.topology_prior,
+                self.hparams.topology_learning_rate,
+            ),
+            (
+                "coordinate_refiner",
+                self.coordinate_refiner,
+                self.hparams.refiner_learning_rate,
+            ),
+        )
+        for name, module, configured_lr in module_groups:
+            parameters = [
+                parameter for parameter in module.parameters()
+                if parameter.requires_grad
+            ]
+            if parameters:
+                assigned.update(id(parameter) for parameter in parameters)
+                groups.append(
+                    {
+                        "params": parameters,
+                        "lr": float(
+                            self.hparams.learning_rate
+                            if configured_lr is None else configured_lr
+                        ),
+                        "name": name,
+                    }
+                )
+        remaining = [
+            parameter for parameter in self.parameters()
+            if parameter.requires_grad and id(parameter) not in assigned
         ]
-        if not parameters:
+        if remaining:
+            groups.append(
+                {
+                    "params": remaining,
+                    "lr": float(self.hparams.learning_rate),
+                    "name": "other",
+                }
+            )
+        if not groups:
             raise ValueError("No trainable parameters in end-to-end pipeline")
         optimizer = torch.optim.AdamW(
-            parameters,
+            groups,
             lr=float(self.hparams.learning_rate),
             weight_decay=float(self.hparams.weight_decay),
         )

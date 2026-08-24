@@ -6,6 +6,7 @@ from typing import Optional
 
 import hydra
 import pytorch_lightning as pl
+import torch
 from omegaconf import DictConfig, OmegaConf
 
 
@@ -19,6 +20,16 @@ def main(config: DictConfig) -> Optional[float]:
     print(OmegaConf.to_yaml(config, resolve=True))
     datamodule = hydra.utils.instantiate(config.datamodule)
     module = hydra.utils.instantiate(config.lit_module)
+    weights_only_checkpoint = config.get("weights_only_checkpoint")
+    if weights_only_checkpoint:
+        checkpoint = torch.load(
+            str(weights_only_checkpoint), map_location="cpu"
+        )
+        module.load_state_dict(checkpoint.get("state_dict", checkpoint))
+        print(
+            "Loaded end-to-end model weights without optimizer state from "
+            f"{weights_only_checkpoint}"
+        )
     callbacks = [
         hydra.utils.instantiate(callback)
         for callback in config.get("callbacks", {}).values()
