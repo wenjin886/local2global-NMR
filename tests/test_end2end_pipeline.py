@@ -44,7 +44,11 @@ def _batch() -> GraphBatch:
     )
 
 
-def _module(use_smiles_decoder=False, **curriculum) -> EndToEndNMRModule:
+def _module(
+    use_smiles_decoder=False,
+    criterion_smiles_weight=0.0,
+    **curriculum,
+) -> EndToEndNMRModule:
     hidden_dim = 32
     graph_model = NMRToGraph(
         hidden_dim=hidden_dim,
@@ -80,7 +84,7 @@ def _module(use_smiles_decoder=False, **curriculum) -> EndToEndNMRModule:
         edge_total_neighbor_count_weight=0.0,
         carbon_valence_weight=0.0,
         fragment_edge_consistency_weight=0.0,
-        smiles_weight=0.0,
+        smiles_weight=criterion_smiles_weight,
     )
     return EndToEndNMRModule(
         nmr_to_graph=graph_model,
@@ -119,16 +123,17 @@ def test_pipeline_generates_coordinates_without_xyz_and_keeps_shift_frozen():
     assert output["refined"]["coordinates"].shape == (1, 4, 3)
     assert not any(parameter.requires_grad for parameter in module.shift_model.parameters())
     assert not any(parameter.requires_grad for parameter in module.topology_prior.parameters())
+    assert not any(parameter.requires_grad for parameter in module.nmr_to_graph.parameters())
+    assert {
+        name.split(".", 1)[0]
+        for name, parameter in module.named_parameters()
+        if parameter.requires_grad
+    } == {"coordinate_refiner"}
 
     loss = module._losses(batch, output)["loss"]
     loss.backward()
     assert all(parameter.grad is None for parameter in module.shift_model.parameters())
     assert module.coordinate_refiner.layers[0].coordinate_gate.weight.grad is not None
-    assert any(
-        parameter.grad is not None
-        for parameter in module.nmr_to_graph.parameters()
-        if parameter.requires_grad
-    )
 
 
 def test_refiner_is_translation_equivariant():
@@ -167,6 +172,7 @@ def test_refiner_is_translation_equivariant():
 def test_teacher_forced_smiles_loss_and_greedy_curriculum_schedule():
     module = _module(
         use_smiles_decoder=True,
+        criterion_smiles_weight=1.0,
         greedy_probability_start=0.0,
         greedy_probability_end=1.0,
         teacher_only_steps=2,
@@ -177,8 +183,14 @@ def test_teacher_forced_smiles_loss_and_greedy_curriculum_schedule():
     assert module._greedy_probability_for_elapsed(2) == 0.0
     assert module._greedy_probability_for_elapsed(4) == 0.5
     assert module._greedy_probability_for_elapsed(6) == 1.0
+    assert module.graph_criterion.smiles_weight == 0.0
 
     batch = _batch()
+    greedy_output = module(batch, teacher_force_smiles=False)
+    greedy_losses = module._losses(
+        batch, greedy_output, include_smiles_loss=False
+    )
+    assert greedy_losses["loss_smiles"] == 0.0
     output = module(batch, teacher_force_smiles=True)
     losses = module._losses(batch, output, include_smiles_loss=True)
     assert torch.isfinite(losses["loss_smiles"])

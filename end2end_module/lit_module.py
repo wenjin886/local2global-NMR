@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import random
+import warnings
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import pytorch_lightning as pl
@@ -74,6 +75,7 @@ class EndToEndNMRModule(pl.LightningModule):
         topology_prior_checkpoint: Optional[str] = None,
         shift_model_checkpoint: Optional[str] = None,
         checkpoint_strict: bool = True,
+        freeze_nmr_to_graph: bool = True,
         freeze_topology_prior: bool = True,
         freeze_shift_model: bool = True,
         input_shifts_are_normalized: bool = True,
@@ -107,6 +109,14 @@ class EndToEndNMRModule(pl.LightningModule):
             raise ValueError("greedy_schedule must be 'linear' or 'cosine'")
         self.nmr_to_graph = nmr_to_graph
         self.graph_criterion = graph_criterion
+        if float(self.graph_criterion.smiles_weight) != 0.0:
+            warnings.warn(
+                "EndToEndNMRModule owns the teacher-only SMILES CE; "
+                "forcing graph_criterion.smiles_weight=0 to keep greedy "
+                "validation shape-safe.",
+                stacklevel=2,
+            )
+            self.graph_criterion.smiles_weight = 0.0
         self.topology_prior = topology_prior
         self.geometry_solver = geometry_solver
         self.coordinate_refiner = coordinate_refiner
@@ -140,6 +150,7 @@ class EndToEndNMRModule(pl.LightningModule):
             strict=checkpoint_strict,
         )
         self._set_frozen(self.shift_model, True)
+        self._set_frozen(self.nmr_to_graph, freeze_nmr_to_graph)
         self._set_frozen(self.topology_prior, freeze_topology_prior)
         self._validation_examples: List[Dict[str, Any]] = []
         self._curriculum_origin_step = 0
@@ -156,6 +167,8 @@ class EndToEndNMRModule(pl.LightningModule):
         # Lightning recursively toggles descendants. Keep frozen evaluators
         # deterministic while retaining autograd with respect to coordinates.
         self.shift_model.eval()
+        if bool(self.hparams.freeze_nmr_to_graph):
+            self.nmr_to_graph.eval()
         if bool(self.hparams.freeze_topology_prior):
             self.topology_prior.eval()
         return self
@@ -194,9 +207,17 @@ class EndToEndNMRModule(pl.LightningModule):
             # greedy generation.
             graph_inputs["smiles_input_ids"] = None
             graph_inputs["smiles_input_mask"] = None
-        graph_output = self.nmr_to_graph(
-            **graph_inputs, teacher_force_smiles=teacher_force_smiles
-        )
+        if bool(self.hparams.freeze_nmr_to_graph):
+            with torch.no_grad():
+                graph_output = self.nmr_to_graph(
+                    **graph_inputs,
+                    teacher_force_smiles=teacher_force_smiles,
+                )
+        else:
+            graph_output = self.nmr_to_graph(
+                **graph_inputs,
+                teacher_force_smiles=teacher_force_smiles,
+            )
         if (
             graph_output.get("heavy_edge_logits") is None
             or graph_output.get("h_attachment_logits") is None
@@ -206,14 +227,33 @@ class EndToEndNMRModule(pl.LightningModule):
         # Formal charge is not an independently observed input in GraphBatch.
         # Neutral zeros avoid leaking it from target SMILES/graph labels.
         formal_charges = torch.zeros_like(batch.atom_types)
-        prior_output = self.topology_prior(
-            atomic_numbers=batch.atom_types,
-            formal_charges=formal_charges,
-            atom_mask=batch.atom_mask,
-            raw_heavy_edge_logits=graph_output["heavy_edge_logits"],
-            raw_h_attachment_logits=graph_output["h_attachment_logits"],
-            **masks,
+        freeze_entire_upstream = bool(
+            self.hparams.freeze_nmr_to_graph
+            and self.hparams.freeze_topology_prior
         )
+        if freeze_entire_upstream:
+            with torch.no_grad():
+                prior_output = self.topology_prior(
+                    atomic_numbers=batch.atom_types,
+                    formal_charges=formal_charges,
+                    atom_mask=batch.atom_mask,
+                    raw_heavy_edge_logits=graph_output["heavy_edge_logits"],
+                    raw_h_attachment_logits=graph_output[
+                        "h_attachment_logits"
+                    ],
+                    **masks,
+                )
+        else:
+            prior_output = self.topology_prior(
+                atomic_numbers=batch.atom_types,
+                formal_charges=formal_charges,
+                atom_mask=batch.atom_mask,
+                raw_heavy_edge_logits=graph_output["heavy_edge_logits"],
+                raw_h_attachment_logits=graph_output[
+                    "h_attachment_logits"
+                ],
+                **masks,
+            )
         geometry = self.geometry_solver(
             atomic_numbers=batch.atom_types,
             atom_mask=batch.atom_mask,
@@ -223,6 +263,8 @@ class EndToEndNMRModule(pl.LightningModule):
             h_attachment_logits=prior_output[
                 "corrected_h_attachment_logits"
             ],
+            # Freezing pretrained modules must not silently change the
+            # geometry algorithm or its public differentiable semantics.
             differentiable=True,
             geometry_probabilities_override=torch.softmax(
                 prior_output["geometry_logits"], dim=-1

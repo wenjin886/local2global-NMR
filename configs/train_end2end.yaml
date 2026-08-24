@@ -51,6 +51,9 @@ lit_module:
   topology_prior_checkpoint: ${topology_prior_checkpoint}
   shift_model_checkpoint: ${shift_model_checkpoint}
   checkpoint_strict: true
+  # Stage 1 trains only coordinate_refiner. Resume from the original component
+  # checkpoints, not from an end-to-end checkpoint whose graph model drifted.
+  freeze_nmr_to_graph: true
   freeze_topology_prior: true
   freeze_shift_model: true
   input_shifts_are_normalized: true

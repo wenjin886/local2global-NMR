@@ -553,3 +553,14 @@ entire phase teacher-forced; on a later resume, changing only
 the configured transition. Teacher batches receive the separate SMILES CE;
 greedy batches do not. Validation is always greedy, and W&B records both the
 scheduled and realized greedy ratios.
+
+The default first stage freezes all pretrained components
+(`NMRToGraph`, `SoftTopologyPrior`, and `Shift3DModule`) and optimizes only the
+coordinate refiner. Teacher-forced target SMILES still conditions the BiXT
+joint memory, while graph and SMILES losses remain in the reported objective;
+because their producing module is frozen, those two losses do not update the
+refiner until NMRToGraph is later unfrozen. Geometry initialization retains its
+normal differentiable mode independently of freeze policy. Gradients pass
+through the frozen Shift3D model from NMR loss to refined coordinates. Start
+this stage from the original component checkpoints rather than a drifted
+end-to-end checkpoint.
