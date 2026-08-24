@@ -22,6 +22,7 @@ from src.data.constants import (
     SMILES_PAD_INDEX,
 )
 from src.data.dataset import GraphBatch
+from src.lit.module import LitNMRToGraph
 from src.model.loss import NMRGraphLoss
 from src.model.nmr_to_graph import NMRToGraph
 
@@ -715,6 +716,9 @@ class EndToEndNMRModule(pl.LightningModule):
         attachments = output["topology"][
             "corrected_h_attachment_logits"
         ].argmax(dim=-1)
+        raw_attachments = output["graph"]["h_attachment_logits"].argmax(
+            dim=-1
+        )
         predicted_tokens = output["graph"].get("smiles_token_ids")
         shift_batch = output["shift_batch"]
         for index in range(min(remaining, batch.atom_types.size(0))):
@@ -747,6 +751,9 @@ class EndToEndNMRModule(pl.LightningModule):
                         index, :atom_count
                     ].detach().cpu(),
                     "predicted_attachments": attachments[
+                        index, :atom_count
+                    ].detach().cpu(),
+                    "raw_attachments": raw_attachments[
                         index, :atom_count
                     ].detach().cpu(),
                     "target_smiles": self._decode_smiles(
@@ -828,40 +835,6 @@ class EndToEndNMRModule(pl.LightningModule):
         figure.clear()
         return image
 
-    @staticmethod
-    def _render_graph(atom_types: torch.Tensor, bonds: torch.Tensor):
-        import networkx as nx
-        import numpy as np
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-        from matplotlib.figure import Figure
-
-        graph = nx.Graph()
-        for index, atomic_number in enumerate(atom_types.tolist()):
-            graph.add_node(index, label=str(atomic_number))
-        for left in range(atom_types.numel()):
-            for right in range(left + 1, atom_types.numel()):
-                if int(bonds[left, right]) > 0:
-                    graph.add_edge(left, right, order=int(bonds[left, right]))
-        positions = nx.spring_layout(graph, seed=17)
-        figure = Figure(figsize=(4.2, 3.6), dpi=110)
-        canvas = FigureCanvasAgg(figure)
-        axis = figure.add_subplot(111)
-        nx.draw_networkx(
-            graph,
-            positions,
-            labels=nx.get_node_attributes(graph, "label"),
-            node_size=350,
-            font_size=7,
-            width=[graph.edges[e]["order"] for e in graph.edges],
-            ax=axis,
-        )
-        axis.set_axis_off()
-        figure.tight_layout(pad=0.1)
-        canvas.draw()
-        image = np.asarray(canvas.buffer_rgba())[..., :3].copy()
-        figure.clear()
-        return image
-
     def on_validation_epoch_end(self) -> None:
         if self.trainer.sanity_checking:
             return
@@ -883,21 +856,33 @@ class EndToEndNMRModule(pl.LightningModule):
                 / f"epoch_{int(self.current_epoch):03d}_step_{int(self.global_step)}"
             )
         for sample_index, example in enumerate(examples):
-            target_bonds = self._all_atom_bonds(
-                example["atom_types"],
-                example["target_edges"],
-                example["target_attachments"],
-            )
             predicted_bonds = self._all_atom_bonds(
                 example["atom_types"],
                 example["corrected_edges"],
                 example["predicted_attachments"],
             )
-            raw_bonds = self._all_atom_bonds(
+            atom_mask = torch.ones_like(example["atom_types"], dtype=torch.bool)
+            target_graph = LitNMRToGraph._explicit_h_graph(
                 example["atom_types"],
+                atom_mask,
+                example["target_edges"],
+                example["target_attachments"],
+            )
+            raw_graph = LitNMRToGraph._explicit_h_graph(
+                example["atom_types"],
+                atom_mask,
                 example["raw_edges"],
+                example["raw_attachments"],
+            )
+            corrected_graph = LitNMRToGraph._explicit_h_graph(
+                example["atom_types"],
+                atom_mask,
+                example["corrected_edges"],
                 example["predicted_attachments"],
             )
+            # Use one target-derived heavy-atom layout for all three panels so
+            # changed/missing/spurious bonds are visually comparable.
+            heavy_positions = LitNMRToGraph._graph_layout(target_graph)
             graph_smiles = graph_to_canonical_smiles(
                 example["atom_types"], predicted_bonds
             )
@@ -951,13 +936,17 @@ class EndToEndNMRModule(pl.LightningModule):
                         )
                     ),
                     wandb.Image(
-                        self._render_graph(example["atom_types"], target_bonds)
+                        LitNMRToGraph._render_graph(
+                            target_graph, heavy_positions
+                        )
                     ),
                     wandb.Image(
-                        self._render_graph(example["atom_types"], raw_bonds)
+                        LitNMRToGraph._render_graph(raw_graph, heavy_positions)
                     ),
                     wandb.Image(
-                        self._render_graph(example["atom_types"], predicted_bonds)
+                        LitNMRToGraph._render_graph(
+                            corrected_graph, heavy_positions
+                        )
                     ),
                     example["h_target"].tolist(),
                     example["h_prediction"].tolist(),
