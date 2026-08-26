@@ -1,6 +1,11 @@
 """End-to-end NMR-to-graph-to-geometry training components."""
 
 from .lit_module import EndToEndNMRModule
+from .prior_lit_module import PriorOnlyNMRModule
 from .refiner import SpectrumConditionedEGNNRefiner
 
-__all__ = ["EndToEndNMRModule", "SpectrumConditionedEGNNRefiner"]
+__all__ = [
+    "EndToEndNMRModule",
+    "PriorOnlyNMRModule",
+    "SpectrumConditionedEGNNRefiner",
+]

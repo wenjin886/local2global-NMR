@@ -501,6 +501,31 @@ python -m pytest -q
 
 # End-to-end NMR cycle training
 
+## Prior-only graph correction
+
+The first curriculum stage stops before all 3D components. It keeps
+`NMRToGraph` frozen, trains only `SoftTopologyPrior`, uses teacher-forced SMILES
+during training and always uses greedy decoding during validation:
+
+```bash
+export DATA_PATH=/path/to/uspto/preprocessed
+export NMR2GRAPH_CKPT=/path/to/nmr2graph.ckpt
+export TOPOLOGY_PRIOR_CKPT=/path/to/local2geo_prior.ckpt
+python -m end2end_module.train_prior
+```
+
+`configs/train_prior_only.yaml` does not instantiate the geometry solver,
+coordinate refiner or Shift3D. The frozen raw graph loss is logged only as a
+baseline; corrected edge, exchangeable-H attachment, H-count, neighbor-count,
+carbon-valence and residual losses train the prior. Validation records raw and
+corrected typed/connectivity exact match, edge accuracy, exact-match
+improvement, and conditional `prior_fix_rate` / `prior_break_rate`. A fixed
+nine-molecule W&B table uses a shared target-derived layout to compare target,
+raw and corrected graphs.
+
+The saved state uses the `topology_prior.*` prefix, so its prior weights can be
+loaded directly by the later end-to-end module.
+
 The first end-to-end stage is implemented in `end2end_module` and configured
 by `configs/train_end2end.yaml`:
 

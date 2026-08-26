@@ -11,6 +11,109 @@ from local2geo_module.constants import BOND_LENGTH_SCALES
 from local2geo_module.visualization import molecule_from_graph
 
 
+def graph_exact_match_vectors(
+    atom_types: torch.Tensor,
+    atom_mask: torch.Tensor,
+    target_bond_types: torch.Tensor,
+    target_h_attachment: torch.Tensor,
+    predicted_edge_logits: torch.Tensor,
+    predicted_h_attachment_probabilities: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    """Return per-molecule exact-match vectors with exchangeable hydrogens.
+
+    Heavy-atom connectivity and typed bonds are evaluated on aligned atom
+    slots. Explicit hydrogen identities are permutation invariant: only the
+    number of hydrogens assigned to each heavy atom must match.
+    """
+    predicted_bond_types = predicted_edge_logits.argmax(dim=-1)
+    predicted_parents = predicted_h_attachment_probabilities.argmax(dim=-1)
+    heavy_mask = atom_mask & atom_types.ne(1)
+    hydrogen_mask = atom_mask & atom_types.eq(1)
+    pair_mask = heavy_mask[:, :, None] & heavy_mask[:, None, :]
+    pair_mask = pair_mask & torch.triu(
+        torch.ones_like(pair_mask, dtype=torch.bool), diagonal=1
+    )
+    pair_mask = pair_mask & target_bond_types.ge(0)
+
+    target_h_counts = predicted_h_attachment_probabilities.new_zeros(
+        atom_types.shape
+    )
+    predicted_h_counts = torch.zeros_like(target_h_counts)
+    for sample_index in range(atom_types.size(0)):
+        valid_target_h = hydrogen_mask[sample_index] & target_h_attachment[
+            sample_index
+        ].ge(0)
+        target_parents = target_h_attachment[
+            sample_index, valid_target_h
+        ].long()
+        if target_parents.numel():
+            target_h_counts[sample_index].scatter_add_(
+                0,
+                target_parents,
+                torch.ones_like(target_parents, dtype=target_h_counts.dtype),
+            )
+        sample_predicted_parents = predicted_parents[
+            sample_index, hydrogen_mask[sample_index]
+        ]
+        if sample_predicted_parents.numel():
+            predicted_h_counts[sample_index].scatter_add_(
+                0,
+                sample_predicted_parents,
+                torch.ones_like(
+                    sample_predicted_parents,
+                    dtype=predicted_h_counts.dtype,
+                ),
+            )
+
+    typed_exact = []
+    connectivity_exact = []
+    edge_accuracies = []
+    connectivity_accuracies = []
+    h_count_exact = []
+    for sample_index in range(atom_types.size(0)):
+        sample_pairs = pair_mask[sample_index]
+        predicted = predicted_bond_types[sample_index, sample_pairs]
+        target = target_bond_types[sample_index, sample_pairs]
+        typed_equal = predicted.eq(target)
+        connectivity_equal = predicted.ne(0).eq(target.ne(0))
+        sample_h_exact = predicted_h_counts[
+            sample_index, heavy_mask[sample_index]
+        ].eq(target_h_counts[sample_index, heavy_mask[sample_index]]).all()
+        typed_edges_exact = (
+            typed_equal.all()
+            if typed_equal.numel()
+            else torch.ones((), dtype=torch.bool, device=atom_types.device)
+        )
+        connectivity_edges_exact = (
+            connectivity_equal.all()
+            if connectivity_equal.numel()
+            else torch.ones((), dtype=torch.bool, device=atom_types.device)
+        )
+        typed_exact.append((typed_edges_exact & sample_h_exact).float())
+        connectivity_exact.append(
+            (connectivity_edges_exact & sample_h_exact).float()
+        )
+        h_count_exact.append(sample_h_exact.float())
+        edge_accuracies.append(
+            typed_equal.float().mean()
+            if typed_equal.numel()
+            else target_h_counts.new_tensor(1.0)
+        )
+        connectivity_accuracies.append(
+            connectivity_equal.float().mean()
+            if connectivity_equal.numel()
+            else target_h_counts.new_tensor(1.0)
+        )
+
+    return {
+        "typed_exact": torch.stack(typed_exact),
+        "connectivity_exact": torch.stack(connectivity_exact),
+        "h_count_exact": torch.stack(h_count_exact),
+        "edge_accuracy": torch.stack(edge_accuracies),
+        "connectivity_accuracy": torch.stack(connectivity_accuracies),
+    }
+
+
 def graph_to_canonical_smiles(
     atomic_numbers: torch.Tensor,
     bond_types: torch.Tensor,
