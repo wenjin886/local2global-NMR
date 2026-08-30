@@ -336,6 +336,16 @@ class PriorOnlyNMRModule(pl.LightningModule):
         logged_metrics = {
             key: value for key, value in metrics.items() if not key.startswith("_")
         }
+        if stage == "val":
+            # These molecule-level exact metrics are reconstructed from global
+            # counts in on_validation_epoch_end. This is robust to older
+            # Lightning releases and makes the checkpoint monitor explicit.
+            for key in (
+                "raw_graph_exact_match",
+                "corrected_graph_exact_match",
+                "graph_exact_match_improvement",
+            ):
+                logged_metrics.pop(key)
         self.log_dict(
             {
                 f"{stage}/{key}": value
@@ -444,6 +454,27 @@ class PriorOnlyNMRModule(pl.LightningModule):
         raw_correct = self._distributed_sum(self._val_raw_correct)
         fixed = self._distributed_sum(self._val_fixed)
         broken = self._distributed_sum(self._val_broken)
+        total = raw_wrong + raw_correct
+        if total.item() <= 0:
+            raise RuntimeError(
+                "The full validation loader produced no samples; prior-only "
+                "checkpoint metrics cannot be computed."
+            )
+        raw_exact = raw_correct / total
+        corrected_exact = (raw_correct - broken + fixed) / total
+        self.log(
+            "val/raw_graph_exact_match", raw_exact.float(), sync_dist=False
+        )
+        self.log(
+            "val/corrected_graph_exact_match",
+            corrected_exact.float(),
+            sync_dist=False,
+        )
+        self.log(
+            "val/graph_exact_match_improvement",
+            (corrected_exact - raw_exact).float(),
+            sync_dist=False,
+        )
         self.log(
             "val/prior_fix_rate",
             (fixed / raw_wrong.clamp_min(1.0)).float(),

@@ -221,6 +221,39 @@ def test_corrected_graph_supervision_reaches_trainable_prior():
     )
 
 
+def test_zero_weight_supervised_losses_are_skipped_but_metrics_remain(
+    monkeypatch,
+):
+    module = _module(
+        freeze_topology_prior=False,
+        graph_loss_weight=0.0,
+        corrected_edge_loss_weight=0.0,
+        corrected_attachment_loss_weight=0.0,
+        smiles_loss_weight=0.0,
+    )
+    batch = _batch()
+    output = module(batch, teacher_force_smiles=False)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("zero-weight supervised loss was evaluated")
+
+    monkeypatch.setattr(module.graph_criterion, "forward", fail_if_called)
+    monkeypatch.setattr(
+        module.graph_criterion,
+        "_permutation_invariant_attachment_loss",
+        fail_if_called,
+    )
+    monkeypatch.setattr(
+        "end2end_module.lit_module.F.cross_entropy", fail_if_called
+    )
+
+    losses = module._losses(batch, output)
+    assert losses["loss_graph"] == 0.0
+    assert losses["loss_corrected_edge"] == 0.0
+    assert losses["loss_corrected_attachment"] == 0.0
+    assert 0.0 <= float(losses["corrected_graph_exact_match"]) <= 1.0
+
+
 def test_generated_structure_metrics_smiles_and_xyz(tmp_path: Path):
     atom_types = torch.tensor([6, 6, 1, 1, 1, 1, 1, 1])
     bonds = torch.zeros((8, 8), dtype=torch.long)

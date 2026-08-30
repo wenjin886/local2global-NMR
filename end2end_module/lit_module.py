@@ -334,33 +334,51 @@ class EndToEndNMRModule(pl.LightningModule):
         output: Mapping[str, Any],
         include_smiles_loss: bool = False,
     ) -> Dict[str, torch.Tensor]:
-        graph_loss, graph_parts = self.graph_criterion(
-            outputs=output["graph"],
-            atom_types=batch.atom_types,
-            bond_types=batch.bond_types,
-            h_attachment=batch.h_attachment,
-            heavy_fragment_labels=batch.heavy_fragment_labels,
-            h_parent_fragment_labels=batch.h_parent_fragment_labels,
-            h_parent_types=batch.h_parent_types,
-            smiles_target_ids=batch.smiles_target_ids,
-        )
-        sample_shift_losses = [
-            self.shift_model._sample_losses(
-                output["shift_batch"], output["shift"], index
+        zero = output["graph"]["heavy_edge_logits"].sum() * 0.0
+
+        # Keep target graphs in the batch for metrics and visualizations, but
+        # do not even evaluate a supervised objective when its weight is zero.
+        # This makes the SSL optimization path independent of graph labels.
+        graph_loss = zero
+        graph_parts: Dict[str, torch.Tensor] = {}
+        if float(self.hparams.graph_loss_weight) != 0.0:
+            graph_loss, graph_parts = self.graph_criterion(
+                outputs=output["graph"],
+                atom_types=batch.atom_types,
+                bond_types=batch.bond_types,
+                h_attachment=batch.h_attachment,
+                heavy_fragment_labels=batch.heavy_fragment_labels,
+                h_parent_fragment_labels=batch.h_parent_fragment_labels,
+                h_parent_types=batch.h_parent_types,
+                smiles_target_ids=batch.smiles_target_ids,
             )
-            for index in range(batch.atom_types.size(0))
-        ]
+
+        nmr_loss = zero
         shift_metrics = {
-            key: torch.stack([sample[key] for sample in sample_shift_losses]).mean()
-            for key in sample_shift_losses[0]
+            "h_nearest_mae_ppm": zero,
+            "c_nearest_mae_ppm": zero,
         }
-        nmr_loss = (
-            float(self.shift_model.hparams.h_loss_weight)
-            * shift_metrics["h_set_loss"]
-            + float(self.shift_model.hparams.c_loss_weight)
-            * shift_metrics["c_set_loss"]
-        )
-        smiles_loss = nmr_loss.sum() * 0.0
+        if float(self.hparams.nmr_loss_weight) != 0.0:
+            sample_shift_losses = [
+                self.shift_model._sample_losses(
+                    output["shift_batch"], output["shift"], index
+                )
+                for index in range(batch.atom_types.size(0))
+            ]
+            shift_metrics = {
+                key: torch.stack(
+                    [sample[key] for sample in sample_shift_losses]
+                ).mean()
+                for key in sample_shift_losses[0]
+            }
+            nmr_loss = (
+                float(self.shift_model.hparams.h_loss_weight)
+                * shift_metrics["h_set_loss"]
+                + float(self.shift_model.hparams.c_loss_weight)
+                * shift_metrics["c_set_loss"]
+            )
+
+        smiles_loss = zero
         if include_smiles_loss and float(self.hparams.smiles_loss_weight) > 0:
             smiles_logits = output["graph"].get("smiles_logits")
             if smiles_logits is None:
@@ -378,41 +396,37 @@ class EndToEndNMRModule(pl.LightningModule):
                 ignore_index=SMILES_PAD_INDEX,
             )
         geometry = output["geometry"]
-        refined_terms = self.geometry_solver.terms(
-            positions=output["refined"]["coordinates"].float(),
-            probabilities=geometry["edge_probabilities"],
-            geometry_probabilities=geometry["geometry_probabilities"],
-            atom_mask=batch.atom_mask,
-            pair_mask=geometry["pair_mask"],
-            covalent_radii=geometry["covalent_radii"],
-            vdw_radii=geometry["vdw_radii"],
-            reduction="mean",
-            local_geometry_priors=output["topology"],
-        )
-        chemistry_loss = self.geometry_solver.total(refined_terms)
-        displacement_loss = output["refined"]["displacement"].square().sum(
-            dim=-1
-        )[batch.atom_mask].mean()
+        refined_terms: Dict[str, torch.Tensor] = {}
+        chemistry_loss = zero
+        if float(self.hparams.chemistry_loss_weight) != 0.0:
+            refined_terms = self.geometry_solver.terms(
+                positions=output["refined"]["coordinates"].float(),
+                probabilities=geometry["edge_probabilities"],
+                geometry_probabilities=geometry["geometry_probabilities"],
+                atom_mask=batch.atom_mask,
+                pair_mask=geometry["pair_mask"],
+                covalent_radii=geometry["covalent_radii"],
+                vdw_radii=geometry["vdw_radii"],
+                reduction="mean",
+                local_geometry_priors=output["topology"],
+            )
+            chemistry_loss = self.geometry_solver.total(refined_terms)
+
+        displacement_loss = zero
+        if float(self.hparams.displacement_loss_weight) != 0.0:
+            displacement_loss = output["refined"]["displacement"].square().sum(
+                dim=-1
+            )[batch.atom_mask].mean()
+
         corrected = output["topology"]
         heavy_pair_mask = output["geometry"]["heavy_pair_mask"]
         upper = torch.triu(
             torch.ones_like(heavy_pair_mask, dtype=torch.bool), diagonal=1
         )
-        edge_mask = heavy_pair_mask & upper & batch.bond_types.ge(0)
+        edge_mask = heavy_pair_mask & upper
         corrected_edge_logits = corrected["corrected_heavy_edge_logits"]
+        corrected_edge_loss = zero
         if edge_mask.any():
-            class_weights = corrected_edge_logits.new_full(
-                (corrected_edge_logits.size(-1),),
-                float(self.graph_criterion.edge_bond_class_weight),
-            )
-            class_weights[0] = float(
-                self.graph_criterion.edge_none_class_weight
-            )
-            corrected_edge_loss = F.cross_entropy(
-                corrected_edge_logits[edge_mask],
-                batch.bond_types[edge_mask].long(),
-                weight=class_weights,
-            )
             edge_probabilities = torch.softmax(
                 corrected_edge_logits[edge_mask], dim=-1
             )
@@ -421,20 +435,36 @@ class EndToEndNMRModule(pl.LightningModule):
                 * edge_probabilities.clamp_min(1e-12).log()
             ).sum(-1).mean()
             corrected_edge_confidence = edge_probabilities.max(-1).values.mean()
+            if float(self.hparams.corrected_edge_loss_weight) != 0.0:
+                supervised_edge_mask = edge_mask & batch.bond_types.ge(0)
+                if supervised_edge_mask.any():
+                    class_weights = corrected_edge_logits.new_full(
+                        (corrected_edge_logits.size(-1),),
+                        float(self.graph_criterion.edge_bond_class_weight),
+                    )
+                    class_weights[0] = float(
+                        self.graph_criterion.edge_none_class_weight
+                    )
+                    corrected_edge_loss = F.cross_entropy(
+                        corrected_edge_logits[supervised_edge_mask],
+                        batch.bond_types[supervised_edge_mask].long(),
+                        weight=class_weights,
+                    )
         else:
-            corrected_edge_loss = corrected_edge_logits.sum() * 0.0
-            corrected_edge_entropy = corrected_edge_loss
-            corrected_edge_confidence = corrected_edge_loss
+            corrected_edge_entropy = zero
+            corrected_edge_confidence = zero
         corrected_attachment_probabilities = output["geometry"][
             "h_attachment_probabilities"
         ]
-        corrected_attachment_loss = (
-            self.graph_criterion._permutation_invariant_attachment_loss(
-                corrected_attachment_probabilities,
-                output["geometry"]["hydrogen_mask"],
-                batch.h_attachment,
+        corrected_attachment_loss = zero
+        if float(self.hparams.corrected_attachment_loss_weight) != 0.0:
+            corrected_attachment_loss = (
+                self.graph_criterion._permutation_invariant_attachment_loss(
+                    corrected_attachment_probabilities,
+                    output["geometry"]["hydrogen_mask"],
+                    batch.h_attachment,
+                )
             )
-        )
         attachment_mask = output["geometry"]["hydrogen_mask"]
         attachment_entropy = -(
             corrected_attachment_probabilities.clamp_min(1e-12).log()
@@ -443,22 +473,22 @@ class EndToEndNMRModule(pl.LightningModule):
         corrected_attachment_entropy = (
             attachment_entropy[attachment_mask].mean()
             if attachment_mask.any()
-            else corrected_attachment_loss * 0.0
+            else zero
         )
-        edge_residual = corrected["edge_residual"][heavy_pair_mask]
-        attachment_residual = corrected["attachment_residual"][
-            output["geometry"]["attachment_mask"]
-        ]
-        residual_terms = []
-        if edge_residual.numel():
-            residual_terms.append(edge_residual.square().mean())
-        if attachment_residual.numel():
-            residual_terms.append(attachment_residual.square().mean())
-        topology_residual_loss = (
-            torch.stack(residual_terms).mean()
-            if residual_terms
-            else corrected_edge_logits.sum() * 0.0
-        )
+
+        topology_residual_loss = zero
+        if float(self.hparams.topology_residual_loss_weight) != 0.0:
+            edge_residual = corrected["edge_residual"][heavy_pair_mask]
+            attachment_residual = corrected["attachment_residual"][
+                output["geometry"]["attachment_mask"]
+            ]
+            residual_terms = []
+            if edge_residual.numel():
+                residual_terms.append(edge_residual.square().mean())
+            if attachment_residual.numel():
+                residual_terms.append(attachment_residual.square().mean())
+            if residual_terms:
+                topology_residual_loss = torch.stack(residual_terms).mean()
         total = (
             float(self.hparams.graph_loss_weight) * graph_loss
             + float(self.hparams.nmr_loss_weight) * nmr_loss
