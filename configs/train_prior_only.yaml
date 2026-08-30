@@ -4,12 +4,12 @@ project: end2end-NMR
 data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
-group: prior-only-correction
-exp_name: teacher-train-greedy-val-dim512
-exp_save_dir_name: ${oc.env:OUTPUT_DIR,outputs}/${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+group: step-5-end2end
+exp_name: prior-only-correction-dim512
+exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
-ckpt_path: null
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/prior-only-correction-dim512_2026-08-26_20-14-04/checkpoints/last.ckpt
 test: false
 optimized_metric: val/corrected_graph_exact_match
 
@@ -24,7 +24,7 @@ datamodule:
   train_path: ${data_path}/train.pt
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
-  train_batch_size: 64
+  train_batch_size: 32
   val_batch_size: 32
   num_workers: 1
   pin_memory: true
@@ -142,8 +142,8 @@ logger:
 trainer:
   _target_: pytorch_lightning.Trainer
   accelerator: auto
-  devices: 2
-  strategy: ddp
+  devices: 1
+  # strategy: ddp
   max_epochs: 100
   gradient_clip_val: 1.0
   log_every_n_steps: 20

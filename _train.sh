@@ -56,11 +56,13 @@ COORD_PATH=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/END_NMR/data/uspto/downl
 # python -m shift3d_module.train
 
 # === END2END ===
+# 1. prior-only correction
 export NMR2GRAPH_CKPT=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-2-nmr2graph-edge/joint-bixt-graph-d512-nonebondw0.8-smiw1.0-neighborw1.0-Cvalw0.25_2026-08-23_09-14-09/checkpoints/last.ckpt
 export TOPOLOGY_PRIOR_CKPT=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-3-geoinit/dim512-bs32-fixnumatomsbug_2026-07-27_19-23-13/checkpoints/last.ckpt
-export SHIFT3D_CKPT=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-4-3d2nmr/dim512-bs64_2026-08-24_15-36-51/checkpoints/last.ckpt
+python -m end2end_module.train_prior
 
-python -m end2end_module.train
+# export SHIFT3D_CKPT=/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-4-3d2nmr/dim512-bs64_2026-08-24_15-36-51/checkpoints/last.ckpt
+# python -m end2end_module.train
 
 # For Portal
 # ps -fu $USER | grep -E "python|wandb"
