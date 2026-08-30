@@ -87,8 +87,8 @@ lit_module:
     h_count_weight: 0.0
     h_entropy_weight: 0.0
     edge_weight: 0.0
-    edge_none_class_weight: 0.0
-    edge_bond_class_weight: 0.0
+    edge_none_class_weight: 1.0
+    edge_bond_class_weight: 1.0
     edge_total_neighbor_count_weight: 0.0
     fragment_edge_consistency_weight: 0.0
     smiles_weight: 1.0

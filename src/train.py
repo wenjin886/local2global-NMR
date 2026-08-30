@@ -13,6 +13,7 @@ def main(cfg: DictConfig) -> Optional[float]:
 
     datamodule = hydra.utils.instantiate(cfg.datamodule)
     lit_module = hydra.utils.instantiate(cfg.lit_module)
+    print(lit_module)
     callbacks = [
         hydra.utils.instantiate(callback)
         for callback in cfg.get("callbacks", {}).values()
