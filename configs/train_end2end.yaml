@@ -9,7 +9,7 @@ exp_name: refiner-greedy-dim512
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
-ckpt_path: null
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/refiner-greedy-dim512_2026-08-30_19-00-15/checkpoints/last.ckpt
 # At a stage boundary, set this to the previous end-to-end checkpoint and keep
 # ckpt_path=null. This restores weights without its incompatible optimizer.
 weights_only_checkpoint: null
