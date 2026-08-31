@@ -6,8 +6,10 @@ from end2end_module.lit_module import EndToEndNMRModule
 from end2end_module.metrics import (
     geometry_quality,
     graph_to_canonical_smiles,
+    molecule_from_xyz,
     rdkit_graph_quality,
     write_xyz,
+    xyz_graph_metrics,
 )
 from end2end_module.refiner import SpectrumConditionedEGNNRefiner
 from local2geo_module.geometry_solver import DifferentiableGeometrySolver
@@ -176,6 +178,12 @@ def test_refiner_is_translation_equivariant():
     # The refiner centres every molecule, so translated inputs produce the
     # same centred output (translation invariance under the chosen gauge).
     assert torch.allclose(first, second, atol=1e-5, rtol=1e-5)
+    diagnostics = refiner(coordinates=coordinates, **arguments)
+    assert float(diagnostics["displacement_max"]) >= 0.0
+    assert float(diagnostics["coordinate_step_max_fraction"]) >= 0.0
+    assert 0.0 <= float(
+        diagnostics["coordinate_step_saturation_fraction"]
+    ) <= 1.0
 
 
 def test_teacher_forced_smiles_loss_and_greedy_curriculum_schedule():
@@ -271,9 +279,37 @@ def test_generated_structure_metrics_smiles_and_xyz(tmp_path: Path):
     covalent = torch.tensor([0.76, 0.76] + [0.31] * 6)
     vdw = torch.tensor([1.70, 1.70] + [1.20] * 6)
     assert graph_to_canonical_smiles(atom_types, bonds) == "CC"
-    assert rdkit_graph_quality(atom_types, bonds)["validity"] == 1.0
+    graph_quality = rdkit_graph_quality(atom_types, bonds)
+    assert graph_quality["validity"] == 1.0
+    assert graph_quality["graph_connected"] == 1.0
     quality = geometry_quality(atom_types, coordinates, bonds, covalent, vdw)
     assert quality["finite_coordinate_fraction"] == 1.0
+    xyz_molecule, xyz_bonds, xyz_connected = molecule_from_xyz(
+        atom_types, coordinates
+    )
+    assert xyz_molecule is not None
+    assert xyz_connected == 1.0
+    assert torch.equal(xyz_bonds, bonds)
+    xyz_quality = xyz_graph_metrics(atom_types, coordinates, "CC", bonds)
+    assert xyz_quality["xyz_smiles"] == "CC"
+    assert xyz_quality["xyz_target_exact_match"] == 1.0
+    assert xyz_quality["xyz_corrected_graph_exact_match"] == 1.0
+    assert xyz_quality["xyz_corrected_typed_edge_agreement"] == 1.0
     path = tmp_path / "ethane.xyz"
     write_xyz(path, atom_types, coordinates, "ethane")
     assert path.read_text().splitlines()[0] == "8"
+
+
+def test_xyz_connected_is_independent_of_corrected_graph():
+    atom_types = torch.tensor([6, 6])
+    coordinates = torch.tensor([[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]])
+    corrected_bonds = torch.tensor([[0, 1], [1, 0]])
+    assert rdkit_graph_quality(atom_types, corrected_bonds)[
+        "graph_connected"
+    ] == 1.0
+    xyz_quality = xyz_graph_metrics(
+        atom_types, coordinates, "CC", corrected_bonds
+    )
+    assert xyz_quality["xyz_connected"] == 0.0
+    assert xyz_quality["xyz_target_exact_match"] == 0.0
+    assert xyz_quality["xyz_corrected_graph_exact_match"] == 0.0

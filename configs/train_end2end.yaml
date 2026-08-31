@@ -65,7 +65,9 @@ lit_module:
   graph_loss_weight: 0.0
   nmr_loss_weight: 1.0
   chemistry_loss_weight: 0.1
-  displacement_loss_weight: 0.01
+  # Keep a weak drift regularizer without preventing the refiner from repairing
+  # substantially displaced fragments.
+  displacement_loss_weight: 0.001
   # Correct-class cross entropy also sharpens confidence. We deliberately do
   # not minimize entropy alone, which could reinforce a confidently wrong edge.
   corrected_edge_loss_weight: 0.0
@@ -168,7 +170,8 @@ lit_module:
     num_layers: 4
     num_rbf: 32
     distance_cutoff: 8.0 # rbf_max_distance; RBF centers = linspace(0, distance_cutoff, num_rbf)
-    max_coordinate_step: 0.5
+    # Total nominal movement budget across all EGNN layers (angstrom).
+    max_coordinate_step: 1.5
     dropout: 0.0
 
   shift_model:

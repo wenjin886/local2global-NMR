@@ -32,6 +32,7 @@ from .metrics import (
     graph_to_canonical_smiles,
     rdkit_graph_quality,
     write_xyz,
+    xyz_graph_metrics,
 )
 
 
@@ -90,7 +91,7 @@ class EndToEndNMRModule(pl.LightningModule):
         graph_loss_weight: float = 1.0,
         nmr_loss_weight: float = 0.01,
         chemistry_loss_weight: float = 0.1,
-        displacement_loss_weight: float = 0.01,
+        displacement_loss_weight: float = 0.001,
         smiles_loss_weight: float = 1.0,
         corrected_edge_loss_weight: float = 1.0,
         corrected_attachment_loss_weight: float = 1.0,
@@ -517,6 +518,18 @@ class EndToEndNMRModule(pl.LightningModule):
             "corrected_attachment_entropy": corrected_attachment_entropy,
             "h_nearest_mae_ppm": shift_metrics["h_nearest_mae_ppm"],
             "c_nearest_mae_ppm": shift_metrics["c_nearest_mae_ppm"],
+            "refiner_displacement_rms_angstrom": output["refined"][
+                "displacement_rms"
+            ],
+            "refiner_displacement_max_angstrom": output["refined"][
+                "displacement_max"
+            ],
+            "refiner_step_max_fraction": output["refined"][
+                "coordinate_step_max_fraction"
+            ],
+            "refiner_step_saturation_fraction": output["refined"][
+                "coordinate_step_saturation_fraction"
+            ],
         }
         values.update(
             {f"graph_{key}": value for key, value in graph_parts.items()}
@@ -762,6 +775,22 @@ class EndToEndNMRModule(pl.LightningModule):
                     "coordinates": output["refined"]["coordinates"][
                         index, mask
                     ].detach().cpu(),
+                    "displacement_rms_angstrom": float(
+                        output["refined"]["displacement_rms_per_sample"][index]
+                    ),
+                    "displacement_max_angstrom": float(
+                        output["refined"]["displacement_max_per_sample"][index]
+                    ),
+                    "coordinate_step_max_fraction": float(
+                        output["refined"][
+                            "coordinate_step_max_fraction_per_sample"
+                        ][index]
+                    ),
+                    "coordinate_step_saturation_fraction": float(
+                        output["refined"][
+                            "coordinate_step_saturation_fraction_per_sample"
+                        ][index]
+                    ),
                     "covalent_radii": output["geometry"]["covalent_radii"][
                         index, mask
                     ].detach().cpu(),
@@ -919,6 +948,12 @@ class EndToEndNMRModule(pl.LightningModule):
             graph_quality = rdkit_graph_quality(
                 example["atom_types"], predicted_bonds
             )
+            xyz_quality = xyz_graph_metrics(
+                example["atom_types"],
+                example["coordinates"],
+                example["target_smiles"],
+                predicted_bonds,
+            )
             geometric_quality = geometry_quality(
                 example["atom_types"],
                 example["coordinates"],
@@ -926,7 +961,34 @@ class EndToEndNMRModule(pl.LightningModule):
                 example["covalent_radii"],
                 example["vdw_radii"],
             )
-            quality = {**graph_quality, **geometric_quality}
+            quality = {
+                "corrected_graph_validity": graph_quality["validity"],
+                "corrected_graph_connected": graph_quality["graph_connected"],
+                "corrected_graph_atom_stability": graph_quality[
+                    "atom_stability"
+                ],
+                "corrected_graph_molecule_stability": graph_quality[
+                    "molecule_stability"
+                ],
+                **geometric_quality,
+                **{
+                    key: value
+                    for key, value in xyz_quality.items()
+                    if key not in {"xyz_smiles", "xyz_bond_types"}
+                },
+                "refiner_displacement_rms_angstrom": example[
+                    "displacement_rms_angstrom"
+                ],
+                "refiner_displacement_max_angstrom": example[
+                    "displacement_max_angstrom"
+                ],
+                "refiner_step_max_fraction": example[
+                    "coordinate_step_max_fraction"
+                ],
+                "refiner_step_saturation_fraction": example[
+                    "coordinate_step_saturation_fraction"
+                ],
+            }
             quality_rows.append(quality)
             graph_exact = self._example_graph_exact(example)
             xyz_path = "<disabled>"
@@ -939,7 +1001,8 @@ class EndToEndNMRModule(pl.LightningModule):
                     comment=(
                         f"target_smiles={example['target_smiles']} "
                         f"predicted_smiles={example['predicted_smiles']} "
-                        f"graph_smiles={graph_smiles or '<invalid>'}"
+                        f"graph_smiles={graph_smiles or '<invalid>'} "
+                        f"xyz_smiles={xyz_quality['xyz_smiles'] or '<invalid>'}"
                     ),
                 )
                 xyz_path = str(path)
@@ -950,13 +1013,25 @@ class EndToEndNMRModule(pl.LightningModule):
                     example["predicted_smiles"],
                     graph_smiles or "<invalid-graph>",
                     graph_exact,
-                    quality["validity"],
-                    quality["connected"],
-                    quality["atom_stability"],
-                    quality["molecule_stability"],
+                    xyz_quality["xyz_smiles"] or "<invalid-xyz-graph>",
+                    quality["xyz_validity"],
+                    quality["xyz_connected"],
+                    quality["xyz_target_graph_similarity"],
+                    quality["xyz_target_exact_match"],
+                    quality["xyz_corrected_graph_similarity"],
+                    quality["xyz_corrected_graph_exact_match"],
+                    quality["xyz_corrected_typed_edge_agreement"],
+                    quality["corrected_graph_validity"],
+                    quality["corrected_graph_connected"],
+                    quality["corrected_graph_atom_stability"],
+                    quality["corrected_graph_molecule_stability"],
                     quality["clash_free"],
                     quality["bond_length_mae_angstrom"],
                     quality["min_nonbond_vdw_ratio"],
+                    quality["refiner_displacement_rms_angstrom"],
+                    quality["refiner_displacement_max_angstrom"],
+                    quality["refiner_step_max_fraction"],
+                    quality["refiner_step_saturation_fraction"],
                     xyz_path,
                     wandb.Image(
                         self._render_structure(
@@ -994,13 +1069,25 @@ class EndToEndNMRModule(pl.LightningModule):
                         "predicted_smiles",
                         "corrected_graph_smiles",
                         "corrected_graph_exact_match",
-                        "3d_validity",
-                        "connected",
-                        "atom_stability",
-                        "molecule_stability",
+                        "xyz_smiles",
+                        "xyz_validity",
+                        "xyz_connected",
+                        "xyz_target_graph_similarity",
+                        "xyz_target_exact_match",
+                        "xyz_corrected_graph_similarity",
+                        "xyz_corrected_graph_exact_match",
+                        "xyz_corrected_typed_edge_agreement",
+                        "corrected_graph_validity",
+                        "corrected_graph_connected",
+                        "corrected_graph_atom_stability",
+                        "corrected_graph_molecule_stability",
                         "clash_free",
                         "bond_length_mae_angstrom",
                         "min_nonbond_vdw_ratio",
+                        "refiner_displacement_rms_angstrom",
+                        "refiner_displacement_max_angstrom",
+                        "refiner_step_max_fraction",
+                        "refiner_step_saturation_fraction",
                         "xyz_path",
                         "generated_3d",
                         "target_graph",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -184,9 +184,201 @@ def rdkit_graph_quality(
         validity = 0.0
     return {
         "validity": validity,
-        "connected": connected,
+        "graph_connected": connected,
         "atom_stability": atom_stability,
         "molecule_stability": molecule_stability,
+    }
+
+
+def _bond_types_from_molecule(molecule: Any) -> torch.Tensor:
+    """Return the pipeline's categorical adjacency for an RDKit molecule."""
+    from rdkit import Chem
+
+    bond_type_ids = {
+        Chem.BondType.SINGLE: 1,
+        Chem.BondType.DOUBLE: 2,
+        Chem.BondType.TRIPLE: 3,
+        Chem.BondType.AROMATIC: 4,
+    }
+    bonds = torch.zeros(
+        (molecule.GetNumAtoms(), molecule.GetNumAtoms()), dtype=torch.long
+    )
+    for bond in molecule.GetBonds():
+        left = bond.GetBeginAtomIdx()
+        right = bond.GetEndAtomIdx()
+        bond_type = bond_type_ids.get(bond.GetBondType(), 0)
+        bonds[left, right] = bonds[right, left] = bond_type
+    return bonds
+
+
+def molecule_from_xyz(
+    atomic_numbers: torch.Tensor,
+    coordinates: torch.Tensor,
+    total_charge: int = 0,
+    covalent_factor: float = 1.3,
+) -> Tuple[Optional[Any], torch.Tensor, float]:
+    """Infer connectivity and bond orders using only elements and XYZ.
+
+    Connectivity is retained even if RDKit cannot assign a chemically valid
+    bond-order/charge state. The returned molecule is ``None`` in that case,
+    while the adjacency and connectivity diagnostic remain usable. No model
+    graph or target graph participates in this conversion.
+    """
+    from rdkit import Chem
+    from rdkit.Chem import rdDetermineBonds
+    from rdkit.Geometry import Point3D
+
+    atom_count = int(atomic_numbers.numel())
+    empty_bonds = torch.zeros((atom_count, atom_count), dtype=torch.long)
+    if (
+        atom_count == 0
+        or coordinates.shape != (atom_count, 3)
+        or not bool(torch.isfinite(coordinates).all())
+    ):
+        return None, empty_bonds, 0.0
+
+    editable = Chem.RWMol()
+    for atomic_number in atomic_numbers.detach().cpu().tolist():
+        editable.AddAtom(Chem.Atom(int(atomic_number)))
+    molecule = editable.GetMol()
+    conformer = Chem.Conformer(atom_count)
+    for index, xyz in enumerate(coordinates.detach().cpu().tolist()):
+        conformer.SetAtomPosition(index, Point3D(*map(float, xyz)))
+    molecule.AddConformer(conformer)
+
+    try:
+        rdDetermineBonds.DetermineConnectivity(
+            molecule,
+            useHueckel=False,
+            charge=int(total_charge),
+            covFactor=float(covalent_factor),
+            useVdw=True,
+        )
+    except Exception:
+        return None, empty_bonds, 0.0
+
+    connected = float(len(Chem.GetMolFrags(molecule)) == 1)
+    connectivity = _bond_types_from_molecule(molecule)
+    try:
+        # Connectivity is fixed above; this step only assigns bond orders and
+        # formal charges. Stereo is deliberately excluded from this metric.
+        rdDetermineBonds.DetermineBondOrders(
+            molecule,
+            charge=int(total_charge),
+            allowChargedFragments=True,
+            embedChiral=False,
+        )
+        Chem.SanitizeMol(molecule)
+        return molecule, _bond_types_from_molecule(molecule), connected
+    except Exception:
+        return None, connectivity, connected
+
+
+def _clean_molecule(molecule_or_smiles: Any) -> Optional[Any]:
+    """Canonical metric molecule without explicit H or stereochemistry."""
+    from rdkit import Chem
+
+    try:
+        molecule = (
+            Chem.MolFromSmiles(molecule_or_smiles)
+            if isinstance(molecule_or_smiles, str)
+            else Chem.Mol(molecule_or_smiles)
+        )
+        if molecule is None:
+            return None
+        molecule = Chem.RemoveAllHs(molecule)
+        Chem.RemoveStereochemistry(molecule)
+        Chem.SanitizeMol(molecule)
+        return molecule
+    except Exception:
+        return None
+
+
+def _molecule_similarity(left: Any, right: Any) -> float:
+    """Radius-2 Morgan Tanimoto after H/stereo normalization."""
+    from rdkit import DataStructs
+    from rdkit.Chem.rdFingerprintGenerator import GetMorganGenerator
+
+    left_molecule = _clean_molecule(left)
+    right_molecule = _clean_molecule(right)
+    if left_molecule is None or right_molecule is None:
+        return 0.0
+    generator = GetMorganGenerator(radius=2, fpSize=2048)
+    return float(
+        DataStructs.TanimotoSimilarity(
+            generator.GetFingerprint(left_molecule),
+            generator.GetFingerprint(right_molecule),
+        )
+    )
+
+
+def xyz_graph_metrics(
+    atomic_numbers: torch.Tensor,
+    coordinates: torch.Tensor,
+    target_smiles: str,
+    corrected_bond_types: torch.Tensor,
+) -> Dict[str, Any]:
+    """Independent XYZ graph/SMILES quality and corrected-graph agreement."""
+    from rdkit import Chem
+
+    molecule, xyz_bond_types, xyz_connected = molecule_from_xyz(
+        atomic_numbers, coordinates
+    )
+    corrected_smiles = graph_to_canonical_smiles(
+        atomic_numbers, corrected_bond_types
+    )
+    target_molecule = _clean_molecule(target_smiles)
+    xyz_molecule = _clean_molecule(molecule) if molecule is not None else None
+    xyz_smiles = (
+        Chem.MolToSmiles(xyz_molecule, canonical=True, isomericSmiles=False)
+        if xyz_molecule is not None
+        else None
+    )
+    target_canonical = (
+        Chem.MolToSmiles(target_molecule, canonical=True, isomericSmiles=False)
+        if target_molecule is not None
+        else None
+    )
+    valid = float(molecule is not None and xyz_molecule is not None)
+    whole_molecule_valid = bool(valid and xyz_connected)
+    target_exact = float(
+        whole_molecule_valid
+        and target_canonical is not None
+        and xyz_smiles == target_canonical
+    )
+    corrected_exact = float(
+        whole_molecule_valid
+        and corrected_smiles is not None
+        and xyz_smiles == corrected_smiles
+    )
+    # Slot-wise typed agreement makes the diagnostic stricter than canonical
+    # SMILES and directly detects whether the refined geometry realizes every
+    # corrected edge. Failed bond-order assignment cannot count as agreement.
+    typed_agreement = float(
+        molecule is not None
+        and xyz_bond_types.shape == corrected_bond_types.shape
+        and torch.equal(
+            xyz_bond_types.cpu(), corrected_bond_types.long().cpu()
+        )
+    )
+    return {
+        "xyz_smiles": xyz_smiles,
+        "xyz_validity": valid,
+        "xyz_connected": xyz_connected,
+        "xyz_target_exact_match": target_exact,
+        "xyz_target_graph_similarity": (
+            _molecule_similarity(molecule, target_molecule)
+            if whole_molecule_valid and target_molecule is not None
+            else 0.0
+        ),
+        "xyz_corrected_graph_exact_match": corrected_exact,
+        "xyz_corrected_graph_similarity": (
+            _molecule_similarity(molecule, corrected_smiles)
+            if whole_molecule_valid and corrected_smiles is not None
+            else 0.0
+        ),
+        "xyz_corrected_typed_edge_agreement": typed_agreement,
+        "xyz_bond_types": xyz_bond_types,
     }
 
 

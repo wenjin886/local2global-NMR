@@ -501,9 +501,43 @@ python -m pytest -q
 
 # End-to-end NMR cycle training
 
+## Supervised pretraining versus SSL
+
+The training protocol deliberately separates label-supervised pretraining from
+the self-supervised end-to-end cycle. Molecular labels have different roles in
+the two phases:
+
+| Phase | May supervise training | Validation/test only |
+| --- | --- | --- |
+| supervised pretraining | target SMILES, target graph/fragment/attachment labels | the same labels may also be used as metrics |
+| SSL/end-to-end cycle | experimental NMR reconstruction loss and label-free chemistry/topology/geometry priors | target SMILES and target graph |
+
+The prior-only graph-correction stage below is part of **supervised
+pretraining**, because its corrected-edge and attachment objectives use the
+target graph. Refiner warm-up and every later end-to-end stage are part of
+**SSL**. In SSL, target SMILES/graph may remain in `GraphBatch` solely to
+compute validation metrics and W&B visualizations; they must not contribute to
+the training loss, coordinate supervision, geometry initialization, topology
+correction, or any other model input.
+
+Consequently, SSL training must use the model's generated SMILES/graph path.
+Teacher forcing target SMILES is also disallowed in SSL even when SMILES loss
+has zero weight, because the target tokens can update the joint memory through
+BiXT and thereby condition downstream graph and geometry predictions. Target
+XYZ coordinates are never used in either the input path or the SSL objective.
+
+In configuration terms, an SSL run keeps all target-label loss weights at
+zero, including `graph_loss_weight`, `smiles_loss_weight`,
+`corrected_edge_loss_weight`, and `corrected_attachment_loss_weight`, and uses
+fully greedy training (`greedy_probability_start: 1.0`,
+`greedy_probability_end: 1.0`, `teacher_only_steps: 0`). "Prior loss" in this
+phase means a label-free chemical/topological/geometric regularizer derived
+from atom types, predicted soft topology and generated coordinates; it does
+not mean cross-entropy or distance supervision against the target graph.
+
 ## Prior-only graph correction
 
-The first curriculum stage stops before all 3D components. It keeps
+This final supervised-pretraining stage stops before all 3D components. It keeps
 `NMRToGraph` frozen, trains only `SoftTopologyPrior`, uses teacher-forced SMILES
 during training and always uses greedy decoding during validation:
 
@@ -568,28 +602,38 @@ validation run writes a W&B table containing generated 3D structures, raw and
 SoftTopologyPrior-corrected predicted graphs, target graphs, decoder and
 corrected-graph canonical SMILES, predicted/target H/C NMR values, graph exact
 match, RDKit validity/valence stability, bond-length deviation and non-local
-clash metrics. The nine XYZ files are retained under
+clash metrics. `corrected_graph_connected` describes only the corrected
+topology. Independently, RDKit infers a fresh graph and canonical SMILES from
+the final atom types and XYZ coordinates; this supplies `xyz_connected`,
+target similarity/exact match, and XYZ-to-corrected-graph similarity, canonical
+exact match and slot-wise typed-edge agreement. A failed or disconnected XYZ
+conversion scores zero rather than silently evaluating only its largest
+fragment. The nine XYZ files are retained under
 `validation_xyz/epoch_*_step_*` and uploaded with the W&B run. These metrics do
 not use target coordinates; they measure chemical/geometric plausibility, not
 conformer accuracy.
 
-Training supports a teacher-to-greedy SMILES curriculum. Every new fit or
-resumed fit records its first restored `global_step` as the curriculum origin,
-runs `teacher_only_steps`, and then changes the batch-level greedy probability
-over `greedy_transition_steps`. Setting both probabilities to zero keeps the
-entire phase teacher-forced; on a later resume, changing only
-`greedy_probability_end` to one starts a fresh teacher-only warm-up followed by
-the configured transition. Teacher batches receive the separate SMILES CE;
-greedy batches do not. Validation is always greedy, and W&B records both the
-scheduled and realized greedy ratios.
+The checked-in refiner configuration allows a nominal 1.5-angstrom cumulative
+coordinate step across its EGNN layers and gives squared displacement a weak
+`0.001` loss weight. Train/validation logs and the nine-molecule table report
+RMS/max displacement, the largest realized per-layer step as a fraction of its
+configured limit, and the fraction of valid atom-layer steps reaching at least
+95% of that limit. Displacement is measured after removing global translation,
+so these diagnostics describe actual internal geometry refinement.
 
-The initial refiner-only stage freezes all pretrained components. The checked-in
-configuration now represents the next stage: `NMRToGraph` and `Shift3DModule`
-remain frozen while `SoftTopologyPrior` and the coordinate refiner train at
-separate learning rates. Corrected heavy-edge and permutation-invariant H
-attachment cross-entropy directly supervise correction; entropy/confidence are
-logged but entropy is not independently minimized. The solver has no learned
-parameters and remains differentiable, allowing coordinate, chemistry and NMR
-gradients to reach the prior. At this stage boundary use
+The implementation retains a configurable teacher-to-greedy curriculum for
+supervised experiments and ablations, but it is not part of the SSL protocol.
+SSL training is fully greedy from its first step; validation is also always
+greedy. W&B records the scheduled and realized greedy ratios so accidental
+teacher forcing is visible.
+
+The initial SSL refiner-only stage freezes all pretrained components and trains
+the coordinate refiner using NMR reconstruction plus label-free prior losses.
+Later SSL stages may progressively unfreeze `SoftTopologyPrior`, `NMRToGraph`,
+and finally the 3D-to-NMR model, but unfreezing a module does not authorize
+target-graph or target-SMILES supervision: the SSL loss boundary remains the
+same throughout. The solver has no learned parameters and remains
+differentiable, allowing coordinate, prior and NMR gradients to reach whichever
+upstream modules are currently trainable. At a stage boundary use
 `weights_only_checkpoint=/path/to/refiner-stage.ckpt` with `ckpt_path=null` so
 model weights are restored without the old optimizer parameter groups.

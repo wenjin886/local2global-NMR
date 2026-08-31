@@ -62,7 +62,7 @@ class ResidualEGNNLayer(nn.Module):
         coordinates: torch.Tensor,
         edge_features: torch.Tensor,
         atom_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         atoms = atom_mask.size(1)
         diagonal = torch.eye(
             atoms, dtype=torch.bool, device=atom_mask.device
@@ -104,7 +104,7 @@ class ResidualEGNNLayer(nn.Module):
         update = self.node_update(torch.cat([node_features, aggregate], dim=-1))
         node_features = self.node_norm(node_features + update)
         node_features = node_features * atom_mask.unsqueeze(-1)
-        return node_features, coordinates
+        return node_features, coordinates, coordinate_delta
 
 
 class SpectrumConditionedEGNNRefiner(nn.Module):
@@ -122,7 +122,7 @@ class SpectrumConditionedEGNNRefiner(nn.Module):
         num_layers: int = 4,
         num_rbf: int = 32,
         distance_cutoff: float = 8.0,
-        max_coordinate_step: float = 0.25,
+        max_coordinate_step: float = 1.5,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
@@ -164,6 +164,15 @@ class SpectrumConditionedEGNNRefiner(nn.Module):
         atom_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         initial_coordinates = coordinates.float()
+        # Work in the same centred gauge used after every EGNN layer. This
+        # keeps displacement diagnostics/loss free of a meaningless global
+        # translation when an upstream initializer is not perfectly centred.
+        initial_centre = initial_coordinates.sum(dim=1, keepdim=True) / atom_mask.sum(
+            dim=1, keepdim=True
+        ).clamp_min(1).unsqueeze(-1)
+        initial_coordinates = (
+            initial_coordinates - initial_centre
+        ) * atom_mask.unsqueeze(-1)
         atom_state = self.atom_projection(graph_atom_features)
         global_spectrum = self.spectrum_projection(
             torch.cat(
@@ -181,22 +190,57 @@ class SpectrumConditionedEGNNRefiner(nn.Module):
         )
         atom_state = atom_state * atom_mask.unsqueeze(-1)
         refined = initial_coordinates
+        coordinate_steps = []
         for layer in self.layers:
-            atom_state, refined = layer(
+            atom_state, refined, coordinate_step = layer(
                 atom_state,
                 refined,
                 edge_probabilities.to(atom_state.dtype),
                 atom_mask,
             )
+            coordinate_steps.append(coordinate_step)
         displacement = (refined - initial_coordinates) * atom_mask.unsqueeze(-1)
-        displacement_rms = torch.sqrt(
-            displacement.square().sum(dim=-1).sum()
-            / atom_mask.sum().clamp_min(1)
+        displacement_norm = displacement.norm(dim=-1)
+        atom_counts = atom_mask.sum(dim=-1).clamp_min(1)
+        displacement_rms_per_sample = torch.sqrt(
+            displacement.square().sum(dim=-1).sum(dim=-1)
+            / atom_counts
+        )
+        displacement_max_per_sample = displacement_norm.masked_fill(
+            ~atom_mask, float("-inf")
+        ).max(dim=-1).values
+        step_norms = torch.stack(coordinate_steps).norm(dim=-1)
+        step_limits = step_norms.new_tensor(
+            [layer.max_coordinate_step for layer in self.layers]
+        )[:, None, None]
+        step_fractions = step_norms / step_limits.clamp_min(1e-8)
+        valid_steps = atom_mask.unsqueeze(0).expand_as(step_fractions)
+        step_max_fraction_per_sample = step_fractions.masked_fill(
+            ~valid_steps, float("-inf")
+        ).permute(1, 0, 2).flatten(1).max(dim=-1).values
+        step_saturation_fraction_per_sample = (
+            ((step_fractions >= 0.95) & valid_steps)
+            .to(step_norms.dtype)
+            .sum(dim=(0, 2))
+            / (atom_counts * len(self.layers))
         )
         return {
             "coordinates": refined,
             "node_features": atom_state,
             "global_spectrum": global_spectrum,
             "displacement": displacement,
-            "displacement_rms": displacement_rms,
+            "displacement_rms": displacement_rms_per_sample.mean(),
+            "displacement_max": displacement_max_per_sample.max(),
+            "coordinate_step_max_fraction": step_max_fraction_per_sample.max(),
+            "coordinate_step_saturation_fraction": (
+                step_saturation_fraction_per_sample.mean()
+            ),
+            "displacement_rms_per_sample": displacement_rms_per_sample,
+            "displacement_max_per_sample": displacement_max_per_sample,
+            "coordinate_step_max_fraction_per_sample": (
+                step_max_fraction_per_sample
+            ),
+            "coordinate_step_saturation_fraction_per_sample": (
+                step_saturation_fraction_per_sample
+            ),
         }
