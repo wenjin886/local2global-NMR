@@ -313,3 +313,51 @@ def test_xyz_connected_is_independent_of_corrected_graph():
     assert xyz_quality["xyz_connected"] == 0.0
     assert xyz_quality["xyz_target_exact_match"] == 0.0
     assert xyz_quality["xyz_corrected_graph_exact_match"] == 0.0
+
+
+def test_validation_3d_metric_reduction_reports_sample_count():
+    module = _module()
+    module._validation_3d_sums = {
+        key: 2.0 for key in module.VALIDATION_3D_METRICS
+    }
+    module._validation_3d_counts = {
+        key: 4 for key in module.VALIDATION_3D_METRICS
+    }
+    module._validation_3d_num_samples = 4
+    metrics = module._reduce_validation_3d_metrics()
+    assert metrics["num_samples"] == 4.0
+    assert metrics["world_size"] == 1.0
+    assert metrics["xyz_validity"] == 0.5
+    assert metrics["xyz_conversion_failure_count"] == 2.0
+
+
+def test_validation_example_gather_sorts_and_deduplicates_across_ranks(
+    monkeypatch,
+):
+    module = _module()
+    module._validation_examples = [
+        {"validation_index": 0},
+        {"validation_index": 2},
+        {"validation_index": 4},
+    ]
+
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+
+    def fake_all_gather_object(gathered, local_examples):
+        gathered[0] = local_examples
+        gathered[1] = [
+            {"validation_index": 1},
+            {"validation_index": 3},
+            {"validation_index": 4},
+            {"validation_index": 5},
+        ]
+
+    monkeypatch.setattr(
+        torch.distributed, "all_gather_object", fake_all_gather_object
+    )
+    gathered = module._gather_validation_examples()
+    assert [example["validation_index"] for example in gathered] == [
+        0, 1, 2, 3, 4, 5
+    ]

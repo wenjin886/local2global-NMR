@@ -34,8 +34,9 @@ datamodule:
   val_batch_size: 16
   num_workers: 1
   pin_memory: true
-  # This deterministic subset supplies the same nine W&B examples each time.
-  val_generation_size: 9
+  # Fixed random subset for expensive XYZ->graph/SMILES metrics. Only nine of
+  # these molecules are rendered in the W&B table.
+  val_generation_size: 1024
   val_generation_seed: 0
   inference_only_validation: false
   batch_transform:

@@ -231,6 +231,7 @@ class GraphBatch:
     smiles_input_ids: torch.Tensor
     smiles_input_mask: torch.Tensor
     smiles_target_ids: torch.Tensor
+    validation_indices: Optional[torch.Tensor] = None
 
     def to(self, device: torch.device) -> "GraphBatch":
         values = {}
@@ -467,6 +468,10 @@ def collate_nmr_graph(samples: Sequence[GraphSample]) -> GraphBatch:
         smiles_input_ids=smiles_input_ids,
         smiles_input_mask=smiles_input_mask,
         smiles_target_ids=smiles_target_ids,
+        validation_indices=torch.tensor(
+            [getattr(sample, "validation_index", -1) for sample in samples],
+            dtype=torch.long,
+        ),
     )
 
 

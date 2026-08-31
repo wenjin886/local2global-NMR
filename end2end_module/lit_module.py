@@ -72,6 +72,28 @@ class EndToEndNMRModule(pl.LightningModule):
     differentiable geometry solver before residual refinement.
     """
 
+    VALIDATION_3D_METRICS = (
+        "corrected_graph_validity",
+        "corrected_graph_connected",
+        "corrected_graph_atom_stability",
+        "corrected_graph_molecule_stability",
+        "finite_coordinate_fraction",
+        "bond_length_mae_angstrom",
+        "min_nonbond_vdw_ratio",
+        "clash_free",
+        "xyz_validity",
+        "xyz_connected",
+        "xyz_target_exact_match",
+        "xyz_target_graph_similarity",
+        "xyz_corrected_graph_exact_match",
+        "xyz_corrected_graph_similarity",
+        "xyz_corrected_typed_edge_agreement",
+        "refiner_displacement_rms_angstrom",
+        "refiner_displacement_max_angstrom",
+        "refiner_step_max_fraction",
+        "refiner_step_saturation_fraction",
+    )
+
     def __init__(
         self,
         nmr_to_graph: NMRToGraph,
@@ -168,6 +190,9 @@ class EndToEndNMRModule(pl.LightningModule):
         self._set_frozen(self.nmr_to_graph, freeze_nmr_to_graph)
         self._set_frozen(self.topology_prior, freeze_topology_prior)
         self._validation_examples: List[Dict[str, Any]] = []
+        self._validation_3d_sums: Dict[str, float] = {}
+        self._validation_3d_counts: Dict[str, int] = {}
+        self._validation_3d_num_samples = 0
         self._curriculum_origin_step = 0
 
     @staticmethod
@@ -719,11 +744,19 @@ class EndToEndNMRModule(pl.LightningModule):
             if len(getattr(self.trainer, "val_dataloaders", [])) == 1:
                 self._collect_validation_examples(batch, output)
             return losses["loss"]
+        self._update_validation_3d_metrics(batch, output)
         self._collect_validation_examples(batch, output)
         return None
 
     def on_validation_epoch_start(self) -> None:
         self._validation_examples = []
+        self._validation_3d_sums = {
+            key: 0.0 for key in self.VALIDATION_3D_METRICS
+        }
+        self._validation_3d_counts = {
+            key: 0 for key in self.VALIDATION_3D_METRICS
+        }
+        self._validation_3d_num_samples = 0
 
     def _decode_smiles(self, token_ids: torch.Tensor) -> str:
         vocabulary = self.nmr_to_graph.smiles_vocab
@@ -749,9 +782,6 @@ class EndToEndNMRModule(pl.LightningModule):
         limit = int(self.hparams.validation_examples)
         if limit <= 0 or self.trainer.sanity_checking:
             return
-        remaining = limit - len(self._validation_examples)
-        if remaining <= 0:
-            return
         raw_edges = output["graph"]["heavy_edge_logits"].argmax(dim=-1)
         corrected_edges = output["topology"][
             "corrected_heavy_edge_logits"
@@ -764,13 +794,24 @@ class EndToEndNMRModule(pl.LightningModule):
         )
         predicted_tokens = output["graph"].get("smiles_token_ids")
         shift_batch = output["shift_batch"]
-        for index in range(min(remaining, batch.atom_types.size(0))):
+        validation_indices = batch.validation_indices
+        for index in range(batch.atom_types.size(0)):
+            if len(self._validation_examples) >= limit:
+                break
+            validation_index = (
+                int(validation_indices[index])
+                if validation_indices is not None
+                else -1
+            )
+            if validation_index < 0:
+                validation_index = len(self._validation_examples)
             mask = batch.atom_mask[index]
             atom_count = int(mask.sum().item())
             h_atoms = mask & batch.atom_types[index].eq(1)
             c_atoms = mask & batch.atom_types[index].eq(6)
             self._validation_examples.append(
                 {
+                    "validation_index": validation_index,
                     "atom_types": batch.atom_types[index, mask].detach().cpu(),
                     "coordinates": output["refined"]["coordinates"][
                         index, mask
@@ -838,6 +879,85 @@ class EndToEndNMRModule(pl.LightningModule):
                 }
             )
 
+    def _update_validation_3d_metrics(
+        self, batch: GraphBatch, output: Mapping[str, Any]
+    ) -> None:
+        """Accumulate per-molecule metrics on the fixed 3D subset locally."""
+        corrected_edges = output["topology"][
+            "corrected_heavy_edge_logits"
+        ].argmax(dim=-1)
+        attachments = output["topology"][
+            "corrected_h_attachment_logits"
+        ].argmax(dim=-1)
+        for index in range(batch.atom_types.size(0)):
+            mask = batch.atom_mask[index]
+            atom_count = int(mask.sum().item())
+            atom_types = batch.atom_types[index, mask].detach().cpu()
+            coordinates = output["refined"]["coordinates"][
+                index, mask
+            ].detach().cpu()
+            predicted_bonds = self._all_atom_bonds(
+                atom_types,
+                corrected_edges[index, :atom_count, :atom_count].detach().cpu(),
+                attachments[index, :atom_count].detach().cpu(),
+            )
+            graph_quality = rdkit_graph_quality(atom_types, predicted_bonds)
+            xyz_quality = xyz_graph_metrics(
+                atom_types,
+                coordinates,
+                self._decode_smiles(batch.smiles_target_ids[index]),
+                predicted_bonds,
+            )
+            geometric_quality = geometry_quality(
+                atom_types,
+                coordinates,
+                predicted_bonds,
+                output["geometry"]["covalent_radii"][
+                    index, mask
+                ].detach().cpu(),
+                output["geometry"]["vdw_radii"][
+                    index, mask
+                ].detach().cpu(),
+            )
+            quality = {
+                "corrected_graph_validity": graph_quality["validity"],
+                "corrected_graph_connected": graph_quality["graph_connected"],
+                "corrected_graph_atom_stability": graph_quality[
+                    "atom_stability"
+                ],
+                "corrected_graph_molecule_stability": graph_quality[
+                    "molecule_stability"
+                ],
+                **geometric_quality,
+                **{
+                    key: value
+                    for key, value in xyz_quality.items()
+                    if key not in {"xyz_smiles", "xyz_bond_types"}
+                },
+                "refiner_displacement_rms_angstrom": float(
+                    output["refined"]["displacement_rms_per_sample"][index]
+                ),
+                "refiner_displacement_max_angstrom": float(
+                    output["refined"]["displacement_max_per_sample"][index]
+                ),
+                "refiner_step_max_fraction": float(
+                    output["refined"][
+                        "coordinate_step_max_fraction_per_sample"
+                    ][index]
+                ),
+                "refiner_step_saturation_fraction": float(
+                    output["refined"][
+                        "coordinate_step_saturation_fraction_per_sample"
+                    ][index]
+                ),
+            }
+            self._validation_3d_num_samples += 1
+            for key in self.VALIDATION_3D_METRICS:
+                value = float(quality[key])
+                if math.isfinite(value):
+                    self._validation_3d_sums[key] += value
+                    self._validation_3d_counts[key] += 1
+
     @staticmethod
     def _all_atom_bonds(
         atom_types: torch.Tensor,
@@ -897,6 +1017,7 @@ class EndToEndNMRModule(pl.LightningModule):
     def on_validation_epoch_end(self) -> None:
         if self.trainer.sanity_checking:
             return
+        validation_3d_metrics = self._reduce_validation_3d_metrics()
         examples = self._gather_validation_examples()
         # Every rank must participate in the collective above. Rendering and
         # W&B writes remain global-zero-only after the gather completes.
@@ -907,7 +1028,6 @@ class EndToEndNMRModule(pl.LightningModule):
         except ImportError:
             return
         rows = []
-        quality_rows = []
         xyz_root = None
         if self.hparams.validation_xyz_dir:
             xyz_root = (
@@ -989,7 +1109,6 @@ class EndToEndNMRModule(pl.LightningModule):
                     "coordinate_step_saturation_fraction"
                 ],
             }
-            quality_rows.append(quality)
             graph_exact = self._example_graph_exact(example)
             xyz_path = "<disabled>"
             if xyz_root is not None:
@@ -1009,6 +1128,7 @@ class EndToEndNMRModule(pl.LightningModule):
             rows.append(
                 [
                     int(self.current_epoch),
+                    int(example["validation_index"]),
                     example["target_smiles"],
                     example["predicted_smiles"],
                     graph_smiles or "<invalid-graph>",
@@ -1065,6 +1185,7 @@ class EndToEndNMRModule(pl.LightningModule):
                     key="val/end_to_end_examples",
                     columns=[
                         "epoch",
+                        "validation_index",
                         "target_smiles",
                         "predicted_smiles",
                         "corrected_graph_smiles",
@@ -1102,24 +1223,65 @@ class EndToEndNMRModule(pl.LightningModule):
                     step=self.global_step,
                 )
             experiment = getattr(logger, "experiment", None)
-            if experiment is not None and quality_rows:
-                panel_metrics = {}
-                for key in quality_rows[0]:
-                    finite_values = [
-                        row[key]
-                        for row in quality_rows
-                        if math.isfinite(float(row[key]))
-                    ]
-                    if finite_values:
-                        panel_metrics[f"val_3d/{key}"] = sum(finite_values) / len(
-                            finite_values
-                        )
-                experiment.log(panel_metrics, step=self.global_step)
+            if experiment is not None and validation_3d_metrics:
+                experiment.log(
+                    {
+                        **{
+                            f"val_3d/{key}": value
+                            for key, value in validation_3d_metrics.items()
+                        },
+                        "val_3d/table_num_samples": len(examples),
+                    },
+                    step=self.global_step,
+                )
                 if xyz_root is not None:
                     for path in sorted(xyz_root.glob("*.xyz")):
                         experiment.save(
                             str(path), base_path=str(xyz_root), policy="now"
                         )
+
+    def _reduce_validation_3d_metrics(self) -> Dict[str, float]:
+        """All-reduce scalar sums/counts without gathering molecule objects."""
+        keys = self.VALIDATION_3D_METRICS
+        values = [self._validation_3d_sums.get(key, 0.0) for key in keys]
+        counts = [self._validation_3d_counts.get(key, 0) for key in keys]
+        payload = torch.tensor(
+            values + counts + [self._validation_3d_num_samples],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        distributed = (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        )
+        if distributed:
+            torch.distributed.all_reduce(
+                payload, op=torch.distributed.ReduceOp.SUM
+            )
+            world_size = torch.distributed.get_world_size()
+        else:
+            world_size = 1
+        metric_count = len(keys)
+        global_values = payload[:metric_count].cpu().tolist()
+        global_counts = payload[metric_count : 2 * metric_count].cpu().tolist()
+        num_samples = int(payload[-1].item())
+        if num_samples == 0:
+            return {}
+        metrics = {
+            key: value / count
+            for key, value, count in zip(keys, global_values, global_counts)
+            if count > 0
+        }
+        metrics.update(
+            {
+                "num_samples": float(num_samples),
+                "xyz_conversion_failure_count": float(
+                    num_samples - global_values[keys.index("xyz_validity")]
+                ),
+                "world_size": float(world_size),
+            }
+        )
+        return metrics
 
     @staticmethod
     def _example_graph_exact(example: Mapping[str, Any]) -> bool:
@@ -1150,7 +1312,9 @@ class EndToEndNMRModule(pl.LightningModule):
             torch.distributed.is_available()
             and torch.distributed.is_initialized()
         ):
-            return local_examples[: int(self.hparams.validation_examples)]
+            return sorted(
+                local_examples, key=lambda example: example["validation_index"]
+            )[: int(self.hparams.validation_examples)]
         gathered: List[Optional[List[Dict[str, Any]]]] = [
             None for _ in range(torch.distributed.get_world_size())
         ]
@@ -1161,7 +1325,15 @@ class EndToEndNMRModule(pl.LightningModule):
             if rank_examples is not None
             for example in rank_examples
         ]
-        return merged[: int(self.hparams.validation_examples)]
+        # DistributedSampler interleaves subset positions across ranks and may
+        # pad when the subset size is not divisible by world size. Sorting and
+        # deduplicating produces the same fixed panel independently of rank.
+        unique = {}
+        for example in merged:
+            unique.setdefault(example["validation_index"], example)
+        return [
+            unique[index] for index in sorted(unique)
+        ][: int(self.hparams.validation_examples)]
 
     def configure_optimizers(self):
         groups = []

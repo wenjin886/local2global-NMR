@@ -2,10 +2,28 @@ from typing import Any, Optional
 
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset
 
 from .dataset import NMRGraphDataset, TransformingCollator
 import time
+
+
+class IndexedSubset(Dataset):
+    """Subset that exposes a stable position for DDP metric/table ordering."""
+
+    def __init__(self, dataset: Dataset, indices):
+        self.dataset = dataset
+        self.indices = list(indices)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, position: int):
+        sample = self.dataset[self.indices[position]]
+        # GraphSample is a regular dataclass, so this validation-only metadata
+        # does not alter serialized training examples or the model input path.
+        sample.validation_index = int(position)
+        return sample
 
 
 class NMRGraphDataModule(pl.LightningDataModule):
@@ -53,7 +71,7 @@ class NMRGraphDataModule(pl.LightningDataModule):
             generation_indices = torch.randperm(
                 len(self.val_dataset), generator=generator
             )[:generation_size].tolist()
-            self.val_generation_dataset = Subset(
+            self.val_generation_dataset = IndexedSubset(
                 self.val_dataset, generation_indices
             )
             print(f"Done loading val generation dataset: {len(self.val_generation_dataset)} Time taken: {time.time() - start_time:.2f}s")

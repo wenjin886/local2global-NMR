@@ -597,9 +597,13 @@ export SHIFT3D_CKPT=/path/to/shift3d.ckpt
 python -m end2end_module.train
 ```
 
-The validation datamodule deterministically selects nine molecules. Every
-validation run writes a W&B table containing generated 3D structures, raw and
-SoftTopologyPrior-corrected predicted graphs, target graphs, decoder and
+The validation datamodule deterministically selects a fixed random subset of up
+to 1024 molecules for the expensive XYZ/RDKit metrics. Each DDP rank evaluates
+its own shard and only scalar sums/counts are reduced; `val_3d/num_samples`
+makes the effective denominator explicit. Nine globally indexed members of
+that subset are gathered, sorted and deduplicated for the W&B table, which
+contains generated 3D structures, raw and SoftTopologyPrior-corrected predicted
+graphs, target graphs, decoder and
 corrected-graph canonical SMILES, predicted/target H/C NMR values, graph exact
 match, RDKit validity/valence stability, bond-length deviation and non-local
 clash metrics. `corrected_graph_connected` describes only the corrected
@@ -608,7 +612,7 @@ the final atom types and XYZ coordinates; this supplies `xyz_connected`,
 target similarity/exact match, and XYZ-to-corrected-graph similarity, canonical
 exact match and slot-wise typed-edge agreement. A failed or disconnected XYZ
 conversion scores zero rather than silently evaluating only its largest
-fragment. The nine XYZ files are retained under
+fragment. The nine displayed XYZ files are retained under
 `validation_xyz/epoch_*_step_*` and uploaded with the W&B run. These metrics do
 not use target coordinates; they measure chemical/geometric plausibility, not
 conformer accuracy.
