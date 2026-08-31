@@ -5,7 +5,7 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-5-end2end
-exp_name: prior-dim512
+exp_name: refiner-greedy-dim512
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
@@ -59,26 +59,26 @@ lit_module:
   # no parameters, but stays differentiable so coordinate/NMR gradients can
   # reach SoftTopologyPrior.
   freeze_nmr_to_graph: true
-  freeze_topology_prior: false
+  freeze_topology_prior: true
   freeze_shift_model: true
   input_shifts_are_normalized: true
-  graph_loss_weight: 1.0
+  graph_loss_weight: 0.0
   nmr_loss_weight: 1.0
   chemistry_loss_weight: 0.1
   displacement_loss_weight: 0.01
   # Correct-class cross entropy also sharpens confidence. We deliberately do
   # not minimize entropy alone, which could reinforce a confidently wrong edge.
-  corrected_edge_loss_weight: 1.0
-  corrected_attachment_loss_weight: 1.0
+  corrected_edge_loss_weight: 0.0
+  corrected_attachment_loss_weight: 0.0
   topology_residual_loss_weight: 1.0e-3
   # Initial phase: start=end=0 keeps every training batch teacher-forced.
   # On a later resume set greedy_probability_end=1.0; the resumed run first
   # receives teacher_only_steps and then begins the transition automatically.
-  smiles_loss_weight: 1.0
-  greedy_probability_start: 0.0
-  greedy_probability_end: 0.0
-  teacher_only_steps: 1000
-  greedy_transition_steps: 9000
+  smiles_loss_weight: 0.0
+  greedy_probability_start: 1.0
+  greedy_probability_end: 1.0
+  teacher_only_steps: 0
+  greedy_transition_steps: 0
   greedy_schedule: cosine
   greedy_sampling_seed: ${seed}
   learning_rate: 1.0e-4
