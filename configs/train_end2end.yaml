@@ -5,7 +5,7 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-5-end2end
-exp_name: refiner-greedy-dim512
+exp_name: 2gpu-refiner-greedy-dim512
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
@@ -218,8 +218,8 @@ logger:
 trainer:
   _target_: pytorch_lightning.Trainer
   accelerator: auto
-  devices: 1
-  # strategy: ddp
+  devices: 2
+  strategy: ddp
   max_epochs: 100
   gradient_clip_val: 1.0
   val_check_interval: 0.1
