@@ -116,18 +116,21 @@ def process_nmrexp_parquet(parquet_file: str, output_dir: str):
         
         nmr_solvent = row['nmr_solvent']
         if nmr_solvent != 'CDCl3':
-            print(f"Skipping molecule {row['smiles']} due to unsupported solvent: {nmr_solvent}")
+            # print(f"Skipping molecule {row['smiles']} due to unsupported solvent: {nmr_solvent}")
             continue
         
         smiles = row['smiles']
         mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            print(f"Skipping molecule {smiles} due to invalid SMILES.")
+            continue
 
         if smiles not in smi_nmr_check_dict:
             skip_mol = False
             for atom in mol.GetAtoms():
                 atom_type = atom.GetSymbol()
                 if atom_type not in ATOM_TYPE_TO_CHARGE:
-                    print(f"Skipping molecule {smiles} due to unsupported atom type: {atom_type}")
+                    # print(f"Skipping molecule {smiles} due to unsupported atom type: {atom_type}")
                     skip_mol = True
                     break
             if skip_mol:
@@ -142,8 +145,8 @@ def process_nmrexp_parquet(parquet_file: str, output_dir: str):
                 smi_nmr_check_dict[smiles] = {'cnmr': 0, 'hnmr': 0}
             smi_nmr_check_dict[smiles]['hnmr'] += 1
 
-        if len(smi_nmr_check_dict) == 300:
-            break
+        # if len(smi_nmr_check_dict) == 300:
+        #     break
     
     df_smi_check = pd.DataFrame(smi_nmr_check_dict).T.reset_index().rename(columns={'index': 'smiles'})
     
@@ -181,8 +184,6 @@ def process_nmrexp_parquet(parquet_file: str, output_dir: str):
 
 
 
-
-
     # # Save the dictionary as a pickle file
     # output_file = os.path.join(file_dir, f"{smiles}.pkl")
     # with open(output_file, 'wb') as f:
@@ -191,4 +192,6 @@ def process_nmrexp_parquet(parquet_file: str, output_dir: str):
 
 if __name__ == "__main__":
     nmrexp_file = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/NMR_IR/DATASET/Labels2Literature/data/raw_data/NMRexp_10to24_1_0811.parquet"
-    process_nmrexp_parquet(nmrexp_file, output_dir="../data/nmrexp/processed")
+    # output_dir = "../data/nmrexp/processed"
+    output_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/nmrexp"
+    process_nmrexp_parquet(nmrexp_file, output_dir)

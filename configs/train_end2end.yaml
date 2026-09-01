@@ -5,15 +5,14 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-5-end2end
-exp_name: 2gpu-prior-refiner-greedy-dim512-cutoff30rbf96
+exp_name: 2gpu-prior-refinerfreeze-greedy-dim512-cutoff30rbf96
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 ckpt_path: null
 # At a stage boundary, set this to the previous end-to-end checkpoint and keep
 # ckpt_path=null. This restores weights without its incompatible optimizer.
-weights_only_checkpoint: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/2gpu-refiner-greedy-dim512_2026-08-31_16-19-33/checkpoints/last.ckpt
-# /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/test-dim512-pooled-spectrum-residual-egnn_2026-08-24_01-17-43/checkpoints/last.ckpt
+weights_only_checkpoint: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/2gpu-refiner-greedy-dim512-cutoff30rbf96_2026-08-31_23-10-55/checkpoints/last.ckpt
 test: false
 optimized_metric: val/loss
 
@@ -169,8 +168,8 @@ lit_module:
     hidden_dim: 256
     edge_dim: 5
     num_layers: 4
-    num_rbf: 32
-    distance_cutoff: 8.0 # rbf_max_distance; RBF centers = linspace(0, distance_cutoff, num_rbf)
+    num_rbf: 96 # 32
+    distance_cutoff: 30.0 # 8.0 # rbf_max_distance; RBF centers = linspace(0, distance_cutoff, num_rbf)
     # Total nominal movement budget across all EGNN layers (angstrom).
     max_coordinate_step: 1.5
     dropout: 0.0

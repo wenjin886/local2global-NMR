@@ -7,14 +7,14 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-1-nmr2fragment
-exp_name: joint-bixt-fragment-Cvalw0.1-d512
+exp_name: joint-fragment-Cvalw0.1-d512
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
 
 # ckpt_path: null
 # Supply the Stage-0 checkpoint on the command line.
-ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-0-nmr2smiles/joint-bixt-smiles-d512_2026-07-26_22-22-33/checkpoints/epoch=078.ckpt
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-0-nmr2smiles/joint-smiles-d512_2026-08-30_18-21-41/checkpoints/last.ckpt
 only_load_weights: true
 load_weights_strict: true
 
@@ -28,9 +28,9 @@ datamodule:
   train_path: ${data_path}/train.pt
   val_path: ${data_path}/val.pt
   test_path: ${data_path}/test.pt
-  train_batch_size: 128
+  train_batch_size: 256
   val_batch_size: 64
-  num_workers: 0
+  num_workers: 1
   pin_memory: false
   val_generation_size: 1024
   val_generation_seed: 0
@@ -44,7 +44,7 @@ datamodule:
     normalize_h_j: true
     encode_multiplicity: false
     encode_smiles: false
-    max_multiplicity_classes: 512
+    max_multiplicity_classes: 122
 
 lit_module:
   _target_: src.lit.module.LitNMRToGraph
@@ -66,7 +66,7 @@ lit_module:
     max_multiplicity_classes: 122
     use_smiles_loss: true
     use_smiles_conditioning: false
-    use_smiles_joint_bixt: true
+    use_smiles_joint_bixt: false
     smiles_memory: joint
     num_smiles_layers: 5
     max_smiles_length: 75
