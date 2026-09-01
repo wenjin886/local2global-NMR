@@ -5,14 +5,14 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-5-end2end
-exp_name: 2gpu-refiner-greedy-dim512
+exp_name: 2gpu-prior-refiner-greedy-dim512-cutoff30rbf96
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
-ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/refiner-greedy-dim512_2026-08-30_19-00-15/checkpoints/last.ckpt
+ckpt_path: null
 # At a stage boundary, set this to the previous end-to-end checkpoint and keep
 # ckpt_path=null. This restores weights without its incompatible optimizer.
-weights_only_checkpoint: null
+weights_only_checkpoint: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/2gpu-refiner-greedy-dim512_2026-08-31_16-19-33/checkpoints/last.ckpt
 # /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/test-dim512-pooled-spectrum-residual-egnn_2026-08-24_01-17-43/checkpoints/last.ckpt
 test: false
 optimized_metric: val/loss
@@ -60,7 +60,7 @@ lit_module:
   # no parameters, but stays differentiable so coordinate/NMR gradients can
   # reach SoftTopologyPrior.
   freeze_nmr_to_graph: true
-  freeze_topology_prior: true
+  freeze_topology_prior: false
   freeze_shift_model: true
   input_shifts_are_normalized: true
   graph_loss_weight: 0.0
