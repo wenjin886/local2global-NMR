@@ -14,8 +14,8 @@ log_path: ${output_dir}/logs
 
 # ckpt_path: null
 # Supply the Stage-0 checkpoint on the command line.
-ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-0-nmr2smiles/joint-smiles-d512_2026-08-30_18-21-41/checkpoints/last.ckpt
-only_load_weights: true
+ckpt_path: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-1-nmr2fragment/joint-fragment-Cvalw0.1-d512_2026-09-01_23-08-32/checkpoints/last.ckpt
+only_load_weights: false
 load_weights_strict: true
 
 hidden_dim: 512
