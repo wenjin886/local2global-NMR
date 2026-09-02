@@ -55,27 +55,27 @@ lit_module:
   topology_prior_checkpoint: ${topology_prior_checkpoint}
   shift_model_checkpoint: ${shift_model_checkpoint}
   checkpoint_strict: true
-  # Stage 2 trains graph correction plus coordinate refinement. The solver has
-  # no parameters, but stays differentiable so coordinate/NMR gradients can
-  # reach SoftTopologyPrior.
-  freeze_nmr_to_graph: true
+  # SSL corrector-only probe: only SoftTopologyPrior is trainable. The frozen
+  # refiner still runs with autograd enabled so NMR/coordinate gradients can
+  # pass through it and the differentiable solver to the prior.
+  freeze_nmr_encoder: true
+  freeze_nmr_graph_branch: true
+  freeze_nmr_smiles_branch: true
   freeze_topology_prior: false
+  freeze_coordinate_refiner: true
   freeze_shift_model: true
   input_shifts_are_normalized: true
   graph_loss_weight: 0.0
   nmr_loss_weight: 1.0
   chemistry_loss_weight: 0.1
-  # Keep a weak drift regularizer without preventing the refiner from repairing
-  # substantially displaced fragments.
+  # Label-free regularizer on the fixed refiner's coordinate displacement.
   displacement_loss_weight: 0.001
   # Correct-class cross entropy also sharpens confidence. We deliberately do
   # not minimize entropy alone, which could reinforce a confidently wrong edge.
   corrected_edge_loss_weight: 0.0
   corrected_attachment_loss_weight: 0.0
   topology_residual_loss_weight: 1.0e-3
-  # Initial phase: start=end=0 keeps every training batch teacher-forced.
-  # On a later resume set greedy_probability_end=1.0; the resumed run first
-  # receives teacher_only_steps and then begins the transition automatically.
+  # SSL never exposes target SMILES through teacher forcing.
   smiles_loss_weight: 0.0
   greedy_probability_start: 1.0
   greedy_probability_end: 1.0
@@ -84,7 +84,13 @@ lit_module:
   greedy_schedule: cosine
   greedy_sampling_seed: ${seed}
   learning_rate: 1.0e-4
-  topology_learning_rate: 1.0e-5
+  # Separate groups make later graph-branch/encoder unfreezing explicit and
+  # prevent pretrained NMRToGraph parameters from falling into the 1e-4
+  # catch-all group.
+  nmr_encoder_learning_rate: 3.0e-7
+  nmr_graph_learning_rate: 1.0e-6
+  nmr_smiles_learning_rate: 1.0e-6
+  topology_learning_rate: 3.0e-6
   refiner_learning_rate: 1.0e-4
   weight_decay: 1.0e-5
   validation_examples: 9

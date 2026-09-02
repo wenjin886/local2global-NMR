@@ -94,6 +94,22 @@ class EndToEndNMRModule(pl.LightningModule):
         "refiner_step_saturation_fraction",
     )
 
+    _NMR_ENCODER_ROOTS = frozenset(
+        {
+            "atom_embedding",
+            "h_peak_embedding",
+            "c_peak_embedding",
+            "joint_encoder",
+        }
+    )
+    _NMR_SMILES_ROOTS = frozenset(
+        {
+            "smiles_decoder",
+            "atom_smiles_layer",
+            "smiles_joint_bixt",
+        }
+    )
+
     def __init__(
         self,
         nmr_to_graph: NMRToGraph,
@@ -106,8 +122,12 @@ class EndToEndNMRModule(pl.LightningModule):
         topology_prior_checkpoint: Optional[str] = None,
         shift_model_checkpoint: Optional[str] = None,
         checkpoint_strict: bool = True,
-        freeze_nmr_to_graph: bool = True,
+        freeze_nmr_to_graph: Optional[bool] = None,
+        freeze_nmr_encoder: bool = True,
+        freeze_nmr_graph_branch: bool = True,
+        freeze_nmr_smiles_branch: bool = True,
         freeze_topology_prior: bool = True,
+        freeze_coordinate_refiner: bool = False,
         freeze_shift_model: bool = True,
         input_shifts_are_normalized: bool = True,
         graph_loss_weight: float = 1.0,
@@ -125,6 +145,9 @@ class EndToEndNMRModule(pl.LightningModule):
         greedy_schedule: str = "cosine",
         greedy_sampling_seed: int = 42,
         learning_rate: float = 1e-4,
+        nmr_encoder_learning_rate: Optional[float] = None,
+        nmr_graph_learning_rate: Optional[float] = None,
+        nmr_smiles_learning_rate: Optional[float] = None,
         topology_learning_rate: Optional[float] = None,
         refiner_learning_rate: Optional[float] = None,
         weight_decay: float = 1e-5,
@@ -144,6 +167,13 @@ class EndToEndNMRModule(pl.LightningModule):
             raise ValueError("curriculum step counts must be non-negative")
         if greedy_schedule not in {"linear", "cosine"}:
             raise ValueError("greedy_schedule must be 'linear' or 'cosine'")
+        # Backward-compatible whole-module switch. New staged runs should use
+        # the three explicit scope flags so the pretrained spectrum encoder can
+        # remain fixed while the graph branch adapts.
+        if freeze_nmr_to_graph is not None:
+            freeze_nmr_encoder = bool(freeze_nmr_to_graph)
+            freeze_nmr_graph_branch = bool(freeze_nmr_to_graph)
+            freeze_nmr_smiles_branch = bool(freeze_nmr_to_graph)
         self.nmr_to_graph = nmr_to_graph
         self.graph_criterion = graph_criterion
         if float(self.graph_criterion.smiles_weight) != 0.0:
@@ -187,8 +217,15 @@ class EndToEndNMRModule(pl.LightningModule):
             strict=checkpoint_strict,
         )
         self._set_frozen(self.shift_model, True)
-        self._set_frozen(self.nmr_to_graph, freeze_nmr_to_graph)
+        self._set_nmr_trainability(
+            freeze_encoder=freeze_nmr_encoder,
+            freeze_graph_branch=freeze_nmr_graph_branch,
+            freeze_smiles_branch=freeze_nmr_smiles_branch,
+        )
         self._set_frozen(self.topology_prior, freeze_topology_prior)
+        self._set_frozen(
+            self.coordinate_refiner, freeze_coordinate_refiner
+        )
         self._validation_examples: List[Dict[str, Any]] = []
         self._validation_3d_sums: Dict[str, float] = {}
         self._validation_3d_counts: Dict[str, int] = {}
@@ -202,15 +239,69 @@ class EndToEndNMRModule(pl.LightningModule):
         if frozen:
             module.eval()
 
+    @classmethod
+    def _nmr_parameter_scope(cls, parameter_name: str) -> str:
+        root = parameter_name.split(".", 1)[0]
+        if root in cls._NMR_ENCODER_ROOTS:
+            return "encoder"
+        if root in cls._NMR_SMILES_ROOTS:
+            return "smiles_branch"
+        return "graph_branch"
+
+    def _set_nmr_trainability(
+        self,
+        freeze_encoder: bool,
+        freeze_graph_branch: bool,
+        freeze_smiles_branch: bool,
+    ) -> None:
+        frozen_by_scope = {
+            "encoder": freeze_encoder,
+            "graph_branch": freeze_graph_branch,
+            "smiles_branch": freeze_smiles_branch,
+        }
+        for name, parameter in self.nmr_to_graph.named_parameters():
+            parameter.requires_grad_(
+                not frozen_by_scope[self._nmr_parameter_scope(name)]
+            )
+        self._set_frozen_nmr_scopes_to_eval()
+
+    def _nmr_scope_modules(self, scope: str) -> List[nn.Module]:
+        modules = []
+        for name, module in self.nmr_to_graph.named_children():
+            if module is not None and self._nmr_parameter_scope(name) == scope:
+                modules.append(module)
+        return modules
+
+    def _set_frozen_nmr_scopes_to_eval(self) -> None:
+        frozen_by_scope = {
+            "encoder": bool(self.hparams.freeze_nmr_encoder),
+            "graph_branch": bool(self.hparams.freeze_nmr_graph_branch),
+            "smiles_branch": bool(self.hparams.freeze_nmr_smiles_branch),
+        }
+        if all(frozen_by_scope.values()):
+            self.nmr_to_graph.eval()
+            return
+        for scope, frozen in frozen_by_scope.items():
+            if frozen:
+                for module in self._nmr_scope_modules(scope):
+                    module.eval()
+
+    def _nmr_is_fully_frozen(self) -> bool:
+        return not any(
+            parameter.requires_grad
+            for parameter in self.nmr_to_graph.parameters()
+        )
+
     def train(self, mode: bool = True):
         super().train(mode)
         # Lightning recursively toggles descendants. Keep frozen evaluators
         # deterministic while retaining autograd with respect to coordinates.
         self.shift_model.eval()
-        if bool(self.hparams.freeze_nmr_to_graph):
-            self.nmr_to_graph.eval()
+        self._set_frozen_nmr_scopes_to_eval()
         if bool(self.hparams.freeze_topology_prior):
             self.topology_prior.eval()
+        if bool(self.hparams.freeze_coordinate_refiner):
+            self.coordinate_refiner.eval()
         return self
 
     @staticmethod
@@ -247,7 +338,7 @@ class EndToEndNMRModule(pl.LightningModule):
             # greedy generation.
             graph_inputs["smiles_input_ids"] = None
             graph_inputs["smiles_input_mask"] = None
-        if bool(self.hparams.freeze_nmr_to_graph):
+        if self._nmr_is_fully_frozen():
             with torch.no_grad():
                 graph_output = self.nmr_to_graph(
                     **graph_inputs,
@@ -268,7 +359,7 @@ class EndToEndNMRModule(pl.LightningModule):
         # Neutral zeros avoid leaking it from target SMILES/graph labels.
         formal_charges = torch.zeros_like(batch.atom_types)
         freeze_entire_upstream = bool(
-            self.hparams.freeze_nmr_to_graph
+            self._nmr_is_fully_frozen()
             and self.hparams.freeze_topology_prior
         )
         if freeze_entire_upstream:
@@ -1338,23 +1429,56 @@ class EndToEndNMRModule(pl.LightningModule):
     def configure_optimizers(self):
         groups = []
         assigned = set()
-        module_groups = (
+        configured_groups = [
             (
                 "topology_prior",
-                self.topology_prior,
+                [
+                    parameter
+                    for parameter in self.topology_prior.parameters()
+                    if parameter.requires_grad
+                ],
                 self.hparams.topology_learning_rate,
             ),
             (
                 "coordinate_refiner",
-                self.coordinate_refiner,
+                [
+                    parameter
+                    for parameter in self.coordinate_refiner.parameters()
+                    if parameter.requires_grad
+                ],
                 self.hparams.refiner_learning_rate,
             ),
-        )
-        for name, module, configured_lr in module_groups:
-            parameters = [
-                parameter for parameter in module.parameters()
-                if parameter.requires_grad
+        ]
+        nmr_parameters = {
+            "encoder": [],
+            "graph_branch": [],
+            "smiles_branch": [],
+        }
+        for parameter_name, parameter in self.nmr_to_graph.named_parameters():
+            if parameter.requires_grad:
+                nmr_parameters[
+                    self._nmr_parameter_scope(parameter_name)
+                ].append(parameter)
+        configured_groups.extend(
+            [
+                (
+                    "nmr_encoder",
+                    nmr_parameters["encoder"],
+                    self.hparams.nmr_encoder_learning_rate,
+                ),
+                (
+                    "nmr_graph_branch",
+                    nmr_parameters["graph_branch"],
+                    self.hparams.nmr_graph_learning_rate,
+                ),
+                (
+                    "nmr_smiles_branch",
+                    nmr_parameters["smiles_branch"],
+                    self.hparams.nmr_smiles_learning_rate,
+                ),
             ]
+        )
+        for name, parameters, configured_lr in configured_groups:
             if parameters:
                 assigned.update(id(parameter) for parameter in parameters)
                 groups.append(

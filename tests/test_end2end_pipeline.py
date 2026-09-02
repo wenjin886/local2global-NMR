@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -145,6 +146,78 @@ def test_pipeline_generates_coordinates_without_xyz_and_keeps_shift_frozen():
     loss.backward()
     assert all(parameter.grad is None for parameter in module.shift_model.parameters())
     assert module.coordinate_refiner.layers[0].coordinate_gate.weight.grad is not None
+
+
+def test_frozen_refiner_passes_ssl_gradient_to_trainable_prior():
+    module = _module(
+        freeze_topology_prior=False,
+        freeze_coordinate_refiner=True,
+        graph_loss_weight=0.0,
+        smiles_loss_weight=0.0,
+        corrected_edge_loss_weight=0.0,
+        corrected_attachment_loss_weight=0.0,
+        nmr_loss_weight=1.0,
+        chemistry_loss_weight=0.1,
+    )
+    batch = _batch()
+    output = module(batch, teacher_force_smiles=False)
+    loss = module._losses(batch, output)["loss"]
+    loss.backward()
+
+    assert not any(
+        parameter.requires_grad
+        for parameter in module.coordinate_refiner.parameters()
+    )
+    assert all(
+        parameter.grad is None
+        for parameter in module.coordinate_refiner.parameters()
+    )
+    assert any(
+        parameter.grad is not None
+        for parameter in module.topology_prior.parameters()
+    )
+
+
+def test_nmr_encoder_and_graph_branch_have_independent_freeze_scopes():
+    module = _module(
+        freeze_nmr_encoder=True,
+        freeze_nmr_graph_branch=False,
+        freeze_nmr_smiles_branch=True,
+    )
+    by_scope = {"encoder": [], "graph_branch": [], "smiles_branch": []}
+    for name, parameter in module.nmr_to_graph.named_parameters():
+        by_scope[module._nmr_parameter_scope(name)].append(parameter)
+
+    assert by_scope["encoder"]
+    assert by_scope["graph_branch"]
+    assert not any(parameter.requires_grad for parameter in by_scope["encoder"])
+    assert all(
+        parameter.requires_grad for parameter in by_scope["graph_branch"]
+    )
+    assert not any(
+        parameter.requires_grad for parameter in by_scope["smiles_branch"]
+    )
+
+
+def test_optimizer_uses_named_stage_specific_learning_rates():
+    module = _module(
+        freeze_topology_prior=False,
+        freeze_coordinate_refiner=True,
+        freeze_nmr_encoder=True,
+        freeze_nmr_graph_branch=False,
+        freeze_nmr_smiles_branch=True,
+        topology_learning_rate=3e-6,
+        nmr_graph_learning_rate=1e-6,
+    )
+    module._trainer = SimpleNamespace(max_epochs=4)
+    optimizer = module.configure_optimizers()["optimizer"]
+    learning_rates = {
+        group["name"]: group["lr"] for group in optimizer.param_groups
+    }
+    assert learning_rates == {
+        "topology_prior": 3e-6,
+        "nmr_graph_branch": 1e-6,
+    }
 
 
 def test_refiner_is_translation_equivariant():

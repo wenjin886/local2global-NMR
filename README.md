@@ -631,13 +631,32 @@ SSL training is fully greedy from its first step; validation is also always
 greedy. W&B records the scheduled and realized greedy ratios so accidental
 teacher forcing is visible.
 
-The initial SSL refiner-only stage freezes all pretrained components and trains
-the coordinate refiner using NMR reconstruction plus label-free prior losses.
-Later SSL stages may progressively unfreeze `SoftTopologyPrior`, `NMRToGraph`,
-and finally the 3D-to-NMR model, but unfreezing a module does not authorize
-target-graph or target-SMILES supervision: the SSL loss boundary remains the
-same throughout. The solver has no learned parameters and remains
-differentiable, allowing coordinate, prior and NMR gradients to reach whichever
-upstream modules are currently trainable. At a stage boundary use
-`weights_only_checkpoint=/path/to/refiner-stage.ckpt` with `ckpt_path=null` so
-model weights are restored without the old optimizer parameter groups.
+The SSL curriculum uses independently frozen parameter scopes:
+
+1. refiner-only geometry calibration;
+2. corrector-only adaptation with `NMRToGraph` and the refiner frozen;
+3. `NMRToGraph` graph branch plus corrector, while the spectrum encoder and
+   refiner remain frozen;
+4. a short refiner-only recalibration after the graph distribution changes;
+5. bounded joint refinement, unfreezing the spectrum encoder last and at the
+   smallest learning rate.
+
+Every stage continues to use only NMR reconstruction and label-free prior
+losses. Unfreezing a module does not authorize target-graph or target-SMILES
+supervision: the SSL loss boundary remains unchanged. The relevant config
+switches are `freeze_nmr_encoder`, `freeze_nmr_graph_branch`,
+`freeze_nmr_smiles_branch`, `freeze_topology_prior`, and
+`freeze_coordinate_refiner`. A frozen refiner remains in the autograd graph:
+its parameters and stochastic training behaviour are frozen, but NMR gradients
+still pass through its coordinate transformation and the parameter-free solver
+to a trainable corrector. The corresponding optimizer groups have separate
+`nmr_encoder_learning_rate`, `nmr_graph_learning_rate`,
+`nmr_smiles_learning_rate`, `topology_learning_rate`, and
+`refiner_learning_rate` settings.
+
+The checked-in `train_end2end.yaml` selects the corrector-only SSL probe: only
+`SoftTopologyPrior` is trainable, all target-label loss weights are zero, and
+training is fully greedy. At a stage boundary use
+`weights_only_checkpoint=/path/to/previous-stage.ckpt` with `ckpt_path=null` so
+model weights are restored without incompatible optimizer state or parameter
+groups.
