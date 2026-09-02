@@ -106,20 +106,32 @@ import pandas as pd
 # atom_number_diff_env                                                      18
 # atom_number_abstract                                                    17.0
 
+from src.data.dataset import canonicalize_smiles_without_stereo
 def process_nmrexp_parquet(parquet_file: str, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
     df = pd.read_parquet(parquet_file)
     smi_nmr_check_dict = {}
 
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing rows"):
-        
-        
-        nmr_solvent = row['nmr_solvent']
-        if nmr_solvent != 'CDCl3':
-            # print(f"Skipping molecule {row['smiles']} due to unsupported solvent: {nmr_solvent}")
+    print(f"Number of nmr data in the parquet file: {len(df)}")
+    df = df[df['nmr_solvent'] == 'CDCl3']
+    print(f"Number of nmr data from CDCl3 in the parquet file: {len(df)}")
+    df = df[df['nmr_type'].isin(['13C NMR', '1H NMR'])]
+    print(f"Number of nmr data from 13C and 1H NMR in the parquet file: {len(df)}")
+
+    grouped_df = df.groupby(['smiles', 'filename'])
+    processed_data = {'smiles': [], 'cnmr': [], 'hnmr': [], 'filename': [], 'clean_smiles': []}
+
+    print(f"Number of grouped data: {len(grouped_df)} with key (smiles, filename)")
+    for (smiles, filename), group in tqdm(grouped_df, total=len(grouped_df), desc="Processing grouped data"):
+        # print(smiles, filename)
+        # print(group)
+
+        if '.' in smiles: # skip molecules with multiple fragments
             continue
-        
-        smiles = row['smiles']
+        if len(group) < 2: # skip molecules with less than 2 entries
+            continue
+
+        # smiles
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             print(f"Skipping molecule {smiles} due to invalid SMILES.")
@@ -130,56 +142,32 @@ def process_nmrexp_parquet(parquet_file: str, output_dir: str):
             for atom in mol.GetAtoms():
                 atom_type = atom.GetSymbol()
                 if atom_type not in ATOM_TYPE_TO_CHARGE:
-                    # print(f"Skipping molecule {smiles} due to unsupported atom type: {atom_type}")
                     skip_mol = True
                     break
             if skip_mol:
                 continue
-
-        if '13C' in row['nmr_type']:
-            if smiles not in smi_nmr_check_dict:
-                smi_nmr_check_dict[smiles] = {'cnmr': 0, 'hnmr': 0}
-            smi_nmr_check_dict[smiles]['cnmr'] += 1
-        elif '1H' in row['nmr_type']:
-            if smiles not in smi_nmr_check_dict:
-                smi_nmr_check_dict[smiles] = {'cnmr': 0, 'hnmr': 0}
-            smi_nmr_check_dict[smiles]['hnmr'] += 1
-
-        # if len(smi_nmr_check_dict) == 300:
-        #     break
-    
-    df_smi_check = pd.DataFrame(smi_nmr_check_dict).T.reset_index().rename(columns={'index': 'smiles'})
-    
-    df_smi_chnmr = df_smi_check[(df_smi_check['cnmr'] > 0) & (df_smi_check['hnmr'] > 0)]
-    print(f"Number of molecules with both 13C and 1H NMR data in CDCl3: {len(df_smi_chnmr)} from {len(df_smi_check)} molecules.")
-
-    
-    processed_data = {'smiles': [], 'cnmr': [], 'hnmr': []}
-    for _, row in tqdm(df_smi_chnmr.iterrows(), total=len(df_smi_chnmr), desc="Processing molecules with both 13C and 1H NMR data"):
-        smiles = row['smiles']
-        df_smiles = df[df['smiles'] == smiles]
         
-        if len(df_smiles) > 2:
-        
-            file_name = df_smiles.iloc[0]['filename']
-            df_smiles = df_smiles[df_smiles['filename'] == file_name]
+        # check if the molecule has both 13C and 1H NMR data
+        num_h = (group['nmr_type'] == '1H NMR').sum()
+        num_c = (group['nmr_type'] == '13C NMR').sum()
+        if num_h != 1 or num_c != 1:
+            continue
 
-            if len(df_smiles[df_smiles['nmr_type'] == '13C NMR']) != 1:
-                print(f"Skipping molecule {smiles} due to multiple 13C NMR entries in the same file.")
-                continue
-            if len(df_smiles[df_smiles['nmr_type'] == '1H NMR']) != 1:
-                print(f"Skipping molecule {smiles} due to multiple 1H NMR entries in the same file.")
-                continue
+        clean_smiles = canonicalize_smiles_without_stereo(smiles)
         processed_data['smiles'].append(smiles)
         processed_data['cnmr'].append(
-            df_smiles[df_smiles['nmr_type'] == '13C NMR']['nmr_processed'].iloc[0])
+            group[group['nmr_type'] == '13C NMR']['nmr_processed'].iloc[0])
         processed_data['hnmr'].append(
-            df_smiles[df_smiles['nmr_type'] == '1H NMR']['nmr_processed'].iloc[0])
-            
-      
+            group[group['nmr_type'] == '1H NMR']['nmr_processed'].iloc[0])
+        processed_data['filename'].append(filename)
+        processed_data['clean_smiles'].append(clean_smiles)
+
+        # break
+
       
     df_processed = pd.DataFrame(processed_data)
     print(df_processed)
+    # raise Exception("Stop here")
     df_processed.to_parquet(os.path.join(output_dir, "nmrexp_processed.parquet"), index=False)
 
 
