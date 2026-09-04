@@ -170,16 +170,26 @@ def process_nmrexp_parquet(parquet_file: str, output_dir: str):
     # raise Exception("Stop here")
     df_processed.to_parquet(os.path.join(output_dir, "nmrexp_processed.parquet"), index=False)
 
+def check_nmrshiftdb2_data(nmrshiftdb2_smi_path: str, nmrexp_parquet_path: str, output_dir: str):
+    smi_nmr_check_dict = json.load(open(nmrshiftdb2_smi_path, 'r'))
+    smi_nmrshiftdb2_list = smi_nmr_check_dict['valid'] + smi_nmr_check_dict['train']
 
-
-    # # Save the dictionary as a pickle file
-    # output_file = os.path.join(file_dir, f"{smiles}.pkl")
-    # with open(output_file, 'wb') as f:
-    #     pickle.dump(data_dict, f)
-  
+    df = pd.read_parquet(nmrexp_parquet_path)
+    smiles_list = df['clean_smiles'].unique().tolist()
+    exist_smiles_list = []
+    for smiles in tqdm(smiles_list, total=len(smiles_list), desc="Checking molecules in nmrshiftdb2"):
+        if smiles in smi_nmrshiftdb2_list:
+            exist_smiles_list.append(smiles)
+    num_not_exist_smiles = set(smi_nmrshiftdb2_list) - set(exist_smiles_list)
+    print(f"Number of not exist smiles: {len(num_not_exist_smiles)}")
 
 if __name__ == "__main__":
     nmrexp_file = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/NMR_IR/DATASET/Labels2Literature/data/raw_data/NMRexp_10to24_1_0811.parquet"
     # output_dir = "../data/nmrexp/processed"
     output_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/nmrexp"
-    process_nmrexp_parquet(nmrexp_file, output_dir)
+    # process_nmrexp_parquet(nmrexp_file, output_dir)
+    
+    nmrshiftdb2_smi_path = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/nmrshiftdb_2024/clean_smiles_chnmr.json"
+    nmrexp_parquet_path = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/nmrexp/nmrexp_processed.parquet"
+    output_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/nmrexp"
+    check_nmrshiftdb2_data(nmrshiftdb2_smi_path, nmrexp_parquet_path, output_dir)

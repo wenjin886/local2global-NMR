@@ -106,11 +106,15 @@ def screen_nmr_data(db_dir: str, output_dir: str):
     files = os.listdir(db_dir)
 
     idx_chnmr_dict = {}
+    clean_smiles_chnmr_dict = {}
     for f in files:
         if not f.endswith('.lmdb'):
             continue
+        
         f_name = f.split('.')[0]
         idx_chnmr_dict[f_name] = []
+        clean_smiles_chnmr_dict[f_name] = []
+
         f_path = os.path.join(db_dir, f)
         dataset = LMDBDataset(f_path)
         for idx in tqdm(range(len(dataset)), total=len(dataset), desc=f"Processing dataset: {f}"):
@@ -129,24 +133,34 @@ def screen_nmr_data(db_dir: str, output_dir: str):
             atoms_target_mask = data['atoms_target_mask'] # np.array
             charges = np.array([ATOM_TYPE_TO_CHARGE[atom] for atom in atoms])
             nmr_type = set(charges[atoms_target_mask.astype(bool)].tolist())
-            if (1 in nmr_type and 6 in nmr_type): # H and C
-                idx_chnmr_dict[f_name].append(idx)
-            else:
+            if not (1 in nmr_type and 6 in nmr_type): # H and C
+                
                 print(f"Skipping data {idx} due to invalid NMR type {nmr_type}.")
                 continue
-        
+
+            idx_chnmr_dict[f_name].append(idx)
+            smiles = canonicalize_smiles_without_stereo(data['smiles'])
+            if smiles not in clean_smiles_chnmr_dict[f_name]:
+                clean_smiles_chnmr_dict[f_name].append(smiles)
+
         print(f"{f_name}: Number of molecules with H and C NMR: {len(idx_chnmr_dict[f_name])} from {len(dataset)}")
     print(f"Total number of molecules with H and C NMR: {sum([len(idx_chnmr_dict[f_name]) for f_name in idx_chnmr_dict])} from {len(dataset)}")
+
     with open(os.path.join(output_dir, "idx_chnmr.json"), "w") as f:
         json.dump(idx_chnmr_dict, f, indent=4)
+    
+    with open(os.path.join(output_dir, "clean_smiles_chnmr.json"), "w") as f:
+        json.dump(clean_smiles_chnmr_dict, f, indent=4)
+    print(f"Saved idx_chnmr.json and clean_smiles_chnmr.json to {output_dir}")
+
                 
   
   
 
 if __name__ == "__main__":
-    # db_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/nmrnet-model-data/data/nmrshiftdb2_2024/All"
-    db_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/local2global/data/nmrshifdb2"
+    db_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/nmrnet-model-data/data/nmrshiftdb2_2024/All"
+    # db_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/local2global/data/nmrshifdb2"
     # output_dir = "../data/nmrexp/processed"
-    # output_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/nmrshiftdb_2024"
-    output_dir = db_dir
+    output_dir = "/rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/data/nmrshiftdb_2024"
+    # output_dir = db_dir
     screen_nmr_data(db_dir, output_dir)
