@@ -5,7 +5,7 @@ data_path: ${oc.env:DATA_PATH}
 data_name: uspto
 
 group: step-5-end2end
-exp_name: 2gpu-graph-prior-refinerfreeze-greedy-dim512-cutoff30rbf96-0.1graphloss
+exp_name: 2gpu-graph-prior-refiner-greedy-dim512-cutoff30rbf96-0.1graphloss
 exp_save_dir_name: ${group}/${exp_name}_${now:%Y-%m-%d}_${now:%H-%M-%S}
 output_dir: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/${data_name}/${exp_save_dir_name}
 log_path: ${output_dir}/logs
@@ -13,7 +13,8 @@ ckpt_path: null
 # /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/2gpu-prior-refinerfreeze-greedy-dim512-cutoff30rbf96_2026-09-02_01-18-00/checkpoints/last.ckpt
 # At a stage boundary, set this to the previous end-to-end checkpoint and keep
 # ckpt_path=null. This restores weights without its incompatible optimizer.
-weights_only_checkpoint: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/2gpu-prior-refinerfreeze-greedy-dim512-cutoff30rbf96_2026-09-02_09-36-27/checkpoints/last.ckpt
+# weights_only_checkpoint: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/2gpu-graph-prior-refinerfreeze-greedy-dim512-cutoff30rbf96_2026-09-02_14-18-09/checkpoints/last.ckpt
+weights_only_checkpoint: /rds/projects/c/chenlv-ai-and-chemistry/wuwj/Unsupervised_NMR/exp/local2global/uspto/step-5-end2end/2gpu-graph-prior-refinerfreeze-greedy-dim512-cutoff30rbf96-0.1graphloss_2026-09-02_23-11-18/checkpoints/last.ckpt
 test: false
 optimized_metric: val/loss
 
@@ -63,7 +64,7 @@ lit_module:
   freeze_nmr_graph_branch: false
   freeze_nmr_smiles_branch: true
   freeze_topology_prior: false
-  freeze_coordinate_refiner: true
+  freeze_coordinate_refiner: false
   freeze_shift_model: true
   input_shifts_are_normalized: true
   graph_loss_weight: 0.1
