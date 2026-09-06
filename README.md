@@ -654,9 +654,14 @@ to a trainable corrector. The corresponding optimizer groups have separate
 `nmr_smiles_learning_rate`, `topology_learning_rate`, and
 `refiner_learning_rate` settings.
 
-The checked-in `train_end2end.yaml` selects the corrector-only SSL probe: only
-`SoftTopologyPrior` is trainable, all target-label loss weights are zero, and
-training is fully greedy. At a stage boundary use
+The checked-in `train_end2end.yaml` keeps all target-label loss weights at zero
+and training fully greedy. Its independent freeze switches select the desired
+SSL stage. Label-free corrected-topology regularization is logged separately as
+`loss_topology_prior`; it combines maximum-neighbour overflow, soft carbon
+valence, the dataset-specific carbon minimum-degree and heavy-neighbour rules,
+and consistency between predicted fragments and corrected edges/attachments.
+These terms consume only atom types and model predictions. At a stage boundary
+use
 `weights_only_checkpoint=/path/to/previous-stage.ckpt` with `ckpt_path=null` so
 model weights are restored without incompatible optimizer state or parameter
 groups.

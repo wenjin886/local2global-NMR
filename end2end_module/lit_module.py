@@ -137,6 +137,12 @@ class EndToEndNMRModule(pl.LightningModule):
         smiles_loss_weight: float = 1.0,
         corrected_edge_loss_weight: float = 1.0,
         corrected_attachment_loss_weight: float = 1.0,
+        topology_prior_loss_weight: float = 0.0,
+        topology_neighbor_overflow_weight: float = 1.0,
+        topology_carbon_valence_weight: float = 0.25,
+        topology_carbon_min_degree_weight: float = 0.25,
+        topology_carbon_heavy_neighbor_weight: float = 0.25,
+        topology_fragment_consistency_weight: float = 0.25,
         topology_residual_loss_weight: float = 1e-3,
         greedy_probability_start: float = 0.0,
         greedy_probability_end: float = 0.0,
@@ -593,6 +599,13 @@ class EndToEndNMRModule(pl.LightningModule):
             else zero
         )
 
+        topology_prior_loss = zero
+        topology_prior_terms: Dict[str, torch.Tensor] = {}
+        if float(self.hparams.topology_prior_loss_weight) != 0.0:
+            topology_prior_loss, topology_prior_terms = (
+                self._label_free_topology_prior_loss(batch, output)
+            )
+
         topology_residual_loss = zero
         if float(self.hparams.topology_residual_loss_weight) != 0.0:
             edge_residual = corrected["edge_residual"][heavy_pair_mask]
@@ -616,6 +629,8 @@ class EndToEndNMRModule(pl.LightningModule):
             * corrected_edge_loss
             + float(self.hparams.corrected_attachment_loss_weight)
             * corrected_attachment_loss
+            + float(self.hparams.topology_prior_loss_weight)
+            * topology_prior_loss
             + float(self.hparams.topology_residual_loss_weight)
             * topology_residual_loss
         )
@@ -628,6 +643,7 @@ class EndToEndNMRModule(pl.LightningModule):
             "loss_displacement": displacement_loss,
             "loss_corrected_edge": corrected_edge_loss,
             "loss_corrected_attachment": corrected_attachment_loss,
+            "loss_topology_prior": topology_prior_loss,
             "loss_topology_residual": topology_residual_loss,
             "corrected_edge_entropy": corrected_edge_entropy,
             "corrected_edge_confidence": corrected_edge_confidence,
@@ -653,8 +669,101 @@ class EndToEndNMRModule(pl.LightningModule):
         values.update(
             {f"geometry_{key}": value for key, value in refined_terms.items()}
         )
+        values.update(
+            {
+                f"topology_prior_{key}": value
+                for key, value in topology_prior_terms.items()
+            }
+        )
         values.update(self._corrected_graph_metrics(batch, output))
         return values
+
+    def _label_free_topology_prior_loss(
+        self,
+        batch: GraphBatch,
+        output: Mapping[str, Any],
+    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Chemical priors on corrected topology without molecular labels."""
+        geometry = output["geometry"]
+        corrected_logits = output["topology"][
+            "corrected_heavy_edge_logits"
+        ]
+        corrected_outputs = {
+            "heavy_edge_logits": corrected_logits,
+            "heavy_edge_mask": geometry["heavy_pair_mask"],
+            "h_attachment_probabilities": geometry[
+                "h_attachment_probabilities"
+            ],
+            "heavy_mask": geometry["heavy_mask"],
+            # This is a prediction from the frozen/trainable graph branch, not
+            # a target fragment label.
+            "expected_fragment_counts": output["graph"][
+                "expected_fragment_counts"
+            ],
+        }
+        neighbor_overflow = (
+            self.graph_criterion.edge_total_neighbor_count_overflow_loss(
+                corrected_outputs, batch.atom_types
+            )
+        )
+        carbon_valence = self.graph_criterion.carbon_valence_loss(
+            corrected_outputs, batch.atom_types
+        )
+        fragment_consistency = (
+            self.graph_criterion.fragment_edge_consistency_loss(
+                corrected_outputs, batch.atom_types
+            )
+        )
+
+        probabilities = torch.softmax(corrected_logits, dim=-1)
+        heavy_pair_mask = geometry["heavy_pair_mask"].to(
+            probabilities.dtype
+        )
+        expected_heavy_neighbors = (
+            (1.0 - probabilities[..., 0]) * heavy_pair_mask
+        ).sum(dim=-1)
+        expected_h_neighbors = geometry[
+            "h_attachment_probabilities"
+        ].sum(dim=1)
+        expected_total_neighbors = (
+            expected_heavy_neighbors + expected_h_neighbors
+        )
+        carbon_mask = geometry["heavy_mask"] & batch.atom_types.eq(6)
+        if carbon_mask.any():
+            # Dataset-specific SSL priors: methane/CO are excluded and every
+            # carbon must have at least two total neighbours and one heavy
+            # neighbour. Soft hinge penalties retain useful gradients before
+            # an argmax topology changes.
+            carbon_min_degree = (
+                torch.relu(2.0 - expected_total_neighbors[carbon_mask]) / 2.0
+            ).square().mean()
+            carbon_heavy_neighbor = torch.relu(
+                1.0 - expected_heavy_neighbors[carbon_mask]
+            ).square().mean()
+        else:
+            carbon_min_degree = corrected_logits.sum() * 0.0
+            carbon_heavy_neighbor = corrected_logits.sum() * 0.0
+
+        terms = {
+            "neighbor_overflow": neighbor_overflow,
+            "carbon_valence": carbon_valence,
+            "carbon_min_degree": carbon_min_degree,
+            "carbon_heavy_neighbor": carbon_heavy_neighbor,
+            "fragment_consistency": fragment_consistency,
+        }
+        total = (
+            float(self.hparams.topology_neighbor_overflow_weight)
+            * neighbor_overflow
+            + float(self.hparams.topology_carbon_valence_weight)
+            * carbon_valence
+            + float(self.hparams.topology_carbon_min_degree_weight)
+            * carbon_min_degree
+            + float(self.hparams.topology_carbon_heavy_neighbor_weight)
+            * carbon_heavy_neighbor
+            + float(self.hparams.topology_fragment_consistency_weight)
+            * fragment_consistency
+        )
+        return total, terms
 
     @staticmethod
     def _corrected_graph_metrics(

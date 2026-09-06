@@ -57,9 +57,8 @@ lit_module:
   topology_prior_checkpoint: ${topology_prior_checkpoint}
   shift_model_checkpoint: ${shift_model_checkpoint}
   checkpoint_strict: true
-  # SSL corrector-only probe: only SoftTopologyPrior is trainable. The frozen
-  # refiner still runs with autograd enabled so NMR/coordinate gradients can
-  # pass through it and the differentiable solver to the prior.
+  # SSL stage controls. Frozen downstream modules remain differentiable with
+  # respect to their inputs so NMR gradients can still reach trainable scopes.
   freeze_nmr_encoder: true
   freeze_nmr_graph_branch: false
   freeze_nmr_smiles_branch: true
@@ -67,15 +66,23 @@ lit_module:
   freeze_coordinate_refiner: false
   freeze_shift_model: true
   input_shifts_are_normalized: true
-  graph_loss_weight: 0.1
+  # Supervised graph/SMILES objectives stay disabled throughout SSL.
+  graph_loss_weight: 0.0
   nmr_loss_weight: 1.0
   chemistry_loss_weight: 0.1
-  # Label-free regularizer on the fixed refiner's coordinate displacement.
+  # Label-free regularizer on the refiner's coordinate displacement.
   displacement_loss_weight: 0.001
   # Correct-class cross entropy also sharpens confidence. We deliberately do
   # not minimize entropy alone, which could reinforce a confidently wrong edge.
   corrected_edge_loss_weight: 0.0
   corrected_attachment_loss_weight: 0.0
+  # Label-free priors applied to the corrected topology, never target graph.
+  topology_prior_loss_weight: 0.1
+  topology_neighbor_overflow_weight: 1.0
+  topology_carbon_valence_weight: 0.25
+  topology_carbon_min_degree_weight: 0.25
+  topology_carbon_heavy_neighbor_weight: 0.25
+  topology_fragment_consistency_weight: 0.25
   topology_residual_loss_weight: 1.0e-3
   # SSL never exposes target SMILES through teacher forcing.
   smiles_loss_weight: 0.0

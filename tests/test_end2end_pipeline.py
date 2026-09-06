@@ -335,6 +335,51 @@ def test_zero_weight_supervised_losses_are_skipped_but_metrics_remain(
     assert 0.0 <= float(losses["corrected_graph_exact_match"]) <= 1.0
 
 
+def test_ssl_topology_prior_loss_uses_corrected_predictions_not_targets():
+    module = _module(
+        freeze_topology_prior=False,
+        freeze_coordinate_refiner=True,
+        graph_loss_weight=0.0,
+        nmr_loss_weight=0.0,
+        chemistry_loss_weight=0.0,
+        displacement_loss_weight=0.0,
+        smiles_loss_weight=0.0,
+        corrected_edge_loss_weight=0.0,
+        corrected_attachment_loss_weight=0.0,
+        topology_prior_loss_weight=1.0,
+        topology_residual_loss_weight=0.0,
+    )
+    batch = _batch()
+    output = module(batch, teacher_force_smiles=False)
+    original = module._losses(batch, output)
+
+    # These are validation-only labels in SSL. Changing all of them must not
+    # change the topology-prior objective computed from predictions.
+    batch.bond_types.fill_(4)
+    batch.h_attachment.fill_(0)
+    batch.heavy_fragment_labels.fill_(1)
+    batch.h_parent_fragment_labels.fill_(1)
+    batch.h_parent_types.fill_(8)
+    batch.smiles_target_ids.fill_(7)
+    changed_targets = module._losses(batch, output)
+
+    assert original["loss_graph"] == 0.0
+    assert torch.isfinite(original["loss_topology_prior"])
+    assert torch.allclose(
+        original["loss_topology_prior"],
+        changed_targets["loss_topology_prior"],
+    )
+    original["loss"].backward()
+    assert any(
+        parameter.grad is not None
+        for parameter in module.topology_prior.parameters()
+    )
+    assert all(
+        parameter.grad is None
+        for parameter in module.coordinate_refiner.parameters()
+    )
+
+
 def test_generated_structure_metrics_smiles_and_xyz(tmp_path: Path):
     atom_types = torch.tensor([6, 6, 1, 1, 1, 1, 1, 1])
     bonds = torch.zeros((8, 8), dtype=torch.long)
