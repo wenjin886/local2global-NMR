@@ -89,6 +89,7 @@ class LitNMRToGraph(pl.LightningModule):
             on_epoch=True,
             batch_size=batch.atom_types.size(0),
             add_dataloader_idx=False,
+            sync_dist=stage != "train",
         )
         if stage != "train":
             metrics = self._batch_metrics(
@@ -102,6 +103,7 @@ class LitNMRToGraph(pl.LightningModule):
                 on_epoch=True,
                 batch_size=batch.atom_types.size(0),
                 add_dataloader_idx=False,
+                sync_dist=True,
             )
             if self.validation_stage in {"fragment", "graph"}:
                 self._log_fragment_carbon_valence_metrics(
@@ -132,6 +134,7 @@ class LitNMRToGraph(pl.LightningModule):
                     on_epoch=True,
                     batch_size=batch.atom_types.size(0),
                     add_dataloader_idx=False,
+                    sync_dist=True,
                 )
                 if self.validation_stage in {"fragment", "graph"}:
                     self._log_fragment_carbon_valence_metrics(
@@ -150,6 +153,7 @@ class LitNMRToGraph(pl.LightningModule):
                 on_epoch=True,
                 batch_size=batch.atom_types.size(0),
                 add_dataloader_idx=False,
+                sync_dist=True,
             )
             if self.validation_stage in {"fragment", "graph"}:
                 self._log_fragment_carbon_valence_metrics(
@@ -170,6 +174,7 @@ class LitNMRToGraph(pl.LightningModule):
             on_epoch=True,
             batch_size=batch.atom_types.size(0),
             add_dataloader_idx=False,
+            sync_dist=True,
         )
         self._collect_validation_examples(outputs, batch)
         self._collect_graph_validation_examples(outputs, batch)
@@ -250,9 +255,26 @@ class LitNMRToGraph(pl.LightningModule):
             batch: GraphBatch,
     ) -> None:
         metrics = self._fragment_carbon_valence_metrics(outputs, batch)
-        for name, (value, denominator) in metrics.items():
-            if denominator == 0:
+        statistics = torch.stack([
+            torch.stack((
+                value * denominator,
+                value.new_tensor(float(denominator)),
+            ))
+            for value, denominator in metrics.values()
+        ])
+        if self.trainer.world_size > 1:
+            # Every rank enters one collective, including ranks whose local
+            # batch contains no item for one of the conditional metrics.
+            statistics = self.all_gather(
+                statistics, sync_grads=False
+            ).sum(dim=0)
+        for (name, _), (numerator, denominator_tensor) in zip(
+                metrics.items(), statistics
+        ):
+            global_denominator = int(denominator_tensor.item())
+            if global_denominator == 0:
                 continue
+            value = numerator / denominator_tensor
             # Weight epoch reduction by the metric's true denominator. This
             # gives exact carbon-level and molecule-level rates across batches.
             self.log(
@@ -260,8 +282,11 @@ class LitNMRToGraph(pl.LightningModule):
                 value,
                 on_step=False,
                 on_epoch=True,
-                batch_size=denominator,
+                batch_size=global_denominator,
                 add_dataloader_idx=False,
+                # The value has already been reduced above. All ranks log the
+                # same result, so a second distributed reduction is unnecessary.
+                sync_dist=False,
             )
 
     @staticmethod
